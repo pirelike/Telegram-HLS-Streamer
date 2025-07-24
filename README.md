@@ -88,9 +88,10 @@ if __name__ == "__main__":
     """
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
 
-## 4. Package Initializer (app/__init__.py)An empty file that tells Python to treat the app directory as a package.# This file can be empty.
-# Its presence tells Python that the 'app' directory is a package,
-# which allows for relative imports within the application.
+## 4. Package Initializer (app/__init__.py)An empty file that tells Python to treat the app directory as a package. 
+   This file can be empty.
+   Its presence tells Python that the 'app' directory is a package,
+   which allows for relative imports within the application.
 ## 5. Web App Backend (app/main.py)This is the main application file containing all the server-side logic.import os
 
     import os
