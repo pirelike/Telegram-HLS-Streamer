@@ -93,7 +93,7 @@ if __name__ == "__main__":
    Its presence tells Python that the 'app' directory is a package,
    which allows for relative imports within the application.
 ## 5. Web App Backend (app/main.py)This is the main application file containing all the server-side logic.import os
-      
+
       import os
       import subprocess
       import math
@@ -383,78 +383,6 @@ if __name__ == "__main__":
               await log_message(task_id, f"Error type: {type(e).__name__}", "ERROR")
               raise
       
-      async def get_file_id_from_channel(session: ClientSession, bot_token: str, file_unique_id: str) -> str | None:
-          """
-          Enhanced function to search for file_id in channel history with better error handling
-          """
-          logging.info(f"Searching channel for file_unique_id: {file_unique_id}")
-      
-          # Try multiple approaches to find the file
-          search_methods = [
-              {"offset": 0, "limit": 100},
-              {"offset": -100, "limit": 100},  # Search recent messages
-              {"offset": -200, "limit": 100},  # Search a bit further back
-          ]
-      
-          for method in search_methods:
-              updates_url = f"{LOCAL_API_BASE_URL}/bot{bot_token}/getUpdates"
-              params = {
-                  "limit": method["limit"],
-                  "offset": method["offset"]
-              }
-      
-              try:
-                  # Add query parameters
-                  query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-                  full_url = f"{updates_url}?{query_string}"
-                  logging.info(f"Searching with URL: {full_url}")
-      
-                  async with session.get(full_url) as response:
-                      if response.status != 200:
-                          logging.warning(f"getUpdates failed with status {response.status}")
-                          continue
-      
-                      response_data = await response.json()
-                      updates = response_data.get("result", [])
-                      logging.info(f"Got {len(updates)} updates to search through")
-      
-                      # Search through all updates
-                      for update in updates:
-                          # Check different message types
-                          message_sources = [
-                              update.get("channel_post"),
-                              update.get("message"),
-                              update.get("edited_channel_post"),
-                              update.get("edited_message")
-                          ]
-      
-                          for message in message_sources:
-                              if not message:
-                                  continue
-      
-                              # Check for document
-                              if "document" in message:
-                                  doc = message["document"]
-                                  if doc.get("file_unique_id") == file_unique_id:
-                                      found_file_id = doc.get("file_id")
-                                      logging.info(f"Found matching file_id: {found_file_id}")
-                                      return found_file_id
-      
-                              # Also check for video files (in case the file was sent as video)
-                              if "video" in message:
-                                  video = message["video"]
-                                  if video.get("file_unique_id") == file_unique_id:
-                                      found_file_id = video.get("file_id")
-                                      logging.info(f"Found matching video file_id: {found_file_id}")
-                                      return found_file_id
-      
-              except Exception as e:
-                  logging.error(f"Error searching channel with method {method}: {e}")
-                  continue
-      
-          logging.error(f"File with unique_id {file_unique_id} not found in any search method")
-          return None
-      
       async def process_video_task(
           task_id: str, input_file_path: Path, bot_token: str, chat_id: str
       ):
@@ -590,7 +518,6 @@ if __name__ == "__main__":
           request: Request,
           background_tasks: BackgroundTasks,
           video_file: UploadFile = File(...),
-          # The bot_token is no longer accepted from the form.
           chat_id: str = Form(...),
       ):
           # --- CHANGE #1: Get the bot token from the server's environment variables ---
@@ -648,84 +575,186 @@ if __name__ == "__main__":
       
       @app.get("/stream/{bot_token}/{file_unique_id}/{filename}")
       async def stream_handler(bot_token: str, file_unique_id: str, filename: str):
-          """Enhanced stream handler with corrected session management."""
+          """Enhanced stream handler with multiple fallback methods."""
           logging.info(f"Stream request for file_unique_id: {file_unique_id}, filename: {filename}")
       
           file_id = None
-          stored_bot_token = bot_token  # Default to URL bot_token
+          stored_bot_token = bot_token
       
-          # First, try to get file_id from memory
+          # Get file_id from memory or database
           if file_unique_id in file_mappings:
               file_id = file_mappings[file_unique_id]
               logging.info(f"Memory lookup result: {file_id}")
-      
-          # If not in memory, try database
-          if not file_id:
+          else:
               db_result = get_file_mapping(file_unique_id)
               if db_result:
                   file_id, stored_bot_token = db_result
-                  file_mappings[file_unique_id] = file_id # Store in memory for faster access
+                  file_mappings[file_unique_id] = file_id
                   logging.info(f"Database lookup result: {file_id}")
-      
-          actual_bot_token = stored_bot_token
       
           if not file_id:
               logging.error(f"Could not find file_id for unique_id: {file_unique_id}")
               raise HTTPException(status_code=404, detail=f"File not found for unique_id: {file_unique_id}")
       
-          # We must use a new session to get the file info, as the main session will be in the generator
-          file_path = None
           async with ClientSession() as session:
-              get_file_url = f"{LOCAL_API_BASE_URL}/bot{actual_bot_token}/getFile?file_id={file_id}"
-              logging.info(f"Requesting file info from: {get_file_url}")
+              # Get file information from Telegram Bot API
+              get_file_url = f"{LOCAL_API_BASE_URL}/bot{stored_bot_token}/getFile"
+              params = {"file_id": file_id}
+              
+              try:
+                  async with session.get(get_file_url, params=params) as response:
+                      if response.status != 200:
+                          error_text = await response.text()
+                          logging.error(f"getFile API failed: Status {response.status}, Error: {error_text}")
+                          raise HTTPException(status_code=502, detail="Failed to get file info from Telegram")
       
-              async with session.get(get_file_url) as response:
-                  if response.status != 200:
-                      error_text = await response.text()
-                      logging.error(f"Failed to get file info: {error_text}")
-                      raise HTTPException(status_code=502, detail=f"Failed to get file info from Telegram: {error_text}")
+                      file_info = await response.json()
+                      if not file_info.get("ok"):
+                          logging.error(f"getFile API returned error: {file_info}")
+                          raise HTTPException(status_code=502, detail="Telegram API returned error")
       
-                  file_info = await response.json()
-                  file_path = file_info.get("result", {}).get("file_path")
+                      result = file_info.get("result", {})
+                      file_path = result.get("file_path")
+                      
+                      if not file_path:
+                          logging.error(f"No file_path in API response: {file_info}")
+                          raise HTTPException(status_code=502, detail="No file path in Telegram response")
       
-          if not file_path:
-              logging.error(f"No file_path in response: {file_info}")
-              raise HTTPException(status_code=404, detail="File path not found in Telegram response.")
+                      logging.info(f"Got file_path from Telegram: {file_path}")
       
-          # Construct download URL
-          download_url = f"{LOCAL_API_BASE_URL}/file/bot{actual_bot_token}/{file_path}"
-          logging.info(f"Ready to stream from: {download_url}")
+              except HTTPException:
+                  raise
+              except Exception as e:
+                  logging.error(f"Exception getting file info: {e}")
+                  raise HTTPException(status_code=502, detail=f"Error communicating with Telegram API: {str(e)}")
       
-          # Stream the file
-          async def file_streamer():
-              # FIX: The ClientSession must be created *inside* the generator
-              # so it stays alive for the duration of the download.
-              async with ClientSession() as session:
+              # Try different download URL formats
+              download_urls = [
+                  f"{LOCAL_API_BASE_URL}/file/bot{stored_bot_token}/{file_path}",
+                  f"{LOCAL_API_BASE_URL}/file/bot{stored_bot_token}/documents/{filename}",
+                  f"{LOCAL_API_BASE_URL}/file/bot{stored_bot_token}/files/{filename}",
+              ]
+      
+              for download_url in download_urls:
                   try:
-                      async with session.get(download_url) as resp:
-                          if resp.status != 200:
-                              logging.error(f"Error downloading file: Status {resp.status}, URL: {download_url}")
-                              error_text = await resp.text()
-                              logging.error(f"Download error details: {error_text}")
-                              return # Stop the generator
-      
-                          # Stream the file in chunks
-                          async for chunk in resp.content.iter_chunked(1024 * 128):  # 128KB chunks
-                              yield chunk
-      
+                      logging.info(f"Trying download URL: {download_url}")
+                      async with session.get(download_url) as download_resp:
+                          if download_resp.status == 200:
+                              logging.info(f"Successfully streaming from: {download_url}")
+                              
+                              async def file_streamer():
+                                  try:
+                                      async for chunk in download_resp.content.iter_chunked(1024 * 128):
+                                          yield chunk
+                                  except Exception as e:
+                                      logging.error(f"Error streaming chunk: {e}")
+                              
+                              return StreamingResponse(
+                                  file_streamer(),
+                                  media_type="video/MP2T",
+                                  headers={
+                                      "Accept-Ranges": "bytes",
+                                      "Cache-Control": "no-cache",
+                                      "Content-Type": "video/MP2T"
+                                  }
+                              )
+                          else:
+                              error_text = await download_resp.text()
+                              logging.warning(f"Download URL failed: {download_url} - Status {download_resp.status}, Error: {error_text}")
+                              
                   except Exception as e:
-                      # This will catch connection errors etc. during the stream
-                      logging.error(f"Exception while streaming file: {str(e)}")
+                      logging.warning(f"Exception with download URL {download_url}: {e}")
+                      continue
       
-          return StreamingResponse(
-              file_streamer(),
-              media_type="video/MP2T",
-              headers={
-                  "Accept-Ranges": "bytes",
-                  "Cache-Control": "no-cache"
-              }
+          # If all download attempts failed
+          logging.error(f"All download attempts failed for file_unique_id: {file_unique_id}")
+          raise HTTPException(
+              status_code=502, 
+              detail=f"Could not download file from Telegram Bot API. All download URLs failed."
           )
-
+      
+      @app.get("/debug/docker-status")
+      async def debug_docker_status():
+          """Check if the Docker container is running and accessible."""
+          try:
+              async with ClientSession() as session:
+                  # Test basic connectivity to Bot API
+                  health_url = f"{LOCAL_API_BASE_URL}/"
+                  async with session.get(health_url, timeout=5) as response:
+                      if response.status == 200:
+                          # Test with actual bot token
+                          bot_test_url = f"{LOCAL_API_BASE_URL}/bot{PROXY_BOT_TOKEN}/getMe"
+                          async with session.get(bot_test_url) as bot_response:
+                              bot_info = await bot_response.json() if bot_response.status == 200 else {"error": await bot_response.text()}
+                              
+                              return {
+                                  "docker_container": "running",
+                                  "bot_api_health": "ok",
+                                  "bot_test": bot_info,
+                                  "local_api_url": LOCAL_API_BASE_URL
+                              }
+                      else:
+                          return {
+                              "docker_container": "not_responding",
+                              "status": response.status,
+                              "error": await response.text()
+                          }
+          except Exception as e:
+              return {
+                  "docker_container": "connection_failed",
+                  "error": str(e),
+                  "suggestion": "Check if Docker container is running: docker-compose ps"
+              }
+      
+      @app.get("/debug/file-info/{file_unique_id}")
+      async def debug_file_info(file_unique_id: str):
+          """Debug endpoint to check file information."""
+          
+          # Get file mapping
+          db_result = get_file_mapping(file_unique_id)
+          if not db_result:
+              return {"error": "File mapping not found"}
+          
+          file_id, bot_token = db_result
+          
+          async with ClientSession() as session:
+              # Get file info from Telegram
+              get_file_url = f"{LOCAL_API_BASE_URL}/bot{bot_token}/getFile"
+              params = {"file_id": file_id}
+              
+              try:
+                  async with session.get(get_file_url, params=params) as response:
+                      file_info = await response.json() if response.status == 200 else {"error": await response.text()}
+                      
+                      # Test various download URLs
+                      test_urls = [
+                          f"{LOCAL_API_BASE_URL}/file/bot{bot_token}/documents/file_0.ts",
+                          f"{LOCAL_API_BASE_URL}/file/bot{bot_token}/files/file_0.ts",
+                          f"{LOCAL_API_BASE_URL}/file/bot{bot_token}/{file_id}",
+                      ]
+                      
+                      url_tests = {}
+                      for test_url in test_urls:
+                          try:
+                              async with session.head(test_url) as test_resp:
+                                  url_tests[test_url] = {
+                                      "status": test_resp.status,
+                                      "headers": dict(test_resp.headers)
+                                  }
+                          except Exception as e:
+                              url_tests[test_url] = {"error": str(e)}
+                      
+                      return {
+                          "file_unique_id": file_unique_id,
+                          "file_id": file_id,
+                          "bot_token": bot_token,
+                          "telegram_file_info": file_info,
+                          "url_tests": url_tests,
+                          "local_api_base": LOCAL_API_BASE_URL
+                      }
+                      
+              except Exception as e:
+                  return {"error": f"Exception: {str(e)}"}
 
 ## 6. Web App Frontend (app/templates/index.html)This is the HTML file that creates the user interface in the browser.<!DOCTYPE html>
 
