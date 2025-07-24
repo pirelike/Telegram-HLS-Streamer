@@ -1,4 +1,29 @@
-Project Overview: Telegram HLS StreamerThis document serves as a complete reference and explanation for the "Telegram HLS Streamer" web application.PurposeThe goal of this project is to provide a user-friendly web interface that takes a large video file (like a movie or TV show episode), automatically splits it into smaller, streamable chunks, and uploads those chunks to a Telegram channel. It then generates a standard M3U8 playlist file. When this playlist is opened in a compatible video player (like VLC), it uses a built-in proxy to stream the video seamlessly, using Telegram as a free and unlimited file host.Core ArchitectureThe application is built on four key components working together:FastAPI Web Application (Your Python Code): This is the heart of the project. It's a single Python application that does everything:Serves the HTML web page to your browser.Accepts the video file upload and user credentials (Bot Token, Channel ID).Uses FFmpeg to split the video into .ts chunks.Communicates with your local Telegram Bot API server to upload the chunks.Provides real-time logging to the browser during the process.Acts as a Proxy Server to fetch the video chunks from Telegram when a video player requests them.Local Telegram Bot API Server (Docker): This is a separate application you run using Docker. Its sole purpose is to bypass Telegram's default file size limits. It allows your bot to upload and download files of virtually any size, which is critical for this project.FFmpeg (System Command): A powerful, open-source command-line tool for handling multimedia files. Our Python script calls FFmpeg to perform the heavy lifting of splitting the large video file into smaller HLS (HTTP Live Streaming) segments.Your Web Browser: The browser is the user interface. You use it to upload the video and monitor the process. The video player (like VLC) then acts as the final client, requesting the video stream from your FastAPI application.Project Setup & CodebaseHere is the complete file structure and the code for each file.File Structuretelegram_hls_streamer/
+# Project Overview: Telegram HLS Streamer
+This document serves as a complete reference and explanation for the "Telegram HLS Streamer" web application.
+
+# Purpose
+The goal of this project is to provide a user-friendly web interface that takes a large video file (like a movie or TV show episode), automatically splits it into smaller, streamable chunks, and uploads those chunks to a Telegram channel. It then generates a standard M3U8 playlist file. When this playlist is opened in a compatible video player (like VLC), it uses a built-in proxy to stream the video seamlessly, using Telegram as a free and unlimited file host.
+
+# Core Architecture
+The application is built on four key components working together:
+
+    1. FastAPI Web Application (Your Python Code): This is the heart of the project. It's a single Python application that does everything:
+        - Serves the HTML web page to your browser.
+        - Accepts the video file upload and user credentials (Bot Token, Channel ID).
+        - Uses FFmpeg to split the video into .ts chunks.
+        - Communicates with your local Telegram Bot API server to upload the chunks.
+        - Provides real-time logging to the browser during the process.
+        - Acts as a Proxy Server to fetch the video chunks from Telegram when a video player requests them.
+    2. Local Telegram Bot API Server (Docker): This is a separate application you run using Docker. Its sole purpose is to bypass Telegram's default file size limits. It allows your bot to upload and download files of virtually any size, which is critical for this project.
+    3. FFmpeg (System Command): A powerful, open-source command-line tool for handling multimedia files. Our Python script calls FFmpeg to perform the heavy lifting of splitting the large video file into smaller HLS (HTTP Live Streaming) segments.
+    4. Your Web Browser: The browser is the user interface. You use it to upload the video and monitor the process. The video player (like VLC) then acts as the final client, requesting the video stream from your FastAPI application.
+
+# Project Setup & Codebase
+
+Here is the complete file structure and the code for each file.
+
+"""
+telegram_hls_streamer/
 │
 ├── .venv/                      # Python virtual environment
 │
@@ -15,20 +40,29 @@ Project Overview: Telegram HLS StreamerThis document serves as a complete refere
 ├── .env                        # Your private configuration file
 ├── requirements.txt            # Python dependencies
 └── run.py                      # Script to run the server
-<br>1. Configuration (.env)This file holds your secret credentials. It should be in the project's root directory.# This file is for your secret credentials.
-# Keep it private and do not share it.
+"""
 
+# 1. Configuration (.env)
+"""
+This file holds your secret credentials. It should be in the project's root directory.# This file is for your secret credentials.
+# Keep it private and do not share it.
 # --- Telegram App Credentials ---
 # These are required by the Local Bot API Server (the Docker container).
 # Get these from my.telegram.org.
-TELEGRAM_API_ID="26902397"
-TELEGRAM_API_HASH="27f9beca0e2d413648b5e9ddf8126a38"
+TELEGRAM_API_ID=""
+TELEGRAM_API_HASH=""
 
 # --- Telegram Bot Token ---
 # This token is used by both the Docker container and the Python app's proxy.
 # Replace with your bot token from @BotFather.
 PROXY_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
-The TELEGRAM_API_ID and TELEGRAM_API_HASH are used by your Docker container to authenticate with Telegram's core systems.The PROXY_BOT_TOKEN is used by your Python application to verify that the stream links are valid.<br>2. Dependencies (requirements.txt)This file lists all the Python libraries the project needs.fastapi
+"""
+    - The TELEGRAM_API_ID and TELEGRAM_API_HASH are used by your Docker container to authenticate with Telegram's core systems.
+    - The PROXY_BOT_TOKEN is used by your Python application to verify that the stream links are valid.
+# 2. Dependencies (requirements.txt)
+This file lists all the Python libraries the project needs.
+"""
+fastapi
 uvicorn[standard]
 python-telegram-bot[ext]
 aiohttp
@@ -36,7 +70,9 @@ python-multipart
 aiofiles
 python-dotenv
 jinja2
-<br>3. Server Runner (run.py)A simple script to start the web server.import uvicorn
+"""
+# 3. Server Runner (run.py)
+A simple script to start the web server.import uvicorn
 
 if __name__ == "__main__":
     """
