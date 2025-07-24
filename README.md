@@ -93,7 +93,7 @@ if __name__ == "__main__":
    Its presence tells Python that the 'app' directory is a package,
    which allows for relative imports within the application.
 ## 5. Web App Backend (app/main.py)This is the main application file containing all the server-side logic.import os
-
+      """
       import os
       import subprocess
       import math
@@ -215,11 +215,11 @@ if __name__ == "__main__":
               cursor.execute('SELECT file_unique_id, file_id, filename, created_at FROM file_mappings ORDER BY created_at DESC LIMIT 20')
               results = cursor.fetchall()
               conn.close()
-      
+              
               logging.info("Recent file mappings in database:")
               for row in results:
                   logging.info(f"  {row[0]} -> {row[1]} ({row[2]}) [{row[3]}]")
-      
+              
               return results
           except Exception as e:
               logging.error(f"Failed to list file mappings: {e}")
@@ -360,7 +360,7 @@ if __name__ == "__main__":
               await log_message(task_id, f"  - file_unique_id: {doc.file_unique_id}")
               await log_message(task_id, f"  - file_name: {doc.file_name}")
               await log_message(task_id, f"  - file_size: {doc.file_size}")
-      
+              
               return message
       
           except Exception as e:
@@ -374,36 +374,36 @@ if __name__ == "__main__":
           Enhanced function to search for file_id in channel history with better error handling
           """
           logging.info(f"Searching channel for file_unique_id: {file_unique_id}")
-      
+          
           # Try multiple approaches to find the file
           search_methods = [
               {"offset": 0, "limit": 100},
               {"offset": -100, "limit": 100},  # Search recent messages
               {"offset": -200, "limit": 100},  # Search a bit further back
           ]
-      
+          
           for method in search_methods:
               updates_url = f"{LOCAL_API_BASE_URL}/bot{bot_token}/getUpdates"
               params = {
                   "limit": method["limit"],
                   "offset": method["offset"]
               }
-      
+              
               try:
                   # Add query parameters
                   query_string = "&".join([f"{k}={v}" for k, v in params.items()])
                   full_url = f"{updates_url}?{query_string}"
                   logging.info(f"Searching with URL: {full_url}")
-      
+                  
                   async with session.get(full_url) as response:
                       if response.status != 200:
                           logging.warning(f"getUpdates failed with status {response.status}")
                           continue
-      
+                          
                       response_data = await response.json()
                       updates = response_data.get("result", [])
                       logging.info(f"Got {len(updates)} updates to search through")
-      
+                      
                       # Search through all updates
                       for update in updates:
                           # Check different message types
@@ -413,11 +413,11 @@ if __name__ == "__main__":
                               update.get("edited_channel_post"),
                               update.get("edited_message")
                           ]
-      
+                          
                           for message in message_sources:
                               if not message:
                                   continue
-      
+                                  
                               # Check for document
                               if "document" in message:
                                   doc = message["document"]
@@ -425,7 +425,7 @@ if __name__ == "__main__":
                                       found_file_id = doc.get("file_id")
                                       logging.info(f"Found matching file_id: {found_file_id}")
                                       return found_file_id
-      
+                              
                               # Also check for video files (in case the file was sent as video)
                               if "video" in message:
                                   video = message["video"]
@@ -433,11 +433,11 @@ if __name__ == "__main__":
                                       found_file_id = video.get("file_id")
                                       logging.info(f"Found matching video file_id: {found_file_id}")
                                       return found_file_id
-      
+                                      
               except Exception as e:
                   logging.error(f"Error searching channel with method {method}: {e}")
                   continue
-      
+          
           logging.error(f"File with unique_id {file_unique_id} not found in any search method")
           return None
       
@@ -629,10 +629,10 @@ if __name__ == "__main__":
       async def stream_handler(bot_token: str, file_unique_id: str, filename: str):
           """Enhanced stream handler with better error handling and debugging"""
           logging.info(f"Stream request for file_unique_id: {file_unique_id}, filename: {filename}")
-      
+          
           file_id = None
           stored_bot_token = bot_token  # Default to URL bot_token
-      
+          
           # First, try to get file_id from memory
           if file_unique_id in file_mappings:
               file_id = file_mappings[file_unique_id]
@@ -658,7 +658,7 @@ if __name__ == "__main__":
                   if not file_id:
                       logging.error(f"File not found anywhere for unique_id: {file_unique_id}")
                       raise HTTPException(
-                          status_code=404,
+                          status_code=404, 
                           detail=f"File not found. unique_id: {file_unique_id}. Try the debug endpoint: /debug/test_file/{bot_token}/{file_unique_id}"
                       )
                   # Store it for future use
@@ -670,33 +670,33 @@ if __name__ == "__main__":
           async with ClientSession() as session:
               get_file_url = f"{LOCAL_API_BASE_URL}/bot{actual_bot_token}/getFile?file_id={file_id}"
               logging.info(f"Requesting file info from: {get_file_url}")
-      
+              
               try:
                   async with session.get(get_file_url) as response:
                       response_text = await response.text()
                       logging.info(f"getFile response status: {response.status}")
                       logging.info(f"getFile response body: {response_text}")
-      
+                      
                       if response.status != 200:
                           # Try to parse error details
                           try:
                               error_data = await response.json() if response_text else {}
                               error_description = error_data.get('description', 'Unknown error')
                               logging.error(f"getFile failed: {error_description}")
-      
+                              
                               # If it's an invalid file_id error, try to refresh from channel
                               if 'invalid file_id' in error_description.lower() or 'file not found' in error_description.lower():
                                   logging.info("File ID appears invalid, attempting to refresh from channel...")
                                   # Remove invalid mapping
                                   file_mappings.pop(file_unique_id, None)
-      
+                                  
                                   # Try to get fresh file_id from channel
                                   fresh_file_id = await get_file_id_from_channel(session, actual_bot_token, file_unique_id)
                                   if fresh_file_id and fresh_file_id != file_id:
                                       logging.info(f"Found fresh file_id: {fresh_file_id}")
                                       file_mappings[file_unique_id] = fresh_file_id
                                       store_file_mapping(file_unique_id, fresh_file_id, filename, actual_bot_token)
-      
+                                      
                                       # Retry with fresh file_id
                                       fresh_get_file_url = f"{LOCAL_API_BASE_URL}/bot{actual_bot_token}/getFile?file_id={fresh_file_id}"
                                       async with session.get(fresh_get_file_url) as fresh_response:
@@ -704,28 +704,28 @@ if __name__ == "__main__":
                                               file_info = await fresh_response.json()
                                           else:
                                               raise HTTPException(
-                                                  status_code=502,
+                                                  status_code=502, 
                                                   detail=f"Failed to get file info even with fresh file_id. Error: {await fresh_response.text()}"
                                               )
                                   else:
                                       raise HTTPException(
-                                          status_code=502,
+                                          status_code=502, 
                                           detail=f"Failed to get file info: {error_description}"
                                       )
                               else:
                                   raise HTTPException(
-                                      status_code=502,
+                                      status_code=502, 
                                       detail=f"Failed to get file info: {error_description}"
                                   )
                           except ValueError:
                               # Response is not JSON
                               raise HTTPException(
-                                  status_code=502,
+                                  status_code=502, 
                                   detail=f"Invalid response from Telegram API: {response_text}"
                               )
                       else:
                           file_info = await response.json()
-      
+                          
               except Exception as e:
                   if isinstance(e, HTTPException):
                       raise
@@ -753,25 +753,24 @@ if __name__ == "__main__":
                               # Return empty bytes to avoid breaking the stream
                               yield b''
                               return
-      
+                          
                           # Stream the file in chunks
                           async for chunk in resp.content.iter_chunked(1024 * 128):  # 128KB chunks
                               yield chunk
-      
+                              
                   except Exception as e:
                       logging.error(f"Exception while streaming file: {str(e)}")
                       yield b''  # Return empty bytes to avoid breaking the stream
       
               return StreamingResponse(
-                  file_streamer(),
+                  file_streamer(), 
                   media_type="video/MP2T",
                   headers={
                       "Accept-Ranges": "bytes",
                       "Cache-Control": "no-cache"
                   }
               )
-   
-
+      """
 ## 6. Web App Frontend (app/templates/index.html)This is the HTML file that creates the user interface in the browser.<!DOCTYPE html>
 
     <!DOCTYPE html>
