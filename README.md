@@ -93,7 +93,6 @@ if __name__ == "__main__":
 # which allows for relative imports within the application.
 ## 5. Web App Backend (app/main.py)This is the main application file containing all the server-side logic.import os
 
-    """
     import os
     import subprocess
     import math
@@ -563,7 +562,6 @@ if __name__ == "__main__":
                         yield chunk
     
             return StreamingResponse(file_streamer(), media_type="video/MP2T")
-    """
 
 ## 6. Web App Frontend (app/templates/index.html)This is the HTML file that creates the user interface in the browser.<!DOCTYPE html>
 
