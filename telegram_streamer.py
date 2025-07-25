@@ -99,26 +99,6 @@ class TelegramVideoStreamer:
             return False
 
     def _cleanup_cache(self):
-        """Validate that the specified host:port combination is accessible."""
-        import socket
-
-        if host in ['localhost', '127.0.0.1']:
-            logger.warning("⚠️  Using localhost - this will only work on the same machine!")
-            logger.warning("   For Jellyfin/network access, use your network IP (e.g., 192.168.x.x)")
-            return True
-
-        try:
-            # Try to bind to the specified host to check if it's valid
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind((host, 0))  # Use port 0 to get any available port
-                actual_ip = s.getsockname()[0]
-                logger.info(f"✅ Host {host} is accessible (resolved to {actual_ip})")
-                return True
-        except socket.error as e:
-            logger.error(f"❌ Cannot bind to host {host}: {e}")
-            logger.error("   Make sure this is a valid IP address for your machine")
-            return False
         """Remove expired and excess cache entries to maintain performance."""
         current_time = time.time()
 
