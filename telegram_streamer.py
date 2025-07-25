@@ -76,6 +76,28 @@ class TelegramVideoStreamer:
         except IOError as e:
             logger.error(f"Could not save segment database: {e}")
 
+    def _validate_host_accessibility(self, host: str, port: int) -> bool:
+        """Validate that the specified host:port combination is accessible."""
+        import socket
+
+        if host in ['localhost', '127.0.0.1']:
+            logger.warning("⚠️  Using localhost - this will only work on the same machine!")
+            logger.warning("   For Jellyfin/network access, use your network IP (e.g., 192.168.x.x)")
+            return True
+
+        try:
+            # Try to bind to the specified host to check if it's valid
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, 0))  # Use port 0 to get any available port
+                actual_ip = s.getsockname()[0]
+                logger.info(f"✅ Host {host} is accessible (resolved to {actual_ip})")
+                return True
+        except socket.error as e:
+            logger.error(f"❌ Cannot bind to host {host}: {e}")
+            logger.error("   Make sure this is a valid IP address for your machine")
+            return False
+
     def _cleanup_cache(self):
         """Validate that the specified host:port combination is accessible."""
         import socket
@@ -292,9 +314,12 @@ class TelegramVideoStreamer:
         if not segment_info:
             raise ValueError("No segment information provided")
 
-        # Validate host accessibility
-        if not self._validate_host_accessibility(host, port):
-            logger.warning("⚠️  Proceeding anyway, but playlist URLs may not be accessible from other devices")
+        # Simple host warning for localhost
+        if host in ['localhost', '127.0.0.1']:
+            logger.warning("⚠️  Using localhost - this will only work on the same machine!")
+            logger.warning("   For Jellyfin/network access, use your network IP (e.g., 192.168.x.x)")
+        else:
+            logger.info(f"✅ Creating playlist for network host: {host}")
 
         self.segments_db[video_id] = segment_info
         self._save_db()
@@ -532,7 +557,7 @@ class TelegramVideoStreamer:
                 else:
                     debug_data['error'] = f"Video {video_id} not found"
 
-            return web.json_response(debug_data, headers={'Content-Type': 'application/json'})
+            return web.json_response(debug_data)
 
         async def test_jellyfin_compatibility(request: web.Request):
             """Test endpoint specifically for Jellyfin compatibility."""
