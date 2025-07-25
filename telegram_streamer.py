@@ -167,21 +167,17 @@ class TelegramVideoStreamer:
         playlist_path = os.path.join(output_dir, 'playlist.m3u8')
         segment_pattern = os.path.join(output_dir, 'segment_%04d.ts')
 
-        # Enhanced FFmpeg command with better encoding settings
+        # Updated FFmpeg command to copy streams instead of re-encoding
         ffmpeg_cmd = [
             'ffmpeg', '-i', video_path,
-            '-c:v', 'libx264',  # H.264 video codec
-            '-c:a', 'aac',      # AAC audio codec
-            '-preset', 'medium', # Balance between speed and compression
-            '-crf', '23',       # Constant Rate Factor for quality
-            '-maxrate', '2M',   # Maximum bitrate to help with size control
-            '-bufsize', '4M',   # Buffer size
+            '-c:v', 'copy',     # Copy the video stream without re-encoding
+            '-c:a', 'copy',     # Copy the audio stream without re-encoding
             '-hls_time', str(segment_duration),
-            '-hls_list_size', '0',  # Keep all segments in playlist
-            '-hls_flags', 'independent_segments',  # Make segments independently decodable
+            '-hls_list_size', '0',
+            '-hls_flags', 'independent_segments',
             '-hls_segment_filename', segment_pattern,
             '-f', 'hls',
-            '-y',  # Overwrite output files
+            '-y',
             playlist_path
         ]
 
@@ -634,7 +630,7 @@ Examples:
     for p in [upload_parser, serve_parser]:
         p.add_argument('--bot-token', required=True, help='Telegram bot token')
         p.add_argument('--chat-id', required=True, help='Telegram chat ID (e.g., @channel or numeric ID)')
-        p.add_argument('--port', type=int, default=8080, help='Port for the streaming server (default: 8080)')
+        p.add_argument('--port', type=int, default=5050, help='Port for the streaming server (default: 5050)')
         p.add_argument('--max-chunk-size', type=int, default=20,
                       help='Maximum chunk size in MB (default: 20)')
 
