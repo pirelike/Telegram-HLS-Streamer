@@ -4,6 +4,14 @@
 
 This is a sophisticated Python application that transforms Telegram into a **distributed video storage and streaming platform**. It solves the problem of storing and streaming large video files by leveraging Telegram's generous file storage limits and creating an on-demand HLS (HTTP Live Streaming) server.
 
+    your-project-folder/
+    ├── main.py
+    ├── database.py
+    ├── logger_config.py
+    ├── telegram_handler.py
+    ├── video_processor.py
+    └── stream_server.py
+
 ## 🏗️ **System Architecture**
 
 ```
