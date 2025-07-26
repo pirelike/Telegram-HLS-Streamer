@@ -2,8 +2,10 @@ import os
 import json
 import asyncio
 import aiofiles
+import sqlite3
+import aiosqlite
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import subprocess
 import math
 from dataclasses import dataclass, asdict
@@ -11,6 +13,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 import logging
 import time
+from datetime import datetime, timezone
 
 # Configure logging
 logging.basicConfig(
@@ -26,16 +29,342 @@ class SegmentInfo:
     duration: float
     file_id: str
     file_size: int
+    segment_order: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+@dataclass
+class VideoInfo:
+    """Holds information about each video."""
+    video_id: str
+    original_filename: str
+    total_duration: float
+    total_segments: int
+    file_size: int
+    created_at: str
+    updated_at: str
+    status: str = 'active'  # active, processing, error, deleted
+
+class DatabaseManager:
+    """Manages SQLite database operations for the video streaming system."""
+
+    def __init__(self, db_path: str = "video_streaming.db"):
+        self.db_path = db_path
+        self.connection_pool = {}
+
+    async def initialize_database(self):
+        """Initialize the database with required tables."""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Enable foreign key constraints
+            await db.execute("PRAGMA foreign_keys = ON")
+
+            # Create videos table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS videos (
+                    video_id TEXT PRIMARY KEY,
+                    original_filename TEXT NOT NULL,
+                    total_duration REAL NOT NULL DEFAULT 0.0,
+                    total_segments INTEGER NOT NULL DEFAULT 0,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            # Create segments table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    duration REAL NOT NULL,
+                    file_id TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    segment_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE,
+                    UNIQUE(video_id, filename),
+                    UNIQUE(video_id, segment_order)
+                )
+            """)
+
+            # Create cache metadata table for tracking cached segments
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS cache_metadata (
+                    segment_filename TEXT PRIMARY KEY,
+                    video_id TEXT NOT NULL,
+                    cached_at TEXT NOT NULL,
+                    access_count INTEGER NOT NULL DEFAULT 1,
+                    last_accessed TEXT NOT NULL,
+                    cache_size INTEGER NOT NULL,
+                    FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE
+                )
+            """)
+
+            # Create indexes for better performance
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_segments_video_id ON segments (video_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_segments_order ON segments (video_id, segment_order)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_last_accessed ON cache_metadata (last_accessed)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos (status)")
+
+            await db.commit()
+            logger.info("✅ Database initialized successfully")
+
+    async def add_video(self, video_info: VideoInfo) -> bool:
+        """Add a new video to the database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO videos
+                    (video_id, original_filename, total_duration, total_segments, file_size, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    video_info.video_id,
+                    video_info.original_filename,
+                    video_info.total_duration,
+                    video_info.total_segments,
+                    video_info.file_size,
+                    video_info.status,
+                    video_info.created_at,
+                    video_info.updated_at
+                ))
+                await db.commit()
+                logger.info(f"✅ Added video {video_info.video_id} to database")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to add video {video_info.video_id}: {e}")
+            return False
+
+    async def add_segment(self, video_id: str, segment_info: SegmentInfo) -> bool:
+        """Add a segment to the database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                current_time = datetime.now(timezone.utc).isoformat()
+                await db.execute("""
+                    INSERT OR REPLACE INTO segments
+                    (video_id, filename, duration, file_id, file_size, segment_order, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    video_id,
+                    segment_info.filename,
+                    segment_info.duration,
+                    segment_info.file_id,
+                    segment_info.file_size,
+                    segment_info.segment_order,
+                    current_time,
+                    current_time
+                ))
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to add segment {segment_info.filename}: {e}")
+            return False
+
+    async def get_video_info(self, video_id: str) -> Optional[VideoInfo]:
+        """Get video information by video_id."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("""
+                    SELECT video_id, original_filename, total_duration, total_segments,
+                           file_size, status, created_at, updated_at
+                    FROM videos WHERE video_id = ?
+                """, (video_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return VideoInfo(*row)
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Failed to get video info for {video_id}: {e}")
+            return None
+
+    async def get_video_segments(self, video_id: str) -> Dict[str, SegmentInfo]:
+        """Get all segments for a video, ordered by segment_order."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("""
+                    SELECT filename, duration, file_id, file_size, segment_order, created_at, updated_at
+                    FROM segments
+                    WHERE video_id = ?
+                    ORDER BY segment_order
+                """, (video_id,)) as cursor:
+                    segments = {}
+                    async for row in cursor:
+                        filename, duration, file_id, file_size, segment_order, created_at, updated_at = row
+                        segments[filename] = SegmentInfo(
+                            filename=filename,
+                            duration=duration,
+                            file_id=file_id,
+                            file_size=file_size,
+                            segment_order=segment_order,
+                            created_at=created_at,
+                            updated_at=updated_at
+                        )
+                    return segments
+        except Exception as e:
+            logger.error(f"❌ Failed to get segments for video {video_id}: {e}")
+            return {}
+
+    async def get_all_videos(self) -> List[VideoInfo]:
+        """Get all videos from the database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("""
+                    SELECT video_id, original_filename, total_duration, total_segments,
+                           file_size, status, created_at, updated_at
+                    FROM videos
+                    WHERE status = 'active'
+                    ORDER BY created_at DESC
+                """) as cursor:
+                    videos = []
+                    async for row in cursor:
+                        videos.append(VideoInfo(*row))
+                    return videos
+        except Exception as e:
+            logger.error(f"❌ Failed to get all videos: {e}")
+            return []
+
+    async def update_video_status(self, video_id: str, status: str) -> bool:
+        """Update video status."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                current_time = datetime.now(timezone.utc).isoformat()
+                await db.execute("""
+                    UPDATE videos
+                    SET status = ?, updated_at = ?
+                    WHERE video_id = ?
+                """, (status, current_time, video_id))
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update video status for {video_id}: {e}")
+            return False
+
+    async def delete_video(self, video_id: str) -> bool:
+        """Delete a video and all its segments from the database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Delete segments first due to foreign key constraint
+                await db.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
+                await db.execute("DELETE FROM cache_metadata WHERE video_id = ?", (video_id,))
+                await db.execute("DELETE FROM videos WHERE video_id = ?", (video_id,))
+                await db.commit()
+                logger.info(f"✅ Deleted video {video_id} from database")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to delete video {video_id}: {e}")
+            return False
+
+    async def update_cache_metadata(self, segment_filename: str, video_id: str, cache_size: int):
+        """Update cache metadata for a segment."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                current_time = datetime.now(timezone.utc).isoformat()
+                await db.execute("""
+                    INSERT OR REPLACE INTO cache_metadata
+                    (segment_filename, video_id, cached_at, access_count, last_accessed, cache_size)
+                    VALUES (?, ?, ?,
+                        COALESCE((SELECT access_count + 1 FROM cache_metadata WHERE segment_filename = ?), 1),
+                        ?, ?)
+                """, (segment_filename, video_id, current_time, segment_filename, current_time, cache_size))
+                await db.commit()
+        except Exception as e:
+            logger.error(f"❌ Failed to update cache metadata for {segment_filename}: {e}")
+
+    async def get_cache_statistics(self) -> Dict:
+        """Get cache statistics."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("""
+                    SELECT
+                        COUNT(*) as total_cached,
+                        SUM(cache_size) as total_size,
+                        AVG(access_count) as avg_access_count,
+                        MAX(last_accessed) as last_cache_access
+                    FROM cache_metadata
+                """) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return {
+                            'total_cached_segments': row[0] or 0,
+                            'total_cache_size_bytes': row[1] or 0,
+                            'average_access_count': round(row[2] or 0, 2),
+                            'last_cache_access': row[3]
+                        }
+                    return {}
+        except Exception as e:
+            logger.error(f"❌ Failed to get cache statistics: {e}")
+            return {}
+
+    async def cleanup_old_cache_entries(self, hours_old: int = 24) -> int:
+        """Remove cache metadata entries older than specified hours."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cutoff_time = datetime.now(timezone.utc).replace(
+                    hour=datetime.now().hour - hours_old
+                ).isoformat()
+
+                cursor = await db.execute("""
+                    DELETE FROM cache_metadata
+                    WHERE last_accessed < ?
+                """, (cutoff_time,))
+                deleted_count = cursor.rowcount
+                await db.commit()
+
+                if deleted_count > 0:
+                    logger.info(f"🧹 Cleaned up {deleted_count} old cache entries")
+                return deleted_count
+        except Exception as e:
+            logger.error(f"❌ Failed to cleanup old cache entries: {e}")
+            return 0
+
+    async def get_database_stats(self) -> Dict:
+        """Get comprehensive database statistics."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                stats = {}
+
+                # Video statistics
+                async with db.execute("""
+                    SELECT
+                        COUNT(*) as total_videos,
+                        SUM(total_segments) as total_segments,
+                        SUM(file_size) as total_file_size,
+                        SUM(total_duration) as total_duration
+                    FROM videos WHERE status = 'active'
+                """) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        stats['videos'] = {
+                            'total_videos': row[0] or 0,
+                            'total_segments': row[1] or 0,
+                            'total_file_size_bytes': row[2] or 0,
+                            'total_duration_seconds': row[3] or 0
+                        }
+
+                # Get cache stats
+                cache_stats = await self.get_cache_statistics()
+                stats['cache'] = cache_stats
+
+                # Database file size
+                if os.path.exists(self.db_path):
+                    stats['database_size_bytes'] = os.path.getsize(self.db_path)
+
+                return stats
+        except Exception as e:
+            logger.error(f"❌ Failed to get database stats: {e}")
+            return {}
 
 class TelegramVideoStreamer:
     """
     Manages splitting, uploading, and streaming video segments using Telegram as storage.
+    Now with robust SQLite backend for metadata management.
     """
-    def __init__(self, bot_token: str, chat_id: str):
+    def __init__(self, bot_token: str, chat_id: str, db_path: str = "video_streaming.db"):
         self.bot = Bot(token=bot_token)
         self.chat_id = chat_id
-        self.db_path = "segments_db.json"
-        self.segments_db = self._load_db()
+        self.db = DatabaseManager(db_path)
 
         # Enhanced caching system
         self.segment_cache: Dict[str, bytes] = {}
@@ -44,37 +373,18 @@ class TelegramVideoStreamer:
         self.cache_max_size = 100 * 1024 * 1024  # 100MB cache limit
         self.cache_ttl = 300  # 5 minutes TTL for cached segments
 
-    def _load_db(self) -> Dict[str, Dict[str, SegmentInfo]]:
-        """Loads the segment database from a JSON file."""
-        if not os.path.exists(self.db_path):
-            return {}
-        try:
-            with open(self.db_path, 'r') as f:
-                data = json.load(f)
-                # Convert loaded dictionaries back into SegmentInfo objects
-                return {
-                    video_id: {
-                        name: SegmentInfo(**info) for name, info in segments.items()
-                    } for video_id, segments in data.items()
-                }
-        except (IOError, json.JSONDecodeError) as e:
-            logger.error(f"Could not load segment database: {e}")
-            return {}
+    async def initialize(self):
+        """Initialize the database and perform startup tasks."""
+        await self.db.initialize_database()
 
-    def _save_db(self):
-        """Saves the current segment database to a JSON file."""
-        try:
-            # Convert SegmentInfo objects to dictionaries for JSON serialization
-            serializable_db = {
-                video_id: {
-                    name: asdict(info) for name, info in segments.items()
-                } for video_id, segments in self.segments_db.items()
-            }
-            with open(self.db_path, 'w') as f:
-                json.dump(serializable_db, f, indent=4)
-            logger.debug("Segment database saved successfully")
-        except IOError as e:
-            logger.error(f"Could not save segment database: {e}")
+        # Clean up old cache metadata entries
+        await self.db.cleanup_old_cache_entries(24)
+
+        # Log startup statistics
+        stats = await self.db.get_database_stats()
+        if stats:
+            logger.info(f"📊 Database loaded: {stats.get('videos', {}).get('total_videos', 0)} videos, "
+                       f"{stats.get('videos', {}).get('total_segments', 0)} segments")
 
     def _validate_host_accessibility(self, host: str, port: int) -> bool:
         """Validate that the specified host:port combination is accessible."""
@@ -163,6 +473,7 @@ class TelegramVideoStreamer:
         except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to probe video details: {e}. Using default settings.")
             segment_duration = 30
+            duration = 0
 
         playlist_path = os.path.join(output_dir, 'playlist.m3u8')
         segment_pattern = os.path.join(output_dir, 'segment_%04d.ts')
@@ -199,8 +510,8 @@ class TelegramVideoStreamer:
             logger.error(f"FFmpeg failed with error: {e.stderr}")
             raise
 
-    async def upload_segments_to_telegram(self, segments_dir: str, video_id: str) -> Dict[str, SegmentInfo]:
-        """Uploads all .ts segments to Telegram with progress tracking."""
+    async def upload_segments_to_telegram(self, segments_dir: str, video_id: str, original_filename: str) -> Dict[str, SegmentInfo]:
+        """Uploads all .ts segments to Telegram with progress tracking and database storage."""
         segment_info_map = {}
         ts_files = sorted([f for f in os.listdir(segments_dir) if f.endswith('.ts')])
 
@@ -208,6 +519,24 @@ class TelegramVideoStreamer:
             raise ValueError(f"No .ts files found in {segments_dir}")
 
         logger.info(f"Found {len(ts_files)} segments to upload")
+
+        # Create video record in database
+        current_time = datetime.now(timezone.utc).isoformat()
+        video_info = VideoInfo(
+            video_id=video_id,
+            original_filename=original_filename,
+            total_duration=0.0,  # Will be updated after processing segments
+            total_segments=len(ts_files),
+            file_size=sum(os.path.getsize(os.path.join(segments_dir, f)) for f in ts_files),
+            created_at=current_time,
+            updated_at=current_time,
+            status='processing'
+        )
+
+        await self.db.add_video(video_info)
+
+        total_duration = 0
+        successful_uploads = 0
 
         for i, ts_file in enumerate(ts_files, 1):
             file_path = os.path.join(segments_dir, ts_file)
@@ -237,12 +566,20 @@ class TelegramVideoStreamer:
                     )
 
                 duration = self.extract_segment_duration(segments_dir, ts_file)
-                segment_info_map[ts_file] = SegmentInfo(
+                total_duration += duration
+
+                segment_info = SegmentInfo(
                     filename=ts_file,
                     duration=duration,
                     file_id=message.document.file_id,
-                    file_size=file_size
+                    file_size=file_size,
+                    segment_order=i-1  # 0-based ordering
                 )
+
+                # Store in database
+                await self.db.add_segment(video_id, segment_info)
+                segment_info_map[ts_file] = segment_info
+                successful_uploads += 1
 
                 logger.info(f"✅ Uploaded {ts_file} - File ID: {message.document.file_id}")
 
@@ -255,9 +592,20 @@ class TelegramVideoStreamer:
                 continue
 
         if not segment_info_map:
+            # Update video status to error
+            await self.db.update_video_status(video_id, 'error')
             raise RuntimeError("No segments were successfully uploaded")
 
-        logger.info(f"Successfully uploaded {len(segment_info_map)}/{len(ts_files)} segments")
+        # Update video with final information
+        video_info.total_duration = total_duration
+        video_info.total_segments = successful_uploads
+        video_info.status = 'active'
+        video_info.updated_at = datetime.now(timezone.utc).isoformat()
+        await self.db.add_video(video_info)
+
+        logger.info(f"Successfully uploaded {successful_uploads}/{len(ts_files)} segments")
+        logger.info(f"Total video duration: {total_duration:.2f} seconds")
+
         return segment_info_map
 
     def extract_segment_duration(self, segments_dir: str, segment_filename: str) -> float:
@@ -284,11 +632,13 @@ class TelegramVideoStreamer:
 
         return 10.0  # Fallback duration
 
-    async def create_streaming_playlist(self, video_id: str, segment_info: Dict[str, SegmentInfo],
-                                      output_path: str, host: str, port: int):
-        """Creates the .m3u8 playlist with network-accessible URLs."""
+    async def create_streaming_playlist(self, video_id: str, output_path: str, host: str, port: int):
+        """Creates the .m3u8 playlist with network-accessible URLs using database data."""
+        # Get segments from database
+        segment_info = await self.db.get_video_segments(video_id)
+
         if not segment_info:
-            raise ValueError("No segment information provided")
+            raise ValueError(f"No segments found for video {video_id}")
 
         # Simple host warning for localhost
         if host in ['localhost', '127.0.0.1']:
@@ -296,9 +646,6 @@ class TelegramVideoStreamer:
             logger.warning("   For Jellyfin/network access, use your network IP (e.g., 192.168.x.x)")
         else:
             logger.info(f"✅ Creating playlist for network host: {host}")
-
-        self.segments_db[video_id] = segment_info
-        self._save_db()
 
         base_url = f"http://{host}:{port}"
         target_duration = math.ceil(max(s.duration for s in segment_info.values()))
@@ -312,8 +659,10 @@ class TelegramVideoStreamer:
             "#EXT-X-ALLOW-CACHE:YES"
         ]
 
-        for name in sorted(segment_info.keys()):
-            segment = segment_info[name]
+        # Sort segments by segment_order
+        sorted_segments = sorted(segment_info.items(), key=lambda x: x[1].segment_order)
+
+        for name, segment in sorted_segments:
             content.append(f"#EXTINF:{segment.duration:.6f},")
             content.append(f"{base_url}/segment/{video_id}/{name}")
 
@@ -357,13 +706,16 @@ class TelegramVideoStreamer:
 
     async def _prefetch_segments(self, video_id: str, current_segment_name: str):
         """Asynchronously pre-fetches the next segments into the cache for smooth playback."""
-        if video_id not in self.segments_db:
+        segments = await self.db.get_video_segments(video_id)
+        if not segments:
             return
 
-        all_segments = sorted(self.segments_db[video_id].keys())
+        # Sort segments by order
+        sorted_segments = sorted(segments.items(), key=lambda x: x[1].segment_order)
+        segment_names = [name for name, _ in sorted_segments]
 
         try:
-            current_index = all_segments.index(current_segment_name)
+            current_index = segment_names.index(current_segment_name)
         except ValueError:
             logger.warning(f"Current segment {current_segment_name} not found in segment list")
             return
@@ -374,27 +726,30 @@ class TelegramVideoStreamer:
         prefetch_tasks = []
         for i in range(1, self.prefetch_count + 1):
             next_index = current_index + i
-            if next_index >= len(all_segments):
+            if next_index >= len(segment_names):
                 break
 
-            next_segment_name = all_segments[next_index]
+            next_segment_name = segment_names[next_index]
             if next_segment_name not in self.segment_cache:
                 logger.debug(f"🚀 Scheduling prefetch for segment: {next_segment_name}")
-                prefetch_tasks.append(self._prefetch_single_segment(video_id, next_segment_name))
+                prefetch_tasks.append(self._prefetch_single_segment(video_id, next_segment_name, segments[next_segment_name]))
 
         if prefetch_tasks:
             # Run prefetch tasks concurrently
             await asyncio.gather(*prefetch_tasks, return_exceptions=True)
 
-    async def _prefetch_single_segment(self, video_id: str, segment_name: str):
+    async def _prefetch_single_segment(self, video_id: str, segment_name: str, segment_info: SegmentInfo):
         """Prefetch a single segment into cache."""
         try:
-            segment_info = self.segments_db[video_id][segment_name]
             downloaded_bytes = await self.download_segment_from_telegram(segment_info.file_id)
 
             if downloaded_bytes:
                 self.segment_cache[segment_name] = downloaded_bytes
                 self.cache_timestamps[segment_name] = time.time()
+
+                # Update cache metadata in database
+                await self.db.update_cache_metadata(segment_name, video_id, len(downloaded_bytes))
+
                 logger.debug(f"✅ Prefetched segment: {segment_name} ({len(downloaded_bytes):,} bytes)")
             else:
                 logger.warning(f"❌ Failed to prefetch segment: {segment_name}")
@@ -431,11 +786,13 @@ class TelegramVideoStreamer:
             video_id = request.match_info['video_id']
             segment_name = request.match_info['segment_name']
 
-            if video_id not in self.segments_db:
+            # Get segment info from database
+            segments = await self.db.get_video_segments(video_id)
+            if not segments:
                 logger.warning(f"Video {video_id} not found")
                 return web.Response(status=404, text="Video not found")
 
-            segment_info = self.segments_db[video_id].get(segment_name)
+            segment_info = segments.get(segment_name)
             if not segment_info:
                 logger.warning(f"Segment {segment_name} not found for video {video_id}")
                 return web.Response(status=404, text="Segment not found")
@@ -449,6 +806,8 @@ class TelegramVideoStreamer:
                 segment_bytes = self.segment_cache[segment_name]
                 # Update timestamp for LRU
                 self.cache_timestamps[segment_name] = time.time()
+                # Update cache metadata
+                await self.db.update_cache_metadata(segment_name, video_id, len(segment_bytes))
             else:
                 logger.warning(f"⚠️ Cache MISS for segment: {segment_name}. Downloading on-demand.")
                 segment_bytes = await self.download_segment_from_telegram(segment_info.file_id)
@@ -491,7 +850,7 @@ class TelegramVideoStreamer:
             )
 
         async def debug_info(request: web.Request):
-            """Debug endpoint to help troubleshoot Jellyfin issues."""
+            """Enhanced debug endpoint with database statistics."""
             video_id = request.match_info.get('video_id', 'all')
 
             debug_data = {
@@ -506,34 +865,103 @@ class TelegramVideoStreamer:
                 }
             }
 
+            # Add database statistics
+            db_stats = await self.db.get_database_stats()
+            debug_data['database_stats'] = db_stats
+
             if video_id == 'all':
                 debug_data['videos'] = {}
-                for vid, segments in self.segments_db.items():
-                    debug_data['videos'][vid] = {
+                videos = await self.db.get_all_videos()
+
+                for video in videos:
+                    segments = await self.db.get_video_segments(video.video_id)
+                    debug_data['videos'][video.video_id] = {
+                        'original_filename': video.original_filename,
                         'segment_count': len(segments),
-                        'total_duration': sum(s.duration for s in segments.values()),
-                        'playlist_url': f"http://{host}:{port}/playlist/{vid}.m3u8",
-                        'first_segment_url': f"http://{host}:{port}/segment/{vid}/{sorted(segments.keys())[0]}" if segments else None
+                        'total_duration': video.total_duration,
+                        'file_size': video.file_size,
+                        'status': video.status,
+                        'created_at': video.created_at,
+                        'playlist_url': f"http://{host}:{port}/playlist/{video.video_id}.m3u8",
+                        'first_segment_url': f"http://{host}:{port}/segment/{video.video_id}/{sorted(segments.keys(), key=lambda x: segments[x].segment_order)[0]}" if segments else None
                     }
             else:
-                if video_id in self.segments_db:
-                    segments = self.segments_db[video_id]
+                video_info = await self.db.get_video_info(video_id)
+                if video_info:
+                    segments = await self.db.get_video_segments(video_id)
                     debug_data['video_info'] = {
                         'video_id': video_id,
+                        'original_filename': video_info.original_filename,
                         'segment_count': len(segments),
+                        'total_duration': video_info.total_duration,
+                        'file_size': video_info.file_size,
+                        'status': video_info.status,
+                        'created_at': video_info.created_at,
                         'segments': [
                             {
-                                'name': name,
+                                'name': info.filename,
                                 'duration': info.duration,
                                 'size': info.file_size,
-                                'url': f"http://{host}:{port}/segment/{video_id}/{name}"
-                            } for name, info in sorted(segments.items())
+                                'order': info.segment_order,
+                                'url': f"http://{host}:{port}/segment/{video_id}/{info.filename}"
+                            } for info in sorted(segments.values(), key=lambda x: x.segment_order)
                         ]
                     }
                 else:
                     debug_data['error'] = f"Video {video_id} not found"
 
             return web.json_response(debug_data)
+
+        async def list_videos(request: web.Request):
+            """Endpoint to list all available videos."""
+            videos = await self.db.get_all_videos()
+
+            video_list = []
+            for video in videos:
+                segments = await self.db.get_video_segments(video.video_id)
+                video_list.append({
+                    'video_id': video.video_id,
+                    'original_filename': video.original_filename,
+                    'total_duration': video.total_duration,
+                    'total_segments': len(segments),
+                    'file_size': video.file_size,
+                    'status': video.status,
+                    'created_at': video.created_at,
+                    'playlist_url': f"http://{host}:{port}/playlist/{video.video_id}.m3u8"
+                })
+
+            return web.json_response({
+                'total_videos': len(video_list),
+                'videos': video_list
+            })
+
+        async def delete_video_endpoint(request: web.Request):
+            """Endpoint to delete a video and its segments."""
+            video_id = request.match_info['video_id']
+
+            # Check if video exists
+            video_info = await self.db.get_video_info(video_id)
+            if not video_info:
+                return web.json_response({'error': f'Video {video_id} not found'}, status=404)
+
+            # Delete from database
+            success = await self.db.delete_video(video_id)
+
+            if success:
+                # Clean up playlist file
+                playlist_path = f"playlists/{video_id}.m3u8"
+                if os.path.exists(playlist_path):
+                    os.remove(playlist_path)
+
+                # Clean up cache entries for this video
+                cache_keys_to_remove = [key for key in self.segment_cache.keys() if key.startswith(f"{video_id}_")]
+                for key in cache_keys_to_remove:
+                    self.segment_cache.pop(key, None)
+                    self.cache_timestamps.pop(key, None)
+
+                return web.json_response({'message': f'Video {video_id} deleted successfully'})
+            else:
+                return web.json_response({'error': f'Failed to delete video {video_id}'}, status=500)
 
         async def test_jellyfin_compatibility(request: web.Request):
             """Test endpoint specifically for Jellyfin compatibility."""
@@ -563,18 +991,43 @@ http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp
         app.router.add_get('/playlist/{video_id}.m3u8', serve_playlist)
         app.router.add_get('/debug/{video_id}', debug_info)
         app.router.add_get('/debug', debug_info)
+        app.router.add_get('/videos', list_videos)
+        app.router.add_delete('/videos/{video_id}', delete_video_endpoint)
         app.router.add_get('/test-jellyfin.m3u8', test_jellyfin_compatibility)
-        app.router.add_get('/', lambda r: web.Response(
-            text=f"""Telegram Video Streaming Server
-Available endpoints:
-• /debug - Server debug info
-• /debug/{{video_id}} - Video-specific debug info
-• /playlist/{{video_id}}.m3u8 - HLS playlist
-• /segment/{{video_id}}/{{segment}} - Video segments
-• /test-jellyfin.m3u8 - Jellyfin compatibility test
 
-Videos in database: {len(self.segments_db)}
-""", content_type='text/plain'))
+        # Enhanced root endpoint
+        async def root_handler(request):
+            stats = await self.db.get_database_stats()
+            videos_count = stats.get('videos', {}).get('total_videos', 0)
+            total_segments = stats.get('videos', {}).get('total_segments', 0)
+            cache_stats = stats.get('cache', {})
+
+            return web.Response(
+                text=f"""🎬 Telegram Video Streaming Server
+
+📊 Server Statistics:
+• Total Videos: {videos_count}
+• Total Segments: {total_segments}
+• Cached Segments: {cache_stats.get('total_cached_segments', 0)}
+• Cache Size: {cache_stats.get('total_cache_size_bytes', 0) / (1024*1024):.1f} MB
+• Database Size: {stats.get('database_size_bytes', 0) / (1024*1024):.1f} MB
+
+🔗 Available Endpoints:
+• GET  /                           - This page
+• GET  /videos                     - List all videos (JSON)
+• GET  /debug                      - Server debug info (JSON)
+• GET  /debug/{{video_id}}           - Video-specific debug info (JSON)
+• GET  /playlist/{{video_id}}.m3u8   - HLS playlist for video
+• GET  /segment/{{video_id}}/{{name}}  - Individual video segment
+• DEL  /videos/{{video_id}}          - Delete video and segments
+• GET  /test-jellyfin.m3u8         - Jellyfin compatibility test
+
+🎯 Usage Examples:
+• Stream in VLC: http://{host}:{port}/playlist/{{video_id}}.m3u8
+• Jellyfin .strm file content: http://{host}:{port}/playlist/{{video_id}}.m3u8
+""", content_type='text/plain')
+
+        app.router.add_get('/', root_handler)
 
         # Start server
         runner = web.AppRunner(app)
@@ -585,6 +1038,7 @@ Videos in database: {len(self.segments_db)}
         logger.info(f"🚀 Streaming server started on http://{host}:{port}")
         logger.info(f"📊 Available endpoints:")
         logger.info(f"   • Server info: http://{host}:{port}")
+        logger.info(f"   • Videos list: http://{host}:{port}/videos")
         logger.info(f"   • Debug info: http://{host}:{port}/debug")
         logger.info(f"   • Videos debug: http://{host}:{port}/debug/{{video_id}}")
         logger.info(f"   • Playlists: http://{host}:{port}/playlist/{{video_id}}.m3u8")
@@ -597,7 +1051,7 @@ async def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Telegram Video Streaming App - Upload and stream videos using Telegram as storage",
+        description="Telegram Video Streaming App with SQLite Backend - Upload and stream videos using Telegram as storage",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -609,6 +1063,10 @@ Examples:
 
   Start streaming server:
     python %(prog)s serve --bot-token YOUR_TOKEN --chat-id @your_channel --host 0.0.0.0
+
+  Database management:
+    python %(prog)s db-stats --bot-token YOUR_TOKEN --chat-id @your_channel
+    python %(prog)s cleanup --bot-token YOUR_TOKEN --chat-id @your_channel
         """
     )
 
@@ -626,12 +1084,31 @@ Examples:
     serve_parser.add_argument('--host', default='0.0.0.0',
                             help='Host to bind server to (0.0.0.0 for network access, localhost for local only)')
 
+    # Database stats command
+    stats_parser = subparsers.add_parser('db-stats', help='Show database statistics')
+
+    # Cleanup command
+    cleanup_parser = subparsers.add_parser('cleanup', help='Clean up old cache entries and optimize database')
+    cleanup_parser.add_argument('--hours', type=int, default=24, help='Remove cache entries older than N hours (default: 24)')
+
+    # List videos command
+    list_parser = subparsers.add_parser('list', help='List all videos in database')
+
+    # Delete video command
+    delete_parser = subparsers.add_parser('delete', help='Delete a video and its segments')
+    delete_parser.add_argument('--video-id', required=True, help='Video ID to delete')
+
     # Common arguments
-    for p in [upload_parser, serve_parser]:
+    for p in [upload_parser, serve_parser, stats_parser, cleanup_parser, list_parser, delete_parser]:
         p.add_argument('--bot-token', required=True, help='Telegram bot token')
         p.add_argument('--chat-id', required=True, help='Telegram chat ID (e.g., @channel or numeric ID)')
+        p.add_argument('--db-path', default='video_streaming.db', help='SQLite database file path (default: video_streaming.db)')
+
+    # Additional arguments for specific commands
+    for p in [upload_parser, serve_parser]:
         p.add_argument('--port', type=int, default=5050, help='Port for the streaming server (default: 5050)')
-        p.add_argument('--max-chunk-size', type=int, default=20,
+
+    upload_parser.add_argument('--max-chunk-size', type=int, default=20,
                       help='Maximum chunk size in MB (default: 20)')
 
     args = parser.parse_args()
@@ -642,7 +1119,8 @@ Examples:
         return 1
 
     try:
-        streamer = TelegramVideoStreamer(args.bot_token, args.chat_id)
+        streamer = TelegramVideoStreamer(args.bot_token, args.chat_id, args.db_path)
+        await streamer.initialize()
 
         if args.command == 'upload':
             video_id = args.video_id or Path(args.video).stem
@@ -652,38 +1130,39 @@ Examples:
             print(f"🎬 Processing video: {args.video}")
             print(f"📁 Video ID: {video_id}")
             print(f"📊 Max chunk size: {args.max_chunk_size}MB")
+            print(f"🗄️ Database: {args.db_path}")
             print()
 
             print("1️⃣ Splitting video into HLS segments...")
             await streamer.split_video_to_hls(args.video, segments_dir, max_chunk_bytes)
 
-            print("\n2️⃣ Uploading segments to Telegram...")
-            segment_info = await streamer.upload_segments_to_telegram(segments_dir, video_id)
+            print("\n2️⃣ Uploading segments to Telegram and storing in database...")
+            segment_info = await streamer.upload_segments_to_telegram(segments_dir, video_id, args.video)
 
             print(f"\n3️⃣ Creating streaming playlist for host '{args.host}'...")
             os.makedirs('playlists', exist_ok=True)
             playlist_path = f"playlists/{video_id}.m3u8"
-            await streamer.create_streaming_playlist(video_id, segment_info, playlist_path, args.host, args.port)
+            await streamer.create_streaming_playlist(video_id, playlist_path, args.host, args.port)
 
             print(f"\n✅ Upload completed successfully!")
             print(f"📋 Playlist created: {playlist_path}")
             print(f"🎯 Streaming URL: http://{args.host}:{args.port}/playlist/{video_id}.m3u8")
+            print(f"🗄️ Video stored in database: {args.db_path}")
             print(f"\n💡 For Jellyfin:")
             print(f"   1. Create a file named '{video_id}.strm' in your Jellyfin media folder")
             print(f"   2. Put this URL inside the .strm file:")
             print(f"      http://{args.host}:{args.port}/playlist/{video_id}.m3u8")
             print(f"\n🚀 To start streaming, run:")
             print(f"   python {Path(__file__).name} serve --bot-token YOUR_TOKEN --chat-id YOUR_CHAT_ID --host {args.host}")
-            print(f"\n🔧 To test the stream works:")
-            print(f"   • Browser: http://{args.host}:{args.port}/debug/{video_id}")
-            print(f"   • VLC: Open Network Stream → http://{args.host}:{args.port}/playlist/{video_id}.m3u8")
 
         elif args.command == 'serve':
-            if not streamer.segments_db:
+            stats = await streamer.db.get_database_stats()
+            videos_count = stats.get('videos', {}).get('total_videos', 0)
+
+            if videos_count == 0:
                 print("⚠️ No videos found in database. Upload some videos first.")
-                print(f"📊 Available videos: {len(streamer.segments_db)}")
             else:
-                print(f"📊 Found {len(streamer.segments_db)} video(s) in database")
+                print(f"📊 Found {videos_count} video(s) in database")
 
             runner = await streamer.start_streaming_server(args.host, args.port)
 
@@ -695,6 +1174,82 @@ Examples:
             finally:
                 await runner.cleanup()
                 print("✅ Server stopped")
+
+        elif args.command == 'db-stats':
+            stats = await streamer.db.get_database_stats()
+
+            print("🗄️ Database Statistics:")
+            print(f"   Database file: {args.db_path}")
+            if os.path.exists(args.db_path):
+                print(f"   Database size: {os.path.getsize(args.db_path) / (1024*1024):.2f} MB")
+
+            video_stats = stats.get('videos', {})
+            print(f"\n📹 Videos:")
+            print(f"   Total videos: {video_stats.get('total_videos', 0)}")
+            print(f"   Total segments: {video_stats.get('total_segments', 0)}")
+            print(f"   Total file size: {video_stats.get('total_file_size_bytes', 0) / (1024*1024*1024):.2f} GB")
+            print(f"   Total duration: {video_stats.get('total_duration_seconds', 0) / 3600:.2f} hours")
+
+            cache_stats = stats.get('cache', {})
+            print(f"\n💾 Cache:")
+            print(f"   Cached segments: {cache_stats.get('total_cached_segments', 0)}")
+            print(f"   Cache size: {cache_stats.get('total_cache_size_bytes', 0) / (1024*1024):.2f} MB")
+            print(f"   Average access count: {cache_stats.get('average_access_count', 0)}")
+
+        elif args.command == 'cleanup':
+            print(f"🧹 Cleaning up cache entries older than {args.hours} hours...")
+            deleted_count = await streamer.db.cleanup_old_cache_entries(args.hours)
+            print(f"✅ Cleaned up {deleted_count} old cache entries")
+
+        elif args.command == 'list':
+            videos = await streamer.db.get_all_videos()
+
+            if not videos:
+                print("📭 No videos found in database")
+            else:
+                print(f"📹 Found {len(videos)} video(s):\n")
+                for video in videos:
+                    segments = await streamer.db.get_video_segments(video.video_id)
+                    print(f"🎬 {video.video_id}")
+                    print(f"   Original: {video.original_filename}")
+                    print(f"   Duration: {video.total_duration:.2f}s")
+                    print(f"   Segments: {len(segments)}")
+                    print(f"   Size: {video.file_size / (1024*1024):.2f} MB")
+                    print(f"   Status: {video.status}")
+                    print(f"   Created: {video.created_at}")
+                    print()
+
+        elif args.command == 'delete':
+            video_id = args.video_id
+
+            # Check if video exists
+            video_info = await streamer.db.get_video_info(video_id)
+            if not video_info:
+                print(f"❌ Video '{video_id}' not found in database")
+                return 1
+
+            print(f"🗑️ Deleting video: {video_id}")
+            print(f"   Original file: {video_info.original_filename}")
+            print(f"   Segments: {video_info.total_segments}")
+
+            confirm = input("Are you sure you want to delete this video? (yes/no): ")
+            if confirm.lower() not in ['yes', 'y']:
+                print("❌ Deletion cancelled")
+                return 0
+
+            success = await streamer.db.delete_video(video_id)
+
+            if success:
+                # Clean up playlist file
+                playlist_path = f"playlists/{video_id}.m3u8"
+                if os.path.exists(playlist_path):
+                    os.remove(playlist_path)
+                    print(f"🗑️ Removed playlist file: {playlist_path}")
+
+                print(f"✅ Video '{video_id}' deleted successfully")
+            else:
+                print(f"❌ Failed to delete video '{video_id}'")
+                return 1
 
     except KeyboardInterrupt:
         print("\n🛑 Operation cancelled by user")
