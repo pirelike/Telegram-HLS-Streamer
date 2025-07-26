@@ -1,0 +1,35 @@
+# Core dependencies for Telegram Video Streaming System
+# Run: pip install -r requirements.txt
+
+# Telegram Bot API
+python-telegram-bot>=20.0,<21.0
+
+# Async HTTP server and client
+aiohttp>=3.8.0,<4.0.0
+aiofiles>=23.0.0,<24.0.0
+
+# Database
+aiosqlite>=0.19.0,<1.0.0
+
+# Templating
+aiohttp-jinja2>=1.5.0,<2.0.0
+Jinja2>=3.1.0,<4.0.0
+
+# Configuration management
+python-dotenv>=1.0.0,<2.0.0
+
+# HTTP client for additional requests
+httpx>=0.24.0,<1.0.0
+
+# Development and debugging (optional)
+# Uncomment for development
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
+
+# Production deployment (optional)
+# Uncomment for production deployment
+# gunicorn>=21.0.0
+# uvloop>=0.17.0  # For better async performance on Linux/macOS
