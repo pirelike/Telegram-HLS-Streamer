@@ -407,43 +407,13 @@ class VideoProcessor:
         """
         cmd = ['ffmpeg', '-i', video_path]
 
-        # Video codec settings
-        video_streams = video_info.get('video_streams', [])
-        if video_streams:
-            video_codec = video_streams[0].get('codec_name', '').lower()
-
-            # Use stream copy when possible for better performance and quality
-            if video_codec in ['h264', 'h.264', 'avc']:
-                cmd.extend(['-c:v', 'copy'])
-                logger.debug("Using video stream copy (H.264 detected)")
-            else:
-                # Re-encode to H.264 for compatibility
-                cmd.extend([
-                    '-c:v', 'libx264',
-                    '-preset', 'medium',
-                    '-crf', '23',  # Good quality/size balance
-                    '-maxrate', '5000k',
-                    '-bufsize', '10000k'
-                ])
-                logger.debug(f"Re-encoding video from {video_codec} to H.264")
-        else:
-            cmd.extend(['-c:v', 'libx264', '-preset', 'medium', '-crf', '23'])
-
-        # Audio codec settings
-        audio_streams = video_info.get('audio_streams', [])
-        if audio_streams:
-            audio_codec = audio_streams[0].get('codec_name', '').lower()
-
-            # Use stream copy for compatible audio codecs
-            if audio_codec in ['aac', 'mp3']:
-                cmd.extend(['-c:a', 'copy'])
-                logger.debug(f"Using audio stream copy ({audio_codec} detected)")
-            else:
-                # Re-encode to AAC for compatibility
-                cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
-                logger.debug(f"Re-encoding audio from {audio_codec} to AAC")
-        else:
-            cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+        # --- MODIFICATION START ---
+        # Force stream copy for both video and audio to avoid re-encoding.
+        # This preserves original quality and is much faster.
+        cmd.extend(['-c:v', 'copy'])
+        cmd.extend(['-c:a', 'copy'])
+        logger.debug("Forcing video and audio stream copy to prevent re-encoding.")
+        # --- MODIFICATION END ---
 
         # HLS-specific options
         cmd.extend([
