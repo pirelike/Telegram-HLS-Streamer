@@ -40,7 +40,6 @@ your-project-folder/
 ├── video_processor.py   # Handles video splitting with FFmpeg
 ├── telegram_handler.py  # Manages all communication with the Telegram API
 ├── database.py          # Manages the SQLite database for metadata
-├── utils.py             # Utility functions, like IP detection
 ├── logger_config.py     # Centralized logging configuration
 ├── templates/
 │   └── index.html       # The HTML, CSS, and JS for the web frontend
@@ -97,10 +96,6 @@ BOT_TOKEN="12345:ABCDEF..."
 
 # The username of your public Telegram channel (e.g., @my_stream_channel)
 CHAT_ID="@your_channel_id"
-
-# Optional: For public-facing links, uncomment and set your domain
-# PUBLIC_DOMAIN="telegram.yourdomain.com"
-```
 
 -----
 
