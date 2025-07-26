@@ -252,12 +252,3 @@ http://192.168.1.100:8080/segment/video_id/segment_0000.ts
 ---
 
 This system represents an innovative approach to video storage and streaming, utilizing Telegram's infrastructure as a free, reliable content delivery network while maintaining full control over access and playback through a custom streaming server with enterprise-grade SQLite backend for metadata management.
-## 🚧 **Future Enhancements**
-- **User Authentication**: Login system for private content
-- **Quality Selection**: Multiple bitrate streams for adaptive streaming
-- **Web Interface**: Browser-based management dashboard
-- **Load Balancing**: Multiple server instances for high availability
-
----
-
-This system represents a innovative approach to video storage and streaming, utilizing Telegram's infrastructure as a free, reliable content delivery network while maintaining full control over access and playback through a custom streaming server.
