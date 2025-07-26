@@ -1,262 +1,147 @@
-# 📺 Telegram Video Streaming System - Complete Documentation
+## 📺 Telegram Video Streaming System - Complete Documentation
 
-## 🎯 **Project Overview**
+### 🎯 **Project Overview**
 
-This is a sophisticated Python application that transforms Telegram into a **distributed video storage and streaming platform**. It solves the problem of storing and streaming large video files by leveraging Telegram's generous file storage limits and creating an on-demand HLS (HTTP Live Streaming) server.
+This is a sophisticated Python application that transforms Telegram into a **distributed video storage and streaming platform**. It solves the problem of storing and streaming large video files by leveraging Telegram's generous file storage limits. The system works by splitting a large video file into smaller, manageable segments, uploading them to a designated Telegram channel, and then serving them on demand through a built-in HLS (HTTP Live Streaming) server.
 
-    your-project-folder/
-    ├── main.py
-    ├── database.py
-    ├── logger_config.py
-    ├── telegram_handler.py
-    ├── video_processor.py
-    └── stream_server.py
+The application features a modern web interface for easy drag-and-drop video uploads and a real-time progress log. It is also configurable through a simple `.env` file, making it secure and easy to set up for both local network streaming and public access via a custom domain.
 
-## 🏗️ **System Architecture**
+### 🏗️ **System Architecture**
+
+The application is built with a modular, asynchronous design to handle concurrent processing and streaming efficiently.
 
 ```
+┌──────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ Web UI or CLI    ├─►  │ FFmpeg Splitter │───►│ Telegram Upload │
+│ (User Input)     │    │   (HLS Segments)  │    │  (Bot API)      │
+└──────────────────┘    └─────────────────┘    └─────────────────┘
+                                                        │
+                                                        ▼
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Video File    │───►│  FFmpeg Splitter │───►│ Telegram Upload │
-│   (Any Format)  │    │    (HLS/m3u8)    │    │   (20MB chunks) │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                                         │
-                                                         ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ Media Players   │◄───│ HTTP Streaming   │◄───│   SQLite DB     │
-│ (Jellyfin/VLC)  │    │    Server        │    │  (Metadata)     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                                                         ▲
-                                                         │
-                                               ┌─────────────────┐
-                                               │ Telegram Storage│
-                                               │   (File IDs)    │
-                                               └─────────────────┘
+│ Media Players   │◄───│ HTTP Streamer    │◄───│   SQLite DB     │
+│ (Jellyfin/VLC)  │    │ (aiohttp Server) │    │  (Metadata)     │
+└──────────────────┘    └──────────────────┘    └─────────────────┘
+      ▲                                                  ▲
+      │                                                  │
+┌─────┴──────────┐                           ┌─────────────────┐
+│ .env Config    │                           │ Telegram Storage│
+│ (Tokens/Domain)│                           │   (File IDs)    │
+└────────────────┘                           └─────────────────┘
 ```
 
-## 🔧 **Core Components**
+#### **File Structure**
 
-### **1. Video Processing Engine**
-- **FFmpeg Integration**: Automatically splits videos into HLS-compatible `.ts` segments
-- **Intelligent Sizing**: Calculates optimal segment duration to stay under 20MB limits
-- **Format Optimization**: Converts to H.264/AAC for maximum compatibility
+The project is organized into logical modules for maintainability and clarity.
 
-### **2. Telegram Storage Layer**
-- **Distributed Upload**: Each video segment uploaded as separate Telegram document
-- **Metadata Tracking**: Stores file IDs, durations, and sizes in SQLite database
-- **Error Recovery**: Retry logic and partial upload handling
+```
+your-project-folder/
+├── main.py              # Main entry point, handles CLI and starts the server
+├── stream_server.py     # The aiohttp web server, web UI, and API endpoints
+├── video_processor.py   # Handles video splitting with FFmpeg
+├── telegram_handler.py  # Manages all communication with the Telegram API
+├── database.py          # Manages the SQLite database for metadata
+├── utils.py             # Utility functions, like IP detection
+├── logger_config.py     # Centralized logging configuration
+├── templates/
+│   └── index.html       # The HTML, CSS, and JS for the web frontend
+└── .env                 # Configuration file for secrets and settings
+```
 
-### **3. On-Demand Streaming Server**
-- **HLS Playlist Generation**: Creates `.m3u8` playlists with network-accessible URLs
-- **Smart Caching**: Pre-fetches upcoming segments for smooth playback
-- **CORS Support**: Compatible with web-based media players
+-----
 
-### **4. SQLite Database Backend**
-- **Production-Grade Storage**: Robust metadata management with ACID compliance
-- **Three-Table Schema**: videos, segments, cache_metadata with proper relationships
-- **Performance Optimization**: Indexed queries and async operations
-- **Data Integrity**: Foreign key constraints and transaction safety
+### 🔧 **Core Components & Code Explanation**
 
-## 📋 **Key Features**
+  * **`main.py`**: This is the application's entry point. It uses `argparse` to handle command-line arguments and `dotenv` to load configurations from the `.env` file. Its primary role is to initialize all other components and start the `StreamServer`.
 
-### **✨ Advanced Capabilities**
-- **Network Streaming**: Serves videos to any device on your network
-- **Jellyfin Integration**: Direct compatibility with Jellyfin media server
-- **Bandwidth Optimization**: Only downloads segments as needed
-- **Multi-Device Support**: Works with VLC, web browsers, mobile apps
-- **Persistent Storage**: Maintains video library across restarts with SQLite
+  * **`stream_server.py`**: The heart of the application. It uses `aiohttp` to create a powerful asynchronous web server. It serves the `index.html` frontend, provides API endpoints (`/process`, `/status/{task_id}`) to handle uploads and report progress, and serves the final HLS playlists (`/playlist/...`) and video segments (`/segment/...`). It's responsible for managing the entire web-based workflow.
 
-### **🛡️ Reliability Features**
-- **Error Handling**: Comprehensive exception handling with retry logic
-- **Host Validation**: Prevents common network configuration issues
-- **Resource Limits**: Respects Telegram's API limits and file size constraints
-- **Debug Endpoints**: Built-in troubleshooting and monitoring tools
+  * **`video_processor.py`**: A dedicated module that interfaces with **FFmpeg**. Its `split_video_to_hls` function takes a video file and intelligently splits it into HLS-compatible `.ts` segments, preparing them for upload.
 
-### **🗄️ Database Management**
-- **Video Status Tracking**: Processing, active, error states
-- **Cache Analytics**: Usage statistics and performance metrics  
-- **API Endpoints**: RESTful interface for video management
-- **CLI Commands**: Database stats, cleanup, and maintenance tools
+  * **`telegram_handler.py`**: This module encapsulates all logic for interacting with the Telegram Bot API using the `python-telegram-bot` library. It handles the reliable upload of video segments and the on-demand downloading of those segments for streaming.
 
-## 🚀 **Installation & Setup**
+  * **`database.py`**: Manages all interactions with the **SQLite database** using `aiosqlite`. It creates the necessary tables (`videos`, `segments`) and provides asynchronous methods to add, retrieve, and manage the metadata associated with each video and its corresponding segments.
 
-### **Dependencies**
+  * **`utils.py`**: Contains helper functions, most notably `get_local_ip()`, which automatically detects the machine's local IP address to simplify setup for local network streaming.
+
+  * **`templates/index.html`**: A single-file, modern web interface. It contains the HTML structure, CSS for styling, and JavaScript to handle file uploads, form submissions, and real-time log updates using Server-Sent Events (SSE). It provides a user-friendly alternative to the command line.
+
+-----
+
+### 🚀 **Installation & Setup**
+
+#### **1. Prerequisites**
+
+  * **Python 3.8+**
+  * **FFmpeg**: Must be installed on your system and accessible in your system's PATH.
+
+#### **2. Install Python Dependencies**
+
+Create a virtual environment and install the required packages.
+
 ```bash
-pip install python-telegram-bot aiohttp aiofiles aiosqlite
-# Also requires FFmpeg installed on system
+# Create and activate a virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+
+# Install dependencies
+pip install python-telegram-bot aiohttp aiofiles aiosqlite aiohttp-jinja2 python-dotenv
 ```
 
-### **Telegram Bot Setup**
-1. Message `@BotFather` on Telegram
-2. Create new bot: `/newbot`
-3. Get bot token and chat ID
-4. Add bot to your channel/group
+#### **3. Configure Your `.env` File**
 
-## 💻 **Usage Guide**
+Create a file named `.env` in your project root.
 
-### **Find Your Network IP**
+```
+# Your Telegram Bot Token from @BotFather
+BOT_TOKEN="12345:ABCDEF..."
+
+# The username of your public Telegram channel (e.g., @my_stream_channel)
+CHAT_ID="@your_channel_id"
+
+# Optional: For public-facing links, uncomment and set your domain
+# PUBLIC_DOMAIN="telegram.yourdomain.com"
+```
+
+-----
+
+### 💻 **Usage Guide**
+
+The primary way to use the application is through the web interface.
+
+#### **Start the Streaming Server**
+
+Run the following command in your terminal. It requires no arguments as all configuration is loaded from the `.env` file.
+
 ```bash
-python -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('8.8.8.8', 80)); print('Your IP:', s.getsockname()[0]); s.close()"
+python main.py serve
 ```
 
-### **Upload Video**
+By default, the server starts on port `8080`. You can change this with the `--port` flag:
+
 ```bash
-python telegram_streamer.py upload \
-  --video movie.mp4 \
-  --bot-token YOUR_BOT_TOKEN \
-  --chat-id YOUR_CHAT_ID \
-  --host 192.168.1.100
+python main.py serve --port 5050
 ```
 
-### **Start Streaming Server**
-```bash
-python telegram_streamer.py serve \
-  --bot-token YOUR_BOT_TOKEN \
-  --chat-id YOUR_CHAT_ID \
-  --host 0.0.0.0 \
-  --port 8080
-```
+#### **Use the Web Interface**
 
-### **Database Management**
-```bash
-# Show database statistics
-python telegram_streamer.py db-stats --bot-token TOKEN --chat-id CHAT
+1.  Open your browser and navigate to `http://127.0.0.1:8080` (or your PC's local IP address, e.g., `http://192.168.0.199:8080`).
+2.  Drag and drop a video file onto the page or click to select a file.
+3.  Click "Upload and Process."
+4.  Watch the real-time log for progress.
+5.  Once complete, a link to the HLS playlist will appear. This is your streaming URL.
 
-# List all videos
-python telegram_streamer.py list --bot-token TOKEN --chat-id CHAT
+#### **Jellyfin / Plex Integration**
 
-# Delete a video
-python telegram_streamer.py delete --video-id movie --bot-token TOKEN --chat-id CHAT
+1.  In your Jellyfin/Plex media library, create a new file with the `.strm` extension (e.g., `My Movie.strm`).
+2.  Open the file and paste the streaming URL generated by the application into it (e.g., `http://192.168.0.199:8080/playlist/your_video_id.m3u8`).
+3.  Refresh your media library. The video will now appear and stream directly from your Telegram-backed server.
 
-# Cleanup old cache entries
-python telegram_streamer.py cleanup --hours 24 --bot-token TOKEN --chat-id CHAT
-```
+-----
 
-### **Jellyfin Integration**
-1. Create `movie.strm` file in Jellyfin media folder
-2. Add single line: `http://192.168.1.100:8080/playlist/movie.m3u8`
-3. Refresh Jellyfin library
+### 🛠️ **Technical Implementation Details**
 
-## 🔍 **Debug & Monitoring**
-
-### **Available Endpoints**
-- `http://localhost:8080/debug` - Server status and statistics
-- `http://localhost:8080/debug/video_id` - Specific video information
-- `http://localhost:8080/videos` - List all videos (JSON API)
-- `http://localhost:8080/playlist/video_id.m3u8` - HLS playlist
-- `http://localhost:8080/test-jellyfin.m3u8` - Compatibility test
-- `DELETE /videos/video_id` - Remove video via API
-
-## ⚡ **Performance Optimizations**
-
-### **Caching Strategy**
-- **Prefetch Count**: Downloads 3 segments ahead of current playback
-- **Cache Size**: 100MB memory limit with automatic cleanup
-- **TTL Management**: 5-minute expiration for cached segments
-
-### **Database Efficiency**
-- **Indexed Queries**: Optimized database access patterns
-- **Async Operations**: Non-blocking database operations
-- **Connection Pooling**: Efficient database connection management
-- **VACUUM Operations**: Automatic database optimization
-
-### **Network Efficiency**
-- **Concurrent Downloads**: Multiple segments fetched simultaneously
-- **Smart Sizing**: Segments optimized for 20MB target size
-- **HTTP Headers**: Proper caching and CORS headers for compatibility
-
-## 🎯 **Use Cases**
-
-### **Home Media Server**
-- Store large movie collection using Telegram's free storage
-- Stream to multiple devices without local storage requirements
-- Integrate with existing Jellyfin/Plex setups
-
-### **Content Distribution**
-- Share videos across multiple locations
-- Backup and redundancy through Telegram's infrastructure
-- Mobile-friendly streaming for remote access
-
-### **Educational/Business**
-- Distribute training videos without bandwidth costs
-- Archive video content with unlimited retention
-- Cross-platform compatibility for diverse user bases
-
-## 🛠️ **Technical Implementation Details**
-
-### **Database Structure**
-```sql
--- Videos table
-CREATE TABLE videos (
-    video_id TEXT PRIMARY KEY,
-    original_filename TEXT NOT NULL,
-    total_duration REAL NOT NULL,
-    total_segments INTEGER NOT NULL,
-    file_size INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
--- Segments table  
-CREATE TABLE segments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    video_id TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    duration REAL NOT NULL,
-    file_id TEXT NOT NULL,
-    file_size INTEGER NOT NULL,
-    segment_order INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE
-);
-
--- Cache metadata table
-CREATE TABLE cache_metadata (
-    segment_filename TEXT PRIMARY KEY,
-    video_id TEXT NOT NULL,
-    cached_at TEXT NOT NULL,
-    access_count INTEGER NOT NULL DEFAULT 1,
-    last_accessed TEXT NOT NULL,
-    cache_size INTEGER NOT NULL,
-    FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE
-);
-```
-
-### **HLS Playlist Format**
-```m3u8
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:55
-#EXT-X-MEDIA-SEQUENCE:0
-#EXT-X-ALLOW-CACHE:YES
-#EXTINF:53.080000,
-http://192.168.1.100:8080/segment/video_id/segment_0000.ts
-#EXT-X-ENDLIST
-```
-
-## 🔐 **Security Considerations**
-- Bot token security (use environment variables in production)
-- Network access controls (firewall rules for streaming port)
-- Content access validation (authentication for sensitive content)
-- Database file permissions and backup strategies
-
-## 🚧 **Future Enhancements**
-- **User Authentication**: Login system for private content
-- **Quality Selection**: Multiple bitrate streams for adaptive streaming
-- **Web Interface**: Browser-based management dashboard
-- **Load Balancing**: Multiple server instances for high availability
-- **Auto-Transcoding**: Automatic video format optimization
-- **Bulk Operations**: Mass upload and management features
-
-## 📊 **Current Status**
-- ✅ **SQLite Backend**: Production-ready database with full ACID compliance
-- ✅ **Enhanced CLI**: Complete command-line interface with all management operations
-- ✅ **RESTful API**: HTTP endpoints for programmatic access
-- ✅ **Cache Management**: Intelligent caching with statistics and cleanup
-- ✅ **Error Handling**: Comprehensive error recovery and logging
-- ✅ **Performance Monitoring**: Built-in statistics and debugging tools
-
----
-
-This system represents an innovative approach to video storage and streaming, utilizing Telegram's infrastructure as a free, reliable content delivery network while maintaining full control over access and playback through a custom streaming server with enterprise-grade SQLite backend for metadata management.
+  * **Asynchronous Processing**: The entire workflow is asynchronous. When a video is uploaded via the web UI, the server immediately responds and starts a background task. This prevents the UI from freezing and allows for real-time progress updates using Server-Sent Events (SSE).
+  * **HLS Streaming**: The application uses **HTTP Live Streaming (HLS)**, an adaptive bitrate streaming protocol. It generates a `.m3u8` playlist that media players use to request video segments sequentially, enabling smooth playback and seeking even for very large files.
+  * **Database Schema**: The SQLite database uses two main tables:
+      * `videos`: Stores high-level information about each uploaded video, like its original filename and total duration.
+      * `segments`: Stores metadata for every individual video chunk, including its duration, order, and the crucial Telegram `file_id` needed for downloading. A `FOREIGN KEY` links each segment back to its parent video, ensuring data integrity.
