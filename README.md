@@ -97,6 +97,8 @@ BOT_TOKEN="12345:ABCDEF..."
 # The username of your public Telegram channel (e.g., @my_stream_channel)
 CHAT_ID="@your_channel_id"
 
+```
+
 -----
 
 ### 💻 **Usage Guide**
