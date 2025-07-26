@@ -14,9 +14,15 @@ This is a sophisticated Python application that transforms Telegram into a **dis
                                                          │
                                                          ▼
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ Media Players   │◄───│ HTTP Streaming   │◄───│ Telegram Storage│
-│ (Jellyfin/VLC)  │    │    Server        │    │   (File IDs)    │
+│ Media Players   │◄───│ HTTP Streaming   │◄───│   SQLite DB     │
+│ (Jellyfin/VLC)  │    │    Server        │    │  (Metadata)     │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
+                                                         ▲
+                                                         │
+                                               ┌─────────────────┐
+                                               │ Telegram Storage│
+                                               │   (File IDs)    │
+                                               └─────────────────┘
 ```
 
 ## 🔧 **Core Components**
@@ -28,7 +34,7 @@ This is a sophisticated Python application that transforms Telegram into a **dis
 
 ### **2. Telegram Storage Layer**
 - **Distributed Upload**: Each video segment uploaded as separate Telegram document
-- **Metadata Tracking**: Stores file IDs, durations, and sizes in JSON database
+- **Metadata Tracking**: Stores file IDs, durations, and sizes in SQLite database
 - **Error Recovery**: Retry logic and partial upload handling
 
 ### **3. On-Demand Streaming Server**
@@ -36,10 +42,11 @@ This is a sophisticated Python application that transforms Telegram into a **dis
 - **Smart Caching**: Pre-fetches upcoming segments for smooth playback
 - **CORS Support**: Compatible with web-based media players
 
-### **4. Cache Management System**
-- **LRU Eviction**: Removes least recently used segments when memory limit reached
-- **TTL Expiration**: Automatically cleans expired cache entries
-- **Concurrent Prefetching**: Downloads multiple segments simultaneously
+### **4. SQLite Database Backend**
+- **Production-Grade Storage**: Robust metadata management with ACID compliance
+- **Three-Table Schema**: videos, segments, cache_metadata with proper relationships
+- **Performance Optimization**: Indexed queries and async operations
+- **Data Integrity**: Foreign key constraints and transaction safety
 
 ## 📋 **Key Features**
 
@@ -48,7 +55,7 @@ This is a sophisticated Python application that transforms Telegram into a **dis
 - **Jellyfin Integration**: Direct compatibility with Jellyfin media server
 - **Bandwidth Optimization**: Only downloads segments as needed
 - **Multi-Device Support**: Works with VLC, web browsers, mobile apps
-- **Persistent Storage**: Maintains video library across restarts
+- **Persistent Storage**: Maintains video library across restarts with SQLite
 
 ### **🛡️ Reliability Features**
 - **Error Handling**: Comprehensive exception handling with retry logic
@@ -56,11 +63,17 @@ This is a sophisticated Python application that transforms Telegram into a **dis
 - **Resource Limits**: Respects Telegram's API limits and file size constraints
 - **Debug Endpoints**: Built-in troubleshooting and monitoring tools
 
+### **🗄️ Database Management**
+- **Video Status Tracking**: Processing, active, error states
+- **Cache Analytics**: Usage statistics and performance metrics  
+- **API Endpoints**: RESTful interface for video management
+- **CLI Commands**: Database stats, cleanup, and maintenance tools
+
 ## 🚀 **Installation & Setup**
 
 ### **Dependencies**
 ```bash
-pip install python-telegram-bot aiohttp aiofiles
+pip install python-telegram-bot aiohttp aiofiles aiosqlite
 # Also requires FFmpeg installed on system
 ```
 
@@ -95,6 +108,21 @@ python telegram_streamer.py serve \
   --port 8080
 ```
 
+### **Database Management**
+```bash
+# Show database statistics
+python telegram_streamer.py db-stats --bot-token TOKEN --chat-id CHAT
+
+# List all videos
+python telegram_streamer.py list --bot-token TOKEN --chat-id CHAT
+
+# Delete a video
+python telegram_streamer.py delete --video-id movie --bot-token TOKEN --chat-id CHAT
+
+# Cleanup old cache entries
+python telegram_streamer.py cleanup --hours 24 --bot-token TOKEN --chat-id CHAT
+```
+
 ### **Jellyfin Integration**
 1. Create `movie.strm` file in Jellyfin media folder
 2. Add single line: `http://192.168.1.100:8080/playlist/movie.m3u8`
@@ -105,8 +133,10 @@ python telegram_streamer.py serve \
 ### **Available Endpoints**
 - `http://localhost:8080/debug` - Server status and statistics
 - `http://localhost:8080/debug/video_id` - Specific video information
+- `http://localhost:8080/videos` - List all videos (JSON API)
 - `http://localhost:8080/playlist/video_id.m3u8` - HLS playlist
 - `http://localhost:8080/test-jellyfin.m3u8` - Compatibility test
+- `DELETE /videos/video_id` - Remove video via API
 
 ## ⚡ **Performance Optimizations**
 
@@ -114,6 +144,12 @@ python telegram_streamer.py serve \
 - **Prefetch Count**: Downloads 3 segments ahead of current playback
 - **Cache Size**: 100MB memory limit with automatic cleanup
 - **TTL Management**: 5-minute expiration for cached segments
+
+### **Database Efficiency**
+- **Indexed Queries**: Optimized database access patterns
+- **Async Operations**: Non-blocking database operations
+- **Connection Pooling**: Efficient database connection management
+- **VACUUM Operations**: Automatic database optimization
 
 ### **Network Efficiency**
 - **Concurrent Downloads**: Multiple segments fetched simultaneously
@@ -140,17 +176,43 @@ python telegram_streamer.py serve \
 ## 🛠️ **Technical Implementation Details**
 
 ### **Database Structure**
-```json
-{
-  "video_id": {
-    "segment_0000.ts": {
-      "filename": "segment_0000.ts",
-      "duration": 53.08,
-      "file_id": "BAADBAADrwADBREAAR8X...",
-      "file_size": 18874563
-    }
-  }
-}
+```sql
+-- Videos table
+CREATE TABLE videos (
+    video_id TEXT PRIMARY KEY,
+    original_filename TEXT NOT NULL,
+    total_duration REAL NOT NULL,
+    total_segments INTEGER NOT NULL,
+    file_size INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Segments table  
+CREATE TABLE segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    duration REAL NOT NULL,
+    file_id TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    segment_order INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE
+);
+
+-- Cache metadata table
+CREATE TABLE cache_metadata (
+    segment_filename TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL,
+    cached_at TEXT NOT NULL,
+    access_count INTEGER NOT NULL DEFAULT 1,
+    last_accessed TEXT NOT NULL,
+    cache_size INTEGER NOT NULL,
+    FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE
+);
 ```
 
 ### **HLS Playlist Format**
@@ -169,9 +231,28 @@ http://192.168.1.100:8080/segment/video_id/segment_0000.ts
 - Bot token security (use environment variables in production)
 - Network access controls (firewall rules for streaming port)
 - Content access validation (authentication for sensitive content)
+- Database file permissions and backup strategies
 
 ## 🚧 **Future Enhancements**
-- **Database Backend**: PostgreSQL/SQLite for production deployments
+- **User Authentication**: Login system for private content
+- **Quality Selection**: Multiple bitrate streams for adaptive streaming
+- **Web Interface**: Browser-based management dashboard
+- **Load Balancing**: Multiple server instances for high availability
+- **Auto-Transcoding**: Automatic video format optimization
+- **Bulk Operations**: Mass upload and management features
+
+## 📊 **Current Status**
+- ✅ **SQLite Backend**: Production-ready database with full ACID compliance
+- ✅ **Enhanced CLI**: Complete command-line interface with all management operations
+- ✅ **RESTful API**: HTTP endpoints for programmatic access
+- ✅ **Cache Management**: Intelligent caching with statistics and cleanup
+- ✅ **Error Handling**: Comprehensive error recovery and logging
+- ✅ **Performance Monitoring**: Built-in statistics and debugging tools
+
+---
+
+This system represents an innovative approach to video storage and streaming, utilizing Telegram's infrastructure as a free, reliable content delivery network while maintaining full control over access and playback through a custom streaming server with enterprise-grade SQLite backend for metadata management.
+## 🚧 **Future Enhancements**
 - **User Authentication**: Login system for private content
 - **Quality Selection**: Multiple bitrate streams for adaptive streaming
 - **Web Interface**: Browser-based management dashboard
