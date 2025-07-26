@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Tuple
 import hashlib
+from io import BytesIO
+import aiofiles
 
 from telegram import Bot
 from telegram.error import TelegramError, NetworkError, RetryAfter, TimedOut
@@ -154,6 +156,7 @@ class TelegramHandler:
         logger.info(f"Found {len(ts_files)} segments to upload for video {video_id}")
 
         # Create video record in database
+        video_info = None
         try:
             video_info = VideoInfo(
                 video_id=video_id,
@@ -210,12 +213,18 @@ class TelegramHandler:
                     await asyncio.sleep(0.5)
 
             # Update video record with final statistics
-            video_info.total_duration = total_duration
-            video_info.file_size = total_size
-            video_info.status = 'active'
-            video_info.updated_at = datetime.now(timezone.utc).isoformat()
+            final_video_info = VideoInfo(
+                video_id=video_id,
+                original_filename=original_filename,
+                total_duration=total_duration,
+                total_segments=len(ts_files),
+                file_size=total_size,
+                status='active',
+                created_at=video_info.created_at,
+                updated_at=datetime.now(timezone.utc).isoformat()
+            )
 
-            await self.db.add_video(video_info)
+            await self.db.add_video(final_video_info)
 
             logger.info(
                 f"✅ Upload completed for video {video_id}: "
@@ -227,13 +236,22 @@ class TelegramHandler:
             return True
 
         except Exception as e:
-            # Update video status to error
-            try:
-                video_info.status = 'error'
-                video_info.updated_at = datetime.now(timezone.utc).isoformat()
-                await self.db.add_video(video_info)
-            except Exception as db_error:
-                logger.error(f"Failed to update video status to error: {db_error}")
+            # Update video status to 'error' by creating a new object
+            if video_info:
+                try:
+                    error_video_info = VideoInfo(
+                        video_id=video_info.video_id,
+                        original_filename=video_info.original_filename,
+                        total_duration=video_info.total_duration,
+                        total_segments=video_info.total_segments,
+                        file_size=video_info.file_size,
+                        status='error',  # Set new status
+                        created_at=video_info.created_at,
+                        updated_at=datetime.now(timezone.utc).isoformat()
+                    )
+                    await self.db.add_video(error_video_info)
+                except Exception as db_error:
+                    logger.error(f"Failed to update video status to error: {db_error}")
 
             logger.error(f"Upload failed for video {video_id}: {e}", exc_info=True)
             raise TelegramUploadError(f"Upload process failed: {e}") from e
@@ -298,17 +316,23 @@ class TelegramHandler:
                     f"🔍 Hash: {file_hash[:16]}..."
                 )
 
-                # Upload file
-                async with segment_file.open('rb') as file_obj:
-                    message = await self.bot.send_document(
-                        chat_id=self.chat_id,
-                        document=file_obj,
-                        filename=segment_file.name,
-                        caption=caption,
-                        read_timeout=300,  # 5 minutes
-                        write_timeout=300,
-                        connect_timeout=60
-                    )
+                # FIXED: Read file content first, then pass as BytesIO object
+                async with aiofiles.open(segment_file, 'rb') as f:
+                    file_content = await f.read()
+
+                # Create a BytesIO object from the content
+                file_obj = BytesIO(file_content)
+                file_obj.name = segment_file.name  # Set the filename attribute
+
+                message = await self.bot.send_document(
+                    chat_id=self.chat_id,
+                    document=file_obj,
+                    filename=segment_file.name,
+                    caption=caption,
+                    read_timeout=300,  # 5 minutes
+                    write_timeout=300,
+                    connect_timeout=60
+                )
 
                 # Verify upload
                 if not message.document:
@@ -538,7 +562,8 @@ class TelegramHandler:
         hasher = hashlib.sha256()
 
         try:
-            async with file_path.open('rb') as f:
+            # Use aiofiles for asynchronous file reading
+            async with aiofiles.open(file_path, 'rb') as f:
                 while chunk := await f.read(8192):  # Read in 8KB chunks
                     hasher.update(chunk)
 
