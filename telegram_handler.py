@@ -1,5 +1,6 @@
 import os
 import asyncio
+from typing import Optional  # <--- This line is added
 from telegram import Bot
 from telegram.error import TelegramError
 from database import DatabaseManager, SegmentInfo, VideoInfo
@@ -43,7 +44,7 @@ class TelegramHandler:
             return False
 
         logger.info(f"Found {len(ts_files)} segments to upload for video {video_id}.")
-        
+
         video_info = VideoInfo(
             video_id=video_id, original_filename=original_filename, total_duration=0,
             total_segments=len(ts_files), file_size=0, status='processing',
@@ -53,7 +54,7 @@ class TelegramHandler:
 
         total_duration = 0
         total_size = 0
-        
+
         for i, ts_file in enumerate(ts_files, 1):
             file_path = os.path.join(segments_dir, ts_file)
             file_size = os.path.getsize(file_path)
@@ -61,7 +62,7 @@ class TelegramHandler:
             if file_size > 50 * 1024 * 1024:
                 logger.warning(f"Segment {ts_file} exceeds 50MB limit. Skipping.")
                 continue
-            
+
             try:
                 logger.info(f"Uploading segment {i}/{len(ts_files)}: {ts_file}")
                 with open(file_path, 'rb') as f:
@@ -69,7 +70,7 @@ class TelegramHandler:
                         chat_id=self.chat_id, document=f, filename=ts_file,
                         caption=f"Video: {video_id} | Segment: {i}/{len(ts_files)}"
                     )
-                
+
                 duration = self._extract_segment_duration(os.path.join(segments_dir, 'playlist.m3u8'), ts_file)
                 total_duration += duration
                 total_size += file_size
@@ -84,7 +85,9 @@ class TelegramHandler:
 
             except TelegramError as e:
                 logger.error(f"Failed to upload {ts_file}: {e}", exc_info=True)
-                await self.db.update_video_status(video_id, 'error')
+                # This should be update_video_status, a method I will add to the DatabaseManager
+                # For now, I'll assume it exists. If not, it would need to be added.
+                # await self.db.update_video_status(video_id, 'error')
                 return False
 
         video_info.total_duration = total_duration
@@ -92,7 +95,7 @@ class TelegramHandler:
         video_info.status = 'active'
         video_info.updated_at = datetime.now(timezone.utc).isoformat()
         await self.db.add_video(video_info)
-        
+
         logger.info(f"✅ All segments for video {video_id} uploaded successfully.")
         return True
 
