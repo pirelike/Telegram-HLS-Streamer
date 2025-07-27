@@ -12,7 +12,7 @@ from utils import calculate_file_hash, format_file_size
 
 class RoundRobinTelegramHandler:
     """
-    Simple round-robin multi-bot handler: segment 0 → bot1, segment 1 → bot2, segment 2 → bot3, segment 3 → bot1, etc.
+    Enhanced round-robin multi-bot handler with bot-aware downloads to eliminate file_id conflicts.
     """
     def __init__(self, bot_configs: List[Dict], db_manager: DatabaseManager):
         """
@@ -21,13 +21,6 @@ class RoundRobinTelegramHandler:
         Args:
             bot_configs: List of dicts with 'token' and 'chat_id' keys
             db_manager: Database manager instance
-
-        Example bot_configs:
-        [
-            {'token': 'bot1_token', 'chat_id': '@channel1'},
-            {'token': 'bot2_token', 'chat_id': '@channel2'},
-            {'token': 'bot3_token', 'chat_id': '@channel3'}
-        ]
         """
         self.db = db_manager
         self.bot_configs = bot_configs
@@ -43,6 +36,9 @@ class RoundRobinTelegramHandler:
             }
             self.bots.append(bot_info)
 
+        # Create bot lookup by ID for fast access during downloads
+        self.bot_lookup = {bot['id']: bot for bot in self.bots}
+
         # Limits and timing
         self.upload_limit = 20 * 1024 * 1024
         self.download_limit = 20 * 1024 * 1024
@@ -50,7 +46,7 @@ class RoundRobinTelegramHandler:
         self.max_retries = 3
 
         logger.info(f"RoundRobinTelegramHandler initialized with {len(self.bots)} bots")
-        logger.info("🔄 Round-robin distribution:")
+        logger.info("🔄 Round-robin distribution with bot-aware downloads:")
         for i, bot in enumerate(self.bots):
             logger.info(f"  Slot {i}: {bot['id']} → {bot['chat_id']}")
 
@@ -275,7 +271,7 @@ class RoundRobinTelegramHandler:
                                     subtitle_info: List, format_info: dict,
                                     total_bot_segments: int, current_bot_segment: int) -> bool:
         """
-        Upload a single segment using the specified bot with enhanced error handling.
+        Upload a single segment using the specified bot with enhanced error handling and bot tracking.
         """
         bot = self.bots[bot_index]
         file_size = os.path.getsize(file_path)
@@ -326,14 +322,15 @@ class RoundRobinTelegramHandler:
 
                 upload_time = time.time() - upload_start
 
-                # Store segment info in database
+                # Store segment info in database WITH bot_id for later downloads
                 segment_order = int(filename.split('_')[-1].split('.')[0]) if '_' in filename else segment_index
                 segment_info = SegmentInfo(
                     filename=filename,
                     duration=duration,
                     file_id=message.document.file_id,
                     file_size=file_size,
-                    segment_order=segment_order
+                    segment_order=segment_order,
+                    bot_id=bot['id']  # CRITICAL: Store which bot uploaded this segment
                 )
                 await self.db.add_segment(video_id, segment_info)
 
@@ -422,7 +419,7 @@ class RoundRobinTelegramHandler:
         if extracted_files:
             # Upload subtitle files using first bot
             bot = self.bots[0]
-            for subtitle_file in extracted_files:
+            for i, subtitle_file in enumerate(extracted_files):
                 try:
                     filename = os.path.basename(subtitle_file)
                     file_size = os.path.getsize(subtitle_file)
@@ -446,16 +443,42 @@ class RoundRobinTelegramHandler:
                             parse_mode='HTML'
                         )
 
+                    # Store subtitle file info in database with bot_id
+                    subtitle_file_info = SubtitleFileInfo(
+                        video_id=video_id,
+                        track_index=i,
+                        filename=filename,
+                        file_id=message.document.file_id,
+                        file_size=file_size,
+                        language=subtitle_info[i].get('language', 'und'),
+                        file_type=filename.split('.')[-1],
+                        bot_id=bot['id'],  # Store bot_id for subtitle downloads
+                        created_at=datetime.now(timezone.utc).isoformat()
+                    )
+                    await self.db.add_subtitle_file(subtitle_file_info)
+
                     logger.info(f"✅ Uploaded subtitle: {filename}")
                     await asyncio.sleep(1)  # Brief pause between subtitles
 
                 except Exception as e:
                     logger.error(f"❌ Failed to upload subtitle {filename}: {e}")
 
-    # Download method - can use any bot for redundancy
-    async def download_segment_from_telegram(self, file_id: str) -> Optional[bytes]:
-        """Download segment using the first available bot."""
-        for bot in self.bots:
+    # Enhanced download method with bot-aware logic
+    async def download_segment_from_telegram(self, file_id: str, bot_id: str = None) -> Optional[bytes]:
+        """
+        Download segment using the specific bot that uploaded it for optimal performance.
+
+        Args:
+            file_id: Telegram file ID
+            bot_id: ID of the bot that uploaded this segment (for direct download)
+
+        Returns:
+            Optional[bytes]: Downloaded segment data or None if failed
+        """
+
+        # STRATEGY 1: Use the specific bot that uploaded this segment
+        if bot_id and bot_id in self.bot_lookup:
+            bot = self.bot_lookup[bot_id]
             try:
                 file = await bot['bot'].get_file(file_id)
 
@@ -464,14 +487,74 @@ class RoundRobinTelegramHandler:
                     return None
 
                 content = await file.download_as_bytearray()
-                logger.info(f"Downloaded segment with {bot['id']}: {file_id} ({len(content) / (1024*1024):.1f}MB)")
+                logger.debug(f"✅ Downloaded segment with designated bot {bot['id']}: {file_id} ({len(content) / (1024*1024):.1f}MB)")
                 return bytes(content)
 
             except Exception as e:
-                logger.warning(f"Download failed with {bot['id']}: {e}")
+                logger.warning(f"⚠️ Download failed with designated bot {bot['id']}: {e}")
+                # Fall through to try other bots as backup
+
+        # STRATEGY 2: Fallback - try all bots (should rarely be needed now)
+        for bot in self.bots:
+            if bot_id and bot['id'] == bot_id:
+                continue  # Already tried this one above
+
+            try:
+                file = await bot['bot'].get_file(file_id)
+
+                if file.file_size and file.file_size > self.download_limit:
+                    logger.error(f"File {file_id} exceeds 20MB limit")
+                    return None
+
+                content = await file.download_as_bytearray()
+                logger.info(f"📥 Downloaded segment with fallback bot {bot['id']}: {file_id} ({len(content) / (1024*1024):.1f}MB)")
+                return bytes(content)
+
+            except Exception as e:
+                logger.debug(f"❌ Download failed with {bot['id']}: {e}")
                 continue
 
-        logger.error(f"Failed to download {file_id} with all bots")
+        logger.error(f"❌ Failed to download {file_id} with all {len(self.bots)} bots")
+        return None
+
+    async def download_subtitle_from_telegram(self, file_id: str, bot_id: str = None) -> Optional[bytes]:
+        """
+        Download subtitle using the specific bot that uploaded it.
+
+        Args:
+            file_id: Telegram file ID
+            bot_id: ID of the bot that uploaded this subtitle
+
+        Returns:
+            Optional[bytes]: Downloaded subtitle data or None if failed
+        """
+
+        # Use specific bot if known
+        if bot_id and bot_id in self.bot_lookup:
+            bot = self.bot_lookup[bot_id]
+            try:
+                file = await bot['bot'].get_file(file_id)
+                content = await file.download_as_bytearray()
+                logger.debug(f"✅ Downloaded subtitle with designated bot {bot['id']}: {file_id}")
+                return bytes(content)
+            except Exception as e:
+                logger.warning(f"⚠️ Subtitle download failed with designated bot {bot['id']}: {e}")
+
+        # Fallback to any bot
+        for bot in self.bots:
+            if bot_id and bot['id'] == bot_id:
+                continue  # Already tried
+
+            try:
+                file = await bot['bot'].get_file(file_id)
+                content = await file.download_as_bytearray()
+                logger.info(f"📄 Downloaded subtitle with fallback bot {bot['id']}: {file_id}")
+                return bytes(content)
+            except Exception as e:
+                logger.debug(f"❌ Subtitle download failed with {bot['id']}: {e}")
+                continue
+
+        logger.error(f"❌ Failed to download subtitle {file_id} with all bots")
         return None
 
     # Helper methods
@@ -507,6 +590,51 @@ class RoundRobinTelegramHandler:
         except Exception as e:
             logger.warning(f"Could not extract duration for {segment_filename}: {e}")
         return 10.0
+
+
+# Single bot handler for backwards compatibility
+class TelegramHandler:
+    """
+    Single bot handler for backwards compatibility.
+    """
+    def __init__(self, bot_token: str, chat_id: str, db_manager: DatabaseManager):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.db = db_manager
+        self.bot = Bot(token=bot_token)
+        self.upload_limit = 20 * 1024 * 1024
+        self.download_limit = 20 * 1024 * 1024
+        self.max_retries = 3
+
+    async def upload_segments_to_telegram(self, segments_dir: str, video_id: str, original_filename: str) -> bool:
+        """Single bot upload - delegates to round-robin handler with one bot."""
+        # Create a single-bot round-robin handler
+        bot_configs = [{'token': self.bot_token, 'chat_id': self.chat_id}]
+        round_robin_handler = RoundRobinTelegramHandler(bot_configs, self.db)
+        return await round_robin_handler.upload_segments_to_telegram(segments_dir, video_id, original_filename)
+
+    async def download_segment_from_telegram(self, file_id: str, bot_id: str = None) -> Optional[bytes]:
+        """Single bot download."""
+        try:
+            file = await self.bot.get_file(file_id)
+            if file.file_size and file.file_size > self.download_limit:
+                logger.error(f"File {file_id} exceeds 20MB limit")
+                return None
+            content = await file.download_as_bytearray()
+            return bytes(content)
+        except Exception as e:
+            logger.error(f"Download failed: {e}")
+            return None
+
+    async def download_subtitle_from_telegram(self, file_id: str, bot_id: str = None) -> Optional[bytes]:
+        """Single bot subtitle download."""
+        try:
+            file = await self.bot.get_file(file_id)
+            content = await file.download_as_bytearray()
+            return bytes(content)
+        except Exception as e:
+            logger.error(f"Subtitle download failed: {e}")
+            return None
 
 
 # Factory function to create the handler from environment variables
