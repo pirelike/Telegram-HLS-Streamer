@@ -157,7 +157,7 @@ def validate_configuration():
     except ValueError:
         errors.append("CACHE_SIZE must be a number")
 
-    # Size and duration validation (updated for new smart segmentation)
+    # Size and duration validation
     try:
         max_upload_size = int(os.getenv('MAX_UPLOAD_SIZE', '53687091200'))
         if max_upload_size < 1024 * 1024:  # Less than 1MB
@@ -165,7 +165,7 @@ def validate_configuration():
     except ValueError:
         errors.append("MAX_UPLOAD_SIZE must be a number")
 
-    # Updated segment duration validation for smart segmentation
+    # Segment duration validation
     try:
         min_segment_duration = int(os.getenv('MIN_SEGMENT_DURATION', '2'))
         max_segment_duration = int(os.getenv('MAX_SEGMENT_DURATION', '30'))
@@ -350,48 +350,48 @@ async def main():
     await db_manager.initialize_database()
 
     if args.command == 'serve':
-            # Get bot configuration for server (use first bot for web UI operations)
-            multi_bot_configs = detect_multi_bot_config()
-            if not multi_bot_configs:
-                logger.error("No bot configuration found for server")
-                return
+        # Get bot configuration for server (use first bot for web UI operations)
+        multi_bot_configs = detect_multi_bot_config()
+        if not multi_bot_configs:
+            logger.error("No bot configuration found for server")
+            return
 
-            primary_bot = multi_bot_configs[0]
+        primary_bot = multi_bot_configs[0]
 
-            # Load server configuration with command line overrides
-            host = args.host or os.getenv('LOCAL_HOST', '0.0.0.0')
-            port = args.port or int(os.getenv('LOCAL_PORT', '8080'))
-            public_domain = os.getenv('PUBLIC_DOMAIN')
-            playlists_dir = os.getenv('PLAYLISTS_DIR', 'playlists')
-            cache_type = args.cache_type or os.getenv('CACHE_TYPE', 'memory').lower()
-            force_https = args.force_https or os.getenv('FORCE_HTTPS', 'false').lower() == 'true'
+        # Load server configuration with command line overrides
+        host = args.host or os.getenv('LOCAL_HOST', '0.0.0.0')
+        port = args.port or int(os.getenv('LOCAL_PORT', '8080'))
+        public_domain = os.getenv('PUBLIC_DOMAIN')
+        playlists_dir = os.getenv('PLAYLISTS_DIR', 'playlists')
+        cache_type = args.cache_type or os.getenv('CACHE_TYPE', 'memory').lower()
+        force_https = args.force_https or os.getenv('FORCE_HTTPS', 'false').lower() == 'true'
 
-            # Pass the enhanced config to the server
-            server = StreamServer(
-                host=host,
-                port=port,
-                db_manager=db_manager,
-                bot_token=primary_bot['token'],
-                chat_id=primary_bot['chat_id'],
-                public_domain=public_domain,
-                playlists_dir=playlists_dir,
-                ssl_cert_path=os.getenv('SSL_CERT_PATH'),
-                ssl_key_path=os.getenv('SSL_KEY_PATH'),
-                cache_size=int(os.getenv('CACHE_SIZE', 500 * 1024 * 1024)),
-                force_https=force_https,
-                cache_type=cache_type
-            )
+        # Pass the enhanced config to the server
+        server = StreamServer(
+            host=host,
+            port=port,
+            db_manager=db_manager,
+            bot_token=primary_bot['token'],
+            chat_id=primary_bot['chat_id'],
+            public_domain=public_domain,
+            playlists_dir=playlists_dir,
+            ssl_cert_path=os.getenv('SSL_CERT_PATH'),
+            ssl_key_path=os.getenv('SSL_KEY_PATH'),
+            cache_size=int(os.getenv('CACHE_SIZE', 500 * 1024 * 1024)),
+            force_https=force_https,
+            cache_type=cache_type
+        )
 
-            # Create and set the appropriate telegram handler in the server
-            server.telegram_handler = create_telegram_handler(db_manager)
+        # Create and set the appropriate telegram handler in the server
+        server.telegram_handler = create_telegram_handler(db_manager)
 
-            await server.start()
+        await server.start()
 
-            # Keep server running
-            try:
-                await asyncio.Event().wait()
-            except KeyboardInterrupt:
-                logger.info("Server stopped by user.")
+        # Keep server running
+        try:
+            await asyncio.Event().wait()
+        except KeyboardInterrupt:
+            logger.info("Server stopped by user.")
 
     else:
         # Handle other CLI commands with multi-bot support
@@ -443,6 +443,7 @@ async def main():
                     playlist_file = f"{playlists_dir}/{access_type}/{args.video_id}.m3u8"
                     if os.path.exists(playlist_file):
                         os.remove(playlist_file)
+                        logger.info(f"Removed playlist file: {playlist_file}")
                 print(f"Video '{args.video_id}' deleted successfully.")
             else:
                 print(f"Failed to delete video '{args.video_id}'.")
@@ -480,7 +481,7 @@ async def test_bots():
                 )
                 logger.info(f"  ✅ Bot {i} can send messages to {config['chat_id']}")
 
-                # Clean up test message after 5 seconds
+                # Clean up test message after 2 seconds
                 await asyncio.sleep(2)
                 try:
                     await bot.delete_message(chat_id=config['chat_id'], message_id=test_message.message_id)
