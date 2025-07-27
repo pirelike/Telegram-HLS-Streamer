@@ -19,7 +19,7 @@ task_status = {}
 class StreamServer:
     """
     An HTTP/HTTPS server for streaming video content stored on Telegram.
-    Enhanced with multi-bot support, configurable caching system, and subtitle serving.
+    Enhanced with multi-bot support, bot-aware downloads, configurable caching system, and subtitle serving.
     """
     def __init__(self, host: str, port: int, db_manager: DatabaseManager, bot_token: str,
                  chat_id: str, public_domain: str = None, playlists_dir: str = "playlists",
@@ -365,7 +365,7 @@ class StreamServer:
             return web.Response(status=500, text="Error reading playlist")
 
     async def serve_subtitle(self, request: web.Request):
-        """Handles requests for subtitle files."""
+        """Handles requests for subtitle files with bot-aware downloads."""
         video_id = request.match_info['video_id']
         language = request.match_info.get('language', 'eng')  # Default to English
 
@@ -385,12 +385,14 @@ class StreamServer:
                 logger.warning(f"No subtitle found for video {video_id}, language {language}")
                 return web.Response(status=404, text="Subtitle not found")
 
-        # Download subtitle from Telegram using the configured handler
+        # Download subtitle from Telegram using the configured handler with bot_id
         if not self.telegram_handler:
             logger.error("No telegram handler available for subtitle download")
             return web.Response(status=500, text="Telegram handler not available")
 
-        subtitle_bytes = await self.telegram_handler.download_subtitle_from_telegram(subtitle_file.file_id)
+        subtitle_bytes = await self.telegram_handler.download_subtitle_from_telegram(
+            subtitle_file.file_id, subtitle_file.bot_id
+        )
 
         if subtitle_bytes:
             # Determine content type based on file type
@@ -404,14 +406,15 @@ class StreamServer:
 
             content_type = content_type_map.get(subtitle_file.file_type.lower(), 'text/plain; charset=utf-8')
 
-            logger.info(f"Serving subtitle: {subtitle_file.filename} for video {video_id}")
+            logger.info(f"Serving subtitle: {subtitle_file.filename} for video {video_id} (bot: {subtitle_file.bot_id})")
             return web.Response(
                 body=subtitle_bytes,
                 content_type=content_type,
                 headers={
                     'Cache-Control': 'public, max-age=86400',  # Cache for 1 day
                     'Access-Control-Allow-Origin': '*',
-                    'Content-Disposition': f'inline; filename="{subtitle_file.filename}"'
+                    'Content-Disposition': f'inline; filename="{subtitle_file.filename}"',
+                    'X-Bot-Used': subtitle_file.bot_id  # Debug header
                 }
             )
 
@@ -431,6 +434,7 @@ class StreamServer:
                 'filename': subtitle_file.filename,
                 'file_type': subtitle_file.file_type,
                 'file_size': subtitle_file.file_size,
+                'bot_id': subtitle_file.bot_id,
                 'url': f"/subtitle/{video_id}/{subtitle_file.language}.{subtitle_file.file_type}"
             })
 
@@ -539,7 +543,7 @@ class StreamServer:
             logger.info(f"  └── Included {len(subtitle_files)} subtitle tracks: {', '.join(sf.language for sf in subtitle_files)}")
 
     async def serve_segment(self, request: web.Request):
-        """Handles requests for individual video segments with configurable caching."""
+        """Handles requests for individual video segments with bot-aware downloads and configurable caching."""
         video_id = request.match_info['video_id']
         segment_name = request.match_info['segment_name']
 
@@ -557,19 +561,24 @@ class StreamServer:
                 }
             )
 
-        # Get segment info from database
+        # Get segment info from database (now includes bot_id)
         segments = await self.db.get_video_segments(video_id)
         segment_info = segments.get(segment_name)
 
         if not segment_info:
+            logger.warning(f"Segment not found in database: {video_id}/{segment_name}")
             return web.Response(status=404, text="Segment not found")
 
-        # Download from Telegram using the configured handler
+        # Download from Telegram using the configured handler with bot_id for direct access
         if not self.telegram_handler:
             logger.error("No telegram handler available for segment download")
             return web.Response(status=500, text="Telegram handler not available")
 
-        segment_bytes = await self.telegram_handler.download_segment_from_telegram(segment_info.file_id)
+        # CRITICAL: Pass the bot_id to ensure direct download from the correct bot
+        segment_bytes = await self.telegram_handler.download_segment_from_telegram(
+            segment_info.file_id,
+            segment_info.bot_id  # Pass the bot_id for direct download
+        )
 
         if segment_bytes:
             # Cache the segment for future requests
@@ -582,15 +591,27 @@ class StreamServer:
                     'Cache-Control': 'public, max-age=31536000',  # Cache for 1 year
                     'Access-Control-Allow-Origin': '*',
                     'X-Cache': 'MISS',
-                    'X-Cache-Type': self.cache_type
+                    'X-Cache-Type': self.cache_type,
+                    'X-Bot-Used': segment_info.bot_id or 'unknown',  # Debug header
+                    'X-Segment-Size': str(len(segment_bytes))
                 }
             )
 
+        logger.error(f"Failed to download segment {video_id}/{segment_name} from Telegram (bot: {segment_info.bot_id})")
         return web.Response(status=500, text="Failed to retrieve segment")
 
     async def serve_cache_stats(self, request: web.Request):
-        """Endpoint to view cache statistics."""
+        """Endpoint to view cache statistics with bot distribution."""
         stats = await self.cache_manager.get_cache_stats()
+
+        # Add bot distribution stats from database
+        try:
+            db_stats = await self.db.get_database_stats()
+            if 'bot_distribution' in db_stats:
+                stats['bot_distribution'] = db_stats['bot_distribution']
+        except Exception as e:
+            logger.warning(f"Could not get bot distribution stats: {e}")
+
         return web.json_response(stats)
 
     async def clear_cache_endpoint(self, request: web.Request):
@@ -614,7 +635,7 @@ class StreamServer:
         return "http"
 
     async def start(self):
-        """Starts the aiohttp web server with HTTPS support and subtitle functionality."""
+        """Starts the aiohttp web server with HTTPS support and enhanced bot-aware functionality."""
         # Initialize database and cache manager at server startup
         logger.info("Initializing database and cache manager...")
         await self.db.initialize_database()
@@ -707,8 +728,10 @@ class StreamServer:
         # Log multi-bot information if applicable
         multi_bot_info = self._get_multi_bot_info()
         if multi_bot_info['enabled']:
-            logger.info(f"🤖 Multi-bot upload: {multi_bot_info['handler_type']} (~{multi_bot_info['estimated_speedup']}x speedup)")
+            logger.info(f"🤖 Multi-bot download: Bot-aware downloads eliminate file_id conflicts")
+            logger.info(f"🔄 Upload mode: {multi_bot_info['handler_type']} (~{multi_bot_info['estimated_speedup']}x speedup)")
         else:
             logger.info("📱 Single bot upload mode")
 
-        logger.info("📄 Subtitle support enabled - subtitles will be extracted and served automatically")
+        logger.info("📄 Subtitle support enabled with bot-aware downloads")
+        logger.info("🎯 Bot-aware segment downloads: Each segment downloaded by its original uploader")
