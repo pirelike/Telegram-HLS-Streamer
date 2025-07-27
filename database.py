@@ -7,12 +7,13 @@ from logger_config import logger
 
 @dataclass
 class SegmentInfo:
-    """Holds information about each video segment."""
+    """Holds information about each video segment with bot tracking."""
     filename: str
     duration: float
     file_id: str
     file_size: int
     segment_order: int = 0
+    bot_id: str = ""  # NEW: Track which bot uploaded this segment
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -41,6 +42,7 @@ class SubtitleFileInfo:
     language: str
     file_type: str  # 'srt', 'ass', 'vtt', etc.
     created_at: str
+    bot_id: str = ""  # NEW: Track which bot uploaded this subtitle
 
 @dataclass
 class VideoInfo:
@@ -62,7 +64,7 @@ class VideoInfo:
     subtitle_count: int = 0
 
 class DatabaseManager:
-    """Manages SQLite database operations for the video streaming system with subtitle support."""
+    """Manages SQLite database operations for the video streaming system with subtitle support and bot tracking."""
 
     def __init__(self, db_path: str = "video_streaming.db"):
         """
@@ -129,7 +131,7 @@ class DatabaseManager:
                 except:
                     pass
 
-                # Segments table (unchanged)
+                # Enhanced segments table with bot tracking
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS segments (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,6 +141,7 @@ class DatabaseManager:
                         file_id TEXT NOT NULL,
                         file_size INTEGER NOT NULL,
                         segment_order INTEGER NOT NULL,
+                        bot_id TEXT DEFAULT '',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE,
@@ -146,6 +149,12 @@ class DatabaseManager:
                         UNIQUE(video_id, segment_order)
                     )
                 """)
+
+                # Add bot_id column to existing segments table if it doesn't exist
+                try:
+                    await db.execute("ALTER TABLE segments ADD COLUMN bot_id TEXT DEFAULT ''")
+                except:
+                    pass  # Column already exists
 
                 # Subtitles table
                 await db.execute("""
@@ -166,7 +175,7 @@ class DatabaseManager:
                     )
                 """)
 
-                # NEW: Subtitle files table for storing extracted subtitle files
+                # Enhanced subtitle files table with bot tracking
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS subtitle_files (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,12 +186,19 @@ class DatabaseManager:
                         file_size INTEGER NOT NULL,
                         language TEXT NOT NULL DEFAULT 'und',
                         file_type TEXT NOT NULL DEFAULT 'srt',
+                        bot_id TEXT DEFAULT '',
                         created_at TEXT NOT NULL,
                         FOREIGN KEY (video_id) REFERENCES videos (video_id) ON DELETE CASCADE,
                         FOREIGN KEY (video_id, track_index) REFERENCES subtitles (video_id, track_index) ON DELETE CASCADE,
                         UNIQUE(video_id, track_index)
                     )
                 """)
+
+                # Add bot_id column to existing subtitle_files table if it doesn't exist
+                try:
+                    await db.execute("ALTER TABLE subtitle_files ADD COLUMN bot_id TEXT DEFAULT ''")
+                except:
+                    pass  # Column already exists
 
                 # Cache metadata table (unchanged)
                 await db.execute("""
@@ -200,15 +216,17 @@ class DatabaseManager:
                 # Create indexes
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_segments_video_id ON segments (video_id)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_segments_order ON segments (video_id, segment_order)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_segments_bot_id ON segments (bot_id)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_last_accessed ON cache_metadata (last_accessed)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos (status)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_subtitles_video_id ON subtitles (video_id)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_subtitles_language ON subtitles (language)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_subtitle_files_video_id ON subtitle_files (video_id)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_subtitle_files_language ON subtitle_files (language)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_subtitle_files_bot_id ON subtitle_files (bot_id)")
 
                 await db.commit()
-                logger.info("✅ Database initialized successfully with subtitle file support")
+                logger.info("✅ Database initialized successfully with bot tracking support")
         except Exception as e:
             logger.error(f"❌ Failed to initialize database: {e}", exc_info=True)
 
@@ -226,13 +244,13 @@ class DatabaseManager:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("""
                     INSERT OR REPLACE INTO subtitle_files
-                    (video_id, track_index, filename, file_id, file_size, language, file_type, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (video_id, track_index, filename, file_id, file_size, language, file_type, bot_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     subtitle_file_info.video_id, subtitle_file_info.track_index,
                     subtitle_file_info.filename, subtitle_file_info.file_id,
                     subtitle_file_info.file_size, subtitle_file_info.language,
-                    subtitle_file_info.file_type, subtitle_file_info.created_at
+                    subtitle_file_info.file_type, subtitle_file_info.bot_id, subtitle_file_info.created_at
                 ))
                 await db.commit()
                 logger.debug(f"✅ Added subtitle file {subtitle_file_info.filename} for video {subtitle_file_info.video_id}.")
@@ -255,11 +273,23 @@ class DatabaseManager:
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute("""
-                    SELECT video_id, track_index, filename, file_id, file_size, language, file_type, created_at
+                    SELECT video_id, track_index, filename, file_id, file_size, language, file_type, created_at, bot_id
                     FROM subtitle_files WHERE video_id = ? ORDER BY track_index
                 """, (video_id,)) as cursor:
                     async for row in cursor:
-                        subtitle_file = SubtitleFileInfo(*row)
+                        # Handle both old and new schema by checking row length
+                        if len(row) == 8:  # Old schema without bot_id
+                            subtitle_file = SubtitleFileInfo(
+                                video_id=row[0], track_index=row[1], filename=row[2],
+                                file_id=row[3], file_size=row[4], language=row[5],
+                                file_type=row[6], created_at=row[7], bot_id=""
+                            )
+                        else:  # New schema with bot_id
+                            subtitle_file = SubtitleFileInfo(
+                                video_id=row[0], track_index=row[1], filename=row[2],
+                                file_id=row[3], file_size=row[4], language=row[5],
+                                file_type=row[6], created_at=row[7], bot_id=row[8]
+                            )
                         subtitle_files.append(subtitle_file)
         except Exception as e:
             logger.error(f"❌ Failed to get subtitle files for video {video_id}: {e}", exc_info=True)
@@ -279,17 +309,28 @@ class DatabaseManager:
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute("""
-                    SELECT video_id, track_index, filename, file_id, file_size, language, file_type, created_at
+                    SELECT video_id, track_index, filename, file_id, file_size, language, file_type, created_at, bot_id
                     FROM subtitle_files WHERE video_id = ? AND language = ? LIMIT 1
                 """, (video_id, language)) as cursor:
                     row = await cursor.fetchone()
                     if row:
-                        return SubtitleFileInfo(*row)
+                        # Handle both old and new schema
+                        if len(row) == 8:  # Old schema without bot_id
+                            return SubtitleFileInfo(
+                                video_id=row[0], track_index=row[1], filename=row[2],
+                                file_id=row[3], file_size=row[4], language=row[5],
+                                file_type=row[6], created_at=row[7], bot_id=""
+                            )
+                        else:  # New schema with bot_id
+                            return SubtitleFileInfo(
+                                video_id=row[0], track_index=row[1], filename=row[2],
+                                file_id=row[3], file_size=row[4], language=row[5],
+                                file_type=row[6], created_at=row[7], bot_id=row[8]
+                            )
         except Exception as e:
             logger.error(f"❌ Failed to get subtitle file for {video_id}/{language}: {e}")
         return None
 
-    # Include all the existing methods from the original database.py
     async def add_video(self, video_info: VideoInfo) -> bool:
         """
         Adds or replaces a video record in the database.
@@ -324,7 +365,7 @@ class DatabaseManager:
 
     async def add_segment(self, video_id: str, segment_info: SegmentInfo) -> bool:
         """
-        Adds a video segment record to the database.
+        Adds a video segment record to the database with bot tracking.
 
         Args:
             video_id (str): The ID of the video to which the segment belongs.
@@ -338,14 +379,15 @@ class DatabaseManager:
                 current_time = datetime.now(timezone.utc).isoformat()
                 await db.execute("""
                     INSERT OR REPLACE INTO segments
-                    (video_id, filename, duration, file_id, file_size, segment_order, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (video_id, filename, duration, file_id, file_size, segment_order, bot_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     video_id, segment_info.filename, segment_info.duration, segment_info.file_id,
-                    segment_info.file_size, segment_info.segment_order, current_time, current_time
+                    segment_info.file_size, segment_info.segment_order, segment_info.bot_id,
+                    current_time, current_time
                 ))
                 await db.commit()
-                logger.debug(f"✅ Added segment {segment_info.filename} for video {video_id}.")
+                logger.debug(f"✅ Added segment {segment_info.filename} for video {video_id} (bot: {segment_info.bot_id}).")
                 return True
         except Exception as e:
             logger.error(f"❌ Failed to add segment {segment_info.filename}: {e}", exc_info=True)
@@ -432,11 +474,23 @@ class DatabaseManager:
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute("""
-                    SELECT filename, duration, file_id, file_size, segment_order, created_at, updated_at
+                    SELECT filename, duration, file_id, file_size, segment_order, bot_id, created_at, updated_at
                     FROM segments WHERE video_id = ? ORDER BY segment_order
                 """, (video_id,)) as cursor:
                     async for row in cursor:
-                        segment = SegmentInfo(*row)
+                        # Handle both old and new schema
+                        if len(row) == 7:  # Old schema without bot_id
+                            segment = SegmentInfo(
+                                filename=row[0], duration=row[1], file_id=row[2],
+                                file_size=row[3], segment_order=row[4],
+                                created_at=row[5], updated_at=row[6], bot_id=""
+                            )
+                        else:  # New schema with bot_id
+                            segment = SegmentInfo(
+                                filename=row[0], duration=row[1], file_id=row[2],
+                                file_size=row[3], segment_order=row[4], bot_id=row[5],
+                                created_at=row[6], updated_at=row[7]
+                            )
                         segments[segment.filename] = segment
         except Exception as e:
             logger.error(f"❌ Failed to get segments for video {video_id}: {e}", exc_info=True)
@@ -639,7 +693,8 @@ class DatabaseManager:
             'total_size_mb': 0,
             'total_duration_hours': 0,
             'languages': [],
-            'codecs': {'video': [], 'audio': [], 'subtitle': []}
+            'codecs': {'video': [], 'audio': [], 'subtitle': []},
+            'bot_distribution': {}
         }
 
         try:
@@ -666,6 +721,17 @@ class DatabaseManager:
                 async with db.execute("SELECT COUNT(*) FROM subtitle_files") as cursor:
                     row = await cursor.fetchone()
                     stats['total_subtitle_files'] = row[0] if row else 0
+
+                # Bot distribution for segments
+                async with db.execute("""
+                    SELECT bot_id, COUNT(*) as segment_count
+                    FROM segments
+                    WHERE bot_id != ''
+                    GROUP BY bot_id
+                    ORDER BY segment_count DESC
+                """) as cursor:
+                    async for row in cursor:
+                        stats['bot_distribution'][row[0]] = row[1]
 
                 # Languages from both subtitles and subtitle files
                 async with db.execute("""
