@@ -157,6 +157,21 @@ def validate_configuration():
     except ValueError:
         errors.append("CACHE_SIZE must be a number")
 
+    # Predictive caching validation
+    try:
+        preload_segments = int(os.getenv('PRELOAD_SEGMENTS', '8'))
+        if not (1 <= preload_segments <= 50):
+            warnings.append(f"PRELOAD_SEGMENTS should be between 1-50, got: {preload_segments}")
+    except ValueError:
+        errors.append("PRELOAD_SEGMENTS must be a number")
+
+    try:
+        max_concurrent_preloads = int(os.getenv('MAX_CONCURRENT_PRELOADS', '5'))
+        if not (1 <= max_concurrent_preloads <= 20):
+            warnings.append(f"MAX_CONCURRENT_PRELOADS should be between 1-20, got: {max_concurrent_preloads}")
+    except ValueError:
+        errors.append("MAX_CONCURRENT_PRELOADS must be a number")
+
     # Size and duration validation
     try:
         max_upload_size = int(os.getenv('MAX_UPLOAD_SIZE', '53687091200'))
@@ -284,22 +299,24 @@ def create_telegram_handler(db_manager: DatabaseManager):
 
 async def main():
     """
-    The main function of the application with multi-bot support.
+    The main function of the application with multi-bot support and predictive caching.
     It parses command-line arguments and executes the requested command.
     """
     # Setup enhanced logging first
     setup_logging()
 
-    parser = argparse.ArgumentParser(description="Telegram Video Streaming App with Multi-Bot Support")
+    parser = argparse.ArgumentParser(description="Telegram Video Streaming App with Multi-Bot Support and Predictive Caching")
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # --- Serve Command ---
-    serve_parser = subparsers.add_parser('serve', help='Start the streaming server with web UI')
+    serve_parser = subparsers.add_parser('serve', help='Start the streaming server with web UI and predictive caching')
     serve_parser.add_argument('--host', help='Host to bind the server to (overrides LOCAL_HOST)')
     serve_parser.add_argument('--port', type=int, help='Port for the streaming server (overrides LOCAL_PORT)')
     serve_parser.add_argument('--db-path', help='SQLite database file path (overrides DB_PATH)')
     serve_parser.add_argument('--cache-type', choices=['memory', 'disk'], help='Cache type (overrides CACHE_TYPE)')
     serve_parser.add_argument('--force-https', action='store_true', help='Force HTTPS URLs (overrides FORCE_HTTPS)')
+    serve_parser.add_argument('--preload-segments', type=int, help='Number of segments to preload ahead (overrides PRELOAD_SEGMENTS)')
+    serve_parser.add_argument('--max-concurrent-preloads', type=int, help='Max concurrent preloads (overrides MAX_CONCURRENT_PRELOADS)')
 
     # --- CLI-only Commands ---
     parent_parser = argparse.ArgumentParser(add_help=False)
@@ -318,8 +335,8 @@ async def main():
     delete_parser = subparsers.add_parser('delete', help='CLI to delete a video', parents=[parent_parser])
     delete_parser.add_argument('--video-id', required=True, help='The ID of the video to delete')
 
-    # Config command - now shows multi-bot info
-    config_parser = subparsers.add_parser('config', help='Show current configuration including multi-bot setup')
+    # Config command - now shows multi-bot info and predictive caching
+    config_parser = subparsers.add_parser('config', help='Show current configuration including multi-bot setup and predictive caching')
 
     # New command: Test bots
     test_parser = subparsers.add_parser('test-bots', help='Test all configured bots')
@@ -366,7 +383,37 @@ async def main():
         cache_type = args.cache_type or os.getenv('CACHE_TYPE', 'memory').lower()
         force_https = args.force_https or os.getenv('FORCE_HTTPS', 'false').lower() == 'true'
 
-        # Pass the enhanced config to the server
+        # Enhanced predictive caching configuration
+        preload_segments = args.preload_segments or int(os.getenv('PRELOAD_SEGMENTS', 8))
+        max_concurrent_preloads = args.max_concurrent_preloads or int(os.getenv('MAX_CONCURRENT_PRELOADS', 5))
+        cache_size = int(os.getenv('CACHE_SIZE', 500 * 1024 * 1024))
+
+        # Validate predictive caching settings
+        if preload_segments < 1:
+            logger.warning(f"PRELOAD_SEGMENTS too low ({preload_segments}), setting to 1")
+            preload_segments = 1
+        elif preload_segments > 50:
+            logger.warning(f"PRELOAD_SEGMENTS too high ({preload_segments}), setting to 50")
+            preload_segments = 50
+
+        if max_concurrent_preloads < 1:
+            logger.warning(f"MAX_CONCURRENT_PRELOADS too low ({max_concurrent_preloads}), setting to 1")
+            max_concurrent_preloads = 1
+        elif max_concurrent_preloads > 20:
+            logger.warning(f"MAX_CONCURRENT_PRELOADS too high ({max_concurrent_preloads}), setting to 20")
+            max_concurrent_preloads = 20
+
+        # Log configuration
+        logger.info("🚀 Starting enhanced streaming server with predictive caching...")
+        logger.info(f"📊 Cache configuration: {cache_type.upper()}, {cache_size / (1024*1024):.0f}MB")
+        logger.info(f"🔮 Predictive caching: {preload_segments} segments ahead, {max_concurrent_preloads} concurrent preloads")
+
+        if len(multi_bot_configs) > 1:
+            logger.info(f"🤖 Multi-bot mode: {len(multi_bot_configs)} bots configured for round-robin uploads")
+        else:
+            logger.info("📱 Single bot mode configured")
+
+        # Create the standard streaming server (not the enhanced one from stream_server.py)
         server = StreamServer(
             host=host,
             port=port,
@@ -377,21 +424,58 @@ async def main():
             playlists_dir=playlists_dir,
             ssl_cert_path=os.getenv('SSL_CERT_PATH'),
             ssl_key_path=os.getenv('SSL_KEY_PATH'),
-            cache_size=int(os.getenv('CACHE_SIZE', 500 * 1024 * 1024)),
+            cache_size=cache_size,
             force_https=force_https,
             cache_type=cache_type
         )
 
         # Create and set the appropriate telegram handler in the server
+        logger.info("🔧 Initializing telegram handler...")
         server.telegram_handler = create_telegram_handler(db_manager)
 
-        await server.start()
+        # Log handler type for debugging
+        handler_type = type(server.telegram_handler).__name__
+        if "RoundRobin" in handler_type:
+            bot_count = len(server.telegram_handler.bots) if hasattr(server.telegram_handler, 'bots') else 1
+            logger.info(f"✅ {handler_type} initialized with {bot_count} bots")
+        else:
+            logger.info(f"✅ {handler_type} initialized")
 
-        # Keep server running
+        # Start the server
         try:
-            await asyncio.Event().wait()
+            await server.start()
+            logger.info("🎉 Streaming server started successfully!")
+
+            # Display access URLs
+            logger.info(f"🌐 Server URLs:")
+            logger.info(f"   Local: {server.protocol}://{server.local_ip}:{port}")
+            if public_domain:
+                logger.info(f"   Public: {server.protocol}://{public_domain}")
+
+            logger.info("🚀 Ready to handle video uploads and streaming!")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to start server: {e}")
+            logger.error("   Check your configuration and try again")
+            return
+
+        # Keep server running with error handling
+        try:
+            # Wait for server to be ready
+            await asyncio.sleep(1)
+
+            # Main server loop
+            logger.info("🔄 Server running - Press Ctrl+C to stop")
+            await asyncio.Event().wait()  # Wait indefinitely
+
         except KeyboardInterrupt:
-            logger.info("Server stopped by user.")
+            logger.info("🛑 Shutdown signal received")
+        except Exception as e:
+            logger.error(f"💥 Server error: {e}")
+        finally:
+            # Graceful shutdown
+            logger.info("🧹 Shutting down streaming server...")
+            logger.info("👋 Streaming server stopped")
 
     else:
         # Handle other CLI commands with multi-bot support
@@ -513,7 +597,7 @@ async def test_bots():
         logger.warning("⚠️ Only one or no bots working - round-robin benefits limited")
 
 def show_configuration():
-    """Display the current configuration with multi-bot information."""
+    """Display the current configuration with multi-bot information and predictive caching."""
     logger.info("🔧 Current Configuration:")
     logger.info("=" * 60)
 
@@ -550,17 +634,21 @@ def show_configuration():
         ('MAX_CHUNK_SIZE', f"{int(os.getenv('MAX_CHUNK_SIZE', '20971520')) // (1024**2)} MB"),
         ('LOG_LEVEL', os.getenv('LOG_LEVEL', 'INFO')),
         ('LOG_FILE', os.getenv('LOG_FILE', 'Console only')),
+        ('PRELOAD_SEGMENTS', os.getenv('PRELOAD_SEGMENTS', '8')),
+        ('MAX_CONCURRENT_PRELOADS', os.getenv('MAX_CONCURRENT_PRELOADS', '5')),
+        ('SESSION_CLEANUP_INTERVAL', f"{os.getenv('SESSION_CLEANUP_INTERVAL', '300')}s"),
+        ('SESSION_IDLE_TIMEOUT', f"{os.getenv('SESSION_IDLE_TIMEOUT', '600')}s"),
     ]
 
     for key, value in config_items:
-        logger.info(f"{key:<20}: {value}")
+        logger.info(f"{key:<25}: {value}")
 
     logger.info("=" * 60)
 
     # Show auto-detected values
     detected_ip = get_local_ip()
     if detected_ip:
-        logger.info(f"{'Auto-detected IP':<20}: {detected_ip}")
+        logger.info(f"{'Auto-detected IP':<25}: {detected_ip}")
 
     # Show HTTPS status
     force_https = os.getenv('FORCE_HTTPS', 'false').lower() == 'true'
@@ -569,16 +657,22 @@ def show_configuration():
                     os.path.exists(os.getenv('SSL_KEY_PATH', '')))
 
     if force_https:
-        logger.info(f"{'HTTPS Mode':<20}: Enabled (Reverse Proxy)")
+        logger.info(f"{'HTTPS Mode':<25}: Enabled (Reverse Proxy)")
     elif has_ssl_certs:
-        logger.info(f"{'HTTPS Mode':<20}: Enabled (Direct SSL)")
+        logger.info(f"{'HTTPS Mode':<25}: Enabled (Direct SSL)")
     else:
-        logger.info(f"{'HTTPS Mode':<20}: Disabled (HTTP only)")
+        logger.info(f"{'HTTPS Mode':<25}: Disabled (HTTP only)")
 
     # Performance estimation
     if len(multi_bot_configs) > 1:
-        logger.info(f"{'Expected Speedup':<20}: ~{len(multi_bot_configs)}x faster uploads")
-        logger.info(f"{'Rate Limit Isolation':<20}: Each bot has separate limits")
+        logger.info(f"{'Expected Upload Speedup':<25}: ~{len(multi_bot_configs)}x faster uploads")
+        logger.info(f"{'Rate Limit Isolation':<25}: Each bot has separate limits")
+
+    # Predictive caching info
+    preload_segments = int(os.getenv('PRELOAD_SEGMENTS', 8))
+    max_concurrent_preloads = int(os.getenv('MAX_CONCURRENT_PRELOADS', 5))
+    logger.info(f"{'Predictive Caching':<25}: {preload_segments} segments ahead")
+    logger.info(f"{'Concurrent Preloads':<25}: {max_concurrent_preloads} maximum")
 
 if __name__ == "__main__":
     try:
