@@ -102,14 +102,20 @@ Think of this as your personal Netflix, but using Telegram's infrastructure:
 ### 💾 **Intelligent Caching**
 - **Memory Cache**: Ultra-fast in-memory caching for active segments
 - **Disk Cache**: Persistent caching that survives restarts
+- **Predictive Caching**: Smart preloading based on viewing patterns
+- **Cache Warming**: Automatically pre-cache popular content
+- **Session Tracking**: Optimized caching per user session
 - **LRU Eviction**: Automatically manages cache space efficiently
 - **Cache Statistics**: Monitor cache hit rates and performance
 
 ### 🖥️ **Modern Web Interface**
 - **Dark/Light Theme**: Beautiful, responsive web UI
+- **Complete Settings Panel**: Configure all .env variables through UI
 - **Real-time Logs**: Watch processing progress live
 - **System Monitoring**: CPU, memory, and cache statistics
+- **Bot Management**: Visual configuration and testing of all bots
 - **Drag & Drop**: Easy file uploading
+- **Live Configuration**: Changes saved instantly to .env file
 
 ---
 
@@ -238,8 +244,24 @@ Create separate channels or use the same channel for all bots.
 
 </details>
 
-### ⚙️ **Step 2: Configuration File**
+### ⚙️ **Step 2: Configuration**
 
+#### **Method 1: Web Interface (Recommended)**
+1. **Start with basic config**: Create a minimal `.env` file:
+   ```env
+   BOT_TOKEN="your_first_bot_token"
+   CHAT_ID="@yourchannel"
+   LOCAL_HOST="0.0.0.0"
+   LOCAL_PORT="8080"
+   ```
+2. **Start the server**: `python main.py serve`
+3. **Open web interface**: `http://localhost:8080`
+4. **Configure via web**:
+   - 📡 **Telegram Configuration tab**: Add all your bots visually
+   - ⚙️ **Settings tab**: Configure system settings
+   - 🧪 **Test everything**: Use built-in testing tools
+
+#### **Method 2: Manual .env File**
 Create a `.env` file in the project root:
 
 ```bash
@@ -299,6 +321,9 @@ FORCE_HTTPS="true"  # If using reverse proxy
 ---
 
 ## 🚀 Usage Guide
+
+> **🎆 New: Integrated Web Dashboard**  
+> All functionality is now available through a modern tabbed web interface! No need for separate configuration pages or command-line tools for basic operations.
 
 ### 🖥️ **Method 1: Web Interface (Easiest)**
 
@@ -426,6 +451,7 @@ MULTI_BOT_CONFIG='[
 
 ### 🧪 **Testing Your Bots**
 
+#### **Command Line Testing**
 ```bash
 # Test all configured bots
 python main.py test-bots
@@ -437,6 +463,20 @@ python main.py test-bots
 # ✅ Bot 3 (@bot3) - My Streaming Bot 3
 # 🎉 All bots are ready for round-robin uploads!
 ```
+
+#### **Web Interface Testing (Recommended)**
+1. **Open your browser**: `http://localhost:8080`
+2. **Go to Telegram Configuration tab**: Click "📡 Telegram Configuration"
+3. **Test individual bots**: Click "🧪 Test Bot" on each configured bot
+4. **View results**: Real-time success/failure messages with detailed error information
+5. **Fix issues**: Edit bot tokens or chat IDs directly and test again
+
+**Web interface advantages**:
+- ✅ Test individual bots separately
+- ✅ Real-time results with detailed error messages
+- ✅ Edit and re-test without restarting
+- ✅ Visual status indicators for each bot
+- ✅ Automatic .env file synchronization
 
 ---
 
@@ -535,12 +575,14 @@ For remote access:
 2. **Configure public domain**:
    ```env
    PUBLIC_DOMAIN="yourdomain.duckdns.org"
-   FORCE_HTTPS="true"
+   FORCE_HTTPS="true"  # Uses standard HTTPS port (443) in URLs
    ```
 3. **Access globally**:
    ```
    https://yourdomain.duckdns.org/playlist/public/{video_id}.m3u8
    ```
+
+**Note**: When `FORCE_HTTPS=true`, the system generates clean HTTPS URLs without port numbers, assuming you're using a reverse proxy (nginx, Cloudflare) that handles SSL termination on port 443.
 
 ### 🔒 **HTTPS/SSL Configuration**
 
@@ -677,7 +719,7 @@ subtitle_files table:
 
 ```env
 CACHE_TYPE="memory"
-CACHE_SIZE="524288000"  # 500MB
+CACHE_SIZE="1073741824"  # 1GB
 
 Advantages:
 ✅ Instant access (no disk I/O)
@@ -696,7 +738,7 @@ Disadvantages:
 
 ```env
 CACHE_TYPE="disk"
-CACHE_SIZE="1073741824"  # 1GB
+CACHE_SIZE="2147483648"  # 2GB
 CACHE_DIR="cache"
 
 Advantages:
@@ -707,6 +749,26 @@ Advantages:
 Disadvantages:
 ❌ Slower than memory
 ❌ Uses disk space
+```
+
+</details>
+
+<details>
+<summary><b>Advanced Cache Settings</b></summary>
+
+```env
+# Predictive caching
+PRELOAD_SEGMENTS="10"              # Segments to preload ahead
+MAX_CONCURRENT_PRELOADS="7"       # Parallel preload operations
+ENABLE_CACHE_WARMING="true"        # Auto-cache popular content
+CACHE_WARMING_SEGMENTS="12"        # Segments to warm per video
+
+# Session management
+SESSION_CLEANUP_INTERVAL="300"     # Cleanup every 5 minutes
+SESSION_IDLE_TIMEOUT="600"         # 10-minute session timeout
+
+# Performance
+STREAMING_THRESHOLD_GB="3"         # Use streaming for files > 3GB
 ```
 
 </details>
@@ -728,29 +790,58 @@ curl -X POST "http://localhost:8080/cache/clear?video_id=movie"
 
 ## 🔍 Monitoring & Debugging
 
-### 📊 **Web Dashboard**
+### 🌐 **Integrated Web Dashboard**
 
-The modern web interface provides real-time monitoring:
+The modern tabbed interface provides comprehensive management:
 
+#### **📊 Dashboard Tab**
 ```
 System Status:
-- CPU, Memory, Disk usage
+- CPU, Memory, Disk usage with live graphs
 - Python version, Platform info
+- Cache statistics and utilization
 
 Network Configuration:
-- Local IP, Public domain
-- SSL/HTTPS status
-- Telegram connectivity
+- Local IP, Public domain status
+- SSL/HTTPS status with protocol detection
+- Telegram connectivity status
 
 Database & Cache:
 - Video count, Total segments
 - Subtitle tracks, Storage used
-- Cache hit rate, Utilization
+- Cache hit rate, Real-time utilization
+```
 
-Configuration:
-- Upload limits, Chunk sizes
-- Segment duration ranges
-- Hardware acceleration status
+#### **📡 Telegram Configuration Tab**
+```
+Bot Management:
+- Visual cards for all 10 bot slots
+- Automatic .env file import
+- Individual bot testing with live results
+- Status indicators: ✅ Configured, ⚠️ Incomplete, ⭕ Empty
+- Real-time configuration saving
+```
+
+#### **⚙️ Settings Tab**
+```
+System Configuration:
+- Network settings (host, port, domain, SSL)
+- Video processing parameters (threads, hardware accel)
+- Cache configuration (type, size, preloading)
+- Directory configuration (uploads, segments, playlists)
+- Advanced cache settings (warming, session management)
+- Performance settings (streaming thresholds)
+- All .env variables accessible through modern UI
+- All changes saved to .env automatically
+```
+
+#### **📋 Logs Tab**
+```
+Real-time Monitoring:
+- Live processing logs with timestamps
+- Color-coded log levels
+- Auto-scrolling and filtering
+- Download logs functionality
 ```
 
 ### 📋 **Available Endpoints**
