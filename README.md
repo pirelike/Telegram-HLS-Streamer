@@ -135,12 +135,6 @@ The streamer relies on Telegram bots to store and retrieve video files.
     > CHAT_ID_2="your_chat_id_here"
     > ```
 
-    > BOT\_TOKEN\_3="your\_third\_bot\_token\_here"
-    > CHAT\_ID\_3="your\_chat\_id\_here"
-
-    > ```
-    > ```
-
 -----
 
 ## 🖥️ Usage
