@@ -1,0 +1,3153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram HLS Streamer v{{ server_version }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Enhanced styles with dynamic updates and settings panel */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --primary-light: #8b5cf6;
+            --secondary: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --info: #3b82f6;
+            --dark: #0f172a;
+            --dark-light: #1e293b;
+            --light: #f8fafc;
+            --border: #e2e8f0;
+            --text-dark: #0f172a;
+            --text-light: #64748b;
+            --text-lighter: #94a3b8;
+            --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            --radius: 12px;
+            --radius-lg: 16px;
+            --log-bg: #f1f5f9;
+            --log-text: #334155;
+            --log-info-text: #475569;
+            --log-success-text: #15803d;
+            --log-error-text: #b91c1c;
+            --log-result-link: #4f46e5;
+        }
+
+        [data-theme="dark"] {
+            --light: #0f172a;
+            --border: #334155;
+            --text-dark: #f8fafc;
+            --text-light: #cbd5e1;
+            --text-lighter: #94a3b8;
+            --log-bg: #1e293b;
+            --log-text: #e2e8f0;
+            --log-info-text: #cbd5e1;
+            --log-success-text: #34d399;
+            --log-error-text: #f87171;
+            --log-result-link: #60a5fa;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: var(--text-dark);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background:
+                radial-gradient(circle at 20% 80%, rgba(120, 119, 198, 0.3) 0%, transparent 40%),
+                radial-gradient(circle at 80% 20%, rgba(255, 119, 198, 0.2) 0%, transparent 40%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .container {
+            max-width: 1400px;
+            width: 100%;
+            position: relative;
+            z-index: 1;
+        }
+
+        .main-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(30px) saturate(180%);
+            border: none;
+            border-radius: var(--radius-lg);
+            padding: 2rem 3rem;
+            box-shadow: var(--shadow-lg);
+            transition: all 0.3s ease;
+            position: relative;
+            margin-bottom: 2rem;
+        }
+        [data-theme="dark"] .main-card {
+            background: rgba(15, 23, 42, 0.95);
+            border: none;
+        }
+
+        /* Top navigation bar */
+        .nav-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .nav-controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .nav-button {
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 25px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: var(--text-dark);
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .nav-button:hover {
+            background: rgba(99, 102, 241, 0.2);
+            transform: translateY(-2px);
+        }
+        .nav-button.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        .theme-toggle {
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 50px;
+            padding: 0.5rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .theme-toggle:hover {
+            transform: scale(1.1) rotate(15deg);
+            background: rgba(99, 102, 241, 0.2);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+            position: relative;
+        }
+        .header::after {
+            content: '';
+            position: absolute;
+            bottom: -1.25rem;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 60px;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary), var(--primary-light));
+            border-radius: 2px;
+        }
+        .header h1 {
+            font-size: 2.25rem;
+            font-weight: 700;
+            color: var(--text-dark);
+            margin-bottom: 0.5rem;
+        }
+        .header p {
+            color: var(--text-light);
+            font-size: 1.1rem;
+        }
+        .version-badge {
+            display: inline-block;
+            background: linear-gradient(90deg, var(--primary), var(--primary-light));
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+
+        /* Tab content areas */
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        /* Dashboard - Info Grid Layout */
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .info-card {
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        [data-theme="dark"] .info-card {
+            background: rgba(30, 41, 59, 0.7);
+        }
+        .info-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow);
+        }
+
+        .info-card h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-dark);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid rgba(0,0,0,0.05);
+        }
+        [data-theme="dark"] .info-row {
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .info-row:last-child {
+            margin-bottom: 0;
+            border-bottom: none;
+        }
+
+        .info-label {
+            color: var(--text-light);
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        .info-value {
+            color: var(--text-dark);
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        /* Realtime update indicators */
+        .live-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--secondary);
+            margin-left: 0.5rem;
+            animation: pulse 2s infinite;
+        }
+        .live-indicator.updating {
+            background: var(--warning);
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(0,0,0,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        [data-theme="dark"] .progress-bar {
+            background: rgba(255,255,255,0.1);
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--secondary), var(--primary));
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .progress-fill.warning { background: linear-gradient(90deg, var(--warning), #fbbf24); }
+        .progress-fill.danger { background: linear-gradient(90deg, var(--danger), #f87171); }
+
+        /* Settings Panel */
+        .settings-panel {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: var(--radius);
+            padding: 2rem;
+            border: 1px solid var(--border);
+        }
+        [data-theme="dark"] .settings-panel {
+            background: rgba(30, 41, 59, 0.9);
+        }
+
+        /* Playlist Section */
+        .playlist-section {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: var(--radius);
+            padding: 2rem;
+            border: 1px solid var(--border);
+        }
+        [data-theme="dark"] .playlist-section {
+            background: rgba(30, 41, 59, 0.9);
+        }
+
+        .playlist-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 2rem;
+        }
+
+        .refresh-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: var(--radius);
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .refresh-btn:hover {
+            background: var(--primary-light);
+            transform: translateY(-2px);
+        }
+
+        .playlists-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .playlist-card {
+            background: rgba(255, 255, 255, 0.8);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            transition: all 0.3s ease;
+        }
+        [data-theme="dark"] .playlist-card {
+            background: rgba(15, 23, 42, 0.8);
+        }
+        .playlist-card:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .playlist-title {
+            font-weight: 600;
+            color: var(--text-dark);
+            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .playlist-info {
+            color: var(--text-light);
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+
+        .playlist-buttons {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .copy-btn {
+            flex: 1;
+            min-width: 120px;
+            padding: 0.6rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--light);
+            color: var(--text-dark);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .copy-btn:hover {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+        .copy-btn.copied {
+            background: var(--success);
+            color: white;
+            border-color: var(--success);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-light);
+        }
+        .empty-state .icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        .empty-state h4 {
+            margin-bottom: 0.5rem;
+            color: var(--text-dark);
+        }
+
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .settings-group {
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+        }
+        [data-theme="dark"] .settings-group {
+            background: rgba(15, 23, 42, 0.5);
+        }
+
+        .settings-group h4 {
+            color: var(--text-dark);
+            margin-bottom: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group label {
+            display: block;
+            color: var(--text-dark);
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--light);
+            color: var(--text-dark);
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        /* Multi-bot configuration */
+        .multi-bot-controls {
+            margin-bottom: 1.5rem;
+        }
+
+        .bot-config-section {
+            transition: all 0.3s ease;
+        }
+
+        .multi-bot-header {
+            margin-bottom: 1.5rem;
+        }
+
+        .bot-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .bot-count {
+            font-size: 0.9rem;
+            color: var(--text-light);
+            font-weight: 600;
+        }
+
+        .bot-item {
+            background: rgba(255, 255, 255, 0.3);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            position: relative;
+        }
+        [data-theme="dark"] .bot-item {
+            background: rgba(15, 23, 42, 0.3);
+        }
+
+        .bot-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .bot-number {
+            font-weight: 600;
+            color: var(--primary);
+            font-size: 1rem;
+        }
+
+        .bot-remove {
+            background: var(--danger);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 2rem;
+            height: 2rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            transition: all 0.3s ease;
+        }
+
+        .bot-remove:hover {
+            transform: scale(1.1);
+            box-shadow: var(--shadow);
+        }
+
+        .bot-fields {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        @media (max-width: 768px) {
+            .bot-fields {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .settings-actions {
+            display: flex;
+            gap: 1rem;
+            justify-content: flex-end;
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: var(--radius);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            color: white;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow);
+        }
+
+        .btn-secondary {
+            background: var(--border);
+            color: var(--text-dark);
+        }
+        .btn-secondary:hover {
+            background: var(--text-light);
+            color: white;
+        }
+
+        /* Enhanced Quick Actions */
+        .quick-actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .action-button {
+            background: rgba(255, 255, 255, 0.8);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            color: var(--text-dark);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 0.5rem;
+        }
+        [data-theme="dark"] .action-button {
+            background: rgba(30, 41, 59, 0.8);
+        }
+        .action-button:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow);
+            border-color: var(--primary);
+        }
+
+        .action-button .icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .action-button .title {
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--text-dark);
+        }
+
+        .action-button .description {
+            font-size: 0.8rem;
+            color: var(--text-light);
+        }
+
+        /* Upload mode selector */
+        .upload-mode-selector {
+            margin-bottom: 2rem;
+        }
+
+        .mode-buttons {
+            display: flex;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius);
+            padding: 0.25rem;
+            gap: 0.25rem;
+        }
+
+        .mode-btn {
+            flex: 1;
+            padding: 0.75rem 1rem;
+            background: transparent;
+            border: none;
+            border-radius: calc(var(--radius) - 0.25rem);
+            color: var(--text-light);
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .mode-btn.active {
+            background: var(--primary);
+            color: white;
+            box-shadow: var(--shadow);
+        }
+
+        .mode-btn:hover:not(.active) {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-dark);
+        }
+
+        /* Upload modes */
+        .upload-mode {
+            display: none;
+        }
+
+        .upload-mode.active {
+            display: block;
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        /* Batch options */
+        .batch-options {
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border: 1px solid var(--border);
+        }
+        [data-theme="dark"] .batch-options {
+            background: rgba(30, 41, 59, 0.5);
+        }
+
+        .batch-options .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .batch-options .form-group:last-child {
+            margin-bottom: 0;
+        }
+
+        .batch-options label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-dark);
+            font-weight: 500;
+            cursor: pointer;
+        }
+
+        .batch-options input[type="checkbox"] {
+            width: 1.2rem;
+            height: 1.2rem;
+        }
+
+        /* Batch progress */
+        .batch-progress {
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: var(--radius);
+            padding: 2rem;
+            border: 1px solid var(--border);
+            margin-top: 2rem;
+        }
+        [data-theme="dark"] .batch-progress {
+            background: rgba(30, 41, 59, 0.8);
+        }
+
+        .batch-progress h4 {
+            color: var(--text-dark);
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+        }
+
+        .progress-info {
+            margin-bottom: 1rem;
+        }
+
+        .progress-stats {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+            color: var(--text-light);
+        }
+
+        .progress-stats span {
+            font-weight: 600;
+        }
+
+        .current-processing {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: rgba(99, 102, 241, 0.1);
+            border-radius: var(--radius);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+            color: var(--text-dark);
+        }
+
+        /* Enhanced file input */
+        .file-input-container {
+            position: relative;
+            margin-bottom: 2rem;
+        }
+
+        .file-input-label {
+            width: 100%;
+            padding: 2rem 1.5rem;
+            border: 2px dashed var(--border);
+            border-radius: var(--radius);
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            background: var(--light);
+            color: var(--text-dark);
+            font-family: inherit;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            color: var(--text-light);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .file-input-label .icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .file-input-label .text {
+            font-size: 1.1rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+        }
+
+        .file-input-label .subtext {
+            font-size: 0.9rem;
+            color: var(--text-lighter);
+        }
+
+        .file-input-label:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow);
+            border-color: var(--primary-light);
+            border-style: solid;
+        }
+
+        .file-input-label:hover .icon {
+            transform: scale(1.1);
+        }
+
+        .file-info {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            border-radius: var(--radius);
+            padding: 1rem;
+            margin-top: 1rem;
+            display: none;
+        }
+
+        .file-info.visible {
+            display: block;
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        input[type="file"] { display: none; }
+
+        .submit-btn {
+            width: 100%;
+            padding: 1.2rem 2rem;
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            color: white;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+            font-family: inherit;
+            margin-top: 1rem;
+        }
+        .submit-btn::before {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: left 0.6s ease;
+        }
+        .submit-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow-lg);
+        }
+        .submit-btn:hover::before { left: 100%; }
+        .submit-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s linear infinite;
+            margin-right: 0.75rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Enhanced Log Section */
+        .log-section {
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: var(--radius);
+            padding: 2rem;
+            border: 1px solid var(--border);
+        }
+        [data-theme="dark"] .log-section {
+            background: rgba(30, 41, 59, 0.8);
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .log-controls {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .log-control-btn {
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: var(--radius);
+            padding: 0.5rem 0.75rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: var(--text-dark);
+        }
+        .log-control-btn:hover {
+            background: rgba(99, 102, 241, 0.2);
+        }
+
+        .log-stats {
+            font-size: 0.8rem;
+            color: var(--text-light);
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .log-output {
+            background: var(--log-bg);
+            color: var(--log-text);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            height: 400px;
+            overflow-y: auto;
+            font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            border: 1px solid var(--border);
+            box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+        .log-output::-webkit-scrollbar { width: 8px; }
+        .log-output::-webkit-scrollbar-track { background: transparent; }
+        .log-output::-webkit-scrollbar-thumb {
+            background: var(--primary);
+            border-radius: 4px;
+        }
+        .log-output span.log-INFO { color: var(--log-info-text); }
+        .log-output span.log-SUCCESS { color: var(--log-success-text); font-weight: bold; }
+        .log-output span.log-ERROR { color: var(--log-error-text); font-weight: bold; }
+        .log-output span.log-RESULT a { color: var(--log-result-link); text-decoration: none; font-weight: bold; border-bottom: 2px solid; }
+        .log-output span.log-RESULT a:hover { color: var(--primary-light); }
+
+        /* Status indicators */
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+        .status-success { background: var(--secondary); }
+        .status-warning { background: var(--warning); }
+        .status-error { background: var(--danger); }
+        .status-info { background: var(--info); }
+
+        /* Alert styles */
+        .alert {
+            padding: 1rem 1.5rem;
+            margin-bottom: 2rem;
+            border-radius: var(--radius);
+            border: 1px solid transparent;
+            position: relative;
+            overflow: hidden;
+        }
+        .alert::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0;
+            width: 4px;
+            height: 100%;
+        }
+        .alert-danger {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #dc2626;
+        }
+        .alert-danger::before { background: var(--danger); }
+        .alert-info {
+            background-color: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.3);
+            color: #2563eb;
+        }
+        .alert-info::before { background: var(--info); }
+        .alert-success {
+            background-color: rgba(16, 185, 129, 0.1);
+            border-color: rgba(16, 185, 129, 0.3);
+            color: #059669;
+        }
+        .alert-success::before { background: var(--secondary); }
+
+        /* Bot Configuration Styles */
+        .bot-card {
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        [data-theme="dark"] .bot-card {
+            background: rgba(30, 41, 59, 0.7);
+        }
+        .bot-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow);
+        }
+        .bot-card.configured {
+            border-color: var(--secondary);
+            background: rgba(16, 185, 129, 0.05);
+        }
+        .bot-card.empty {
+            border-color: var(--border);
+            opacity: 0.7;
+        }
+        .bot-card.incomplete {
+            border-color: var(--warning);
+            background: rgba(245, 158, 11, 0.05);
+        }
+        .bot-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        .bot-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-dark);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .bot-status {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .bot-status.configured {
+            background: var(--secondary);
+            color: white;
+        }
+        .bot-status.incomplete {
+            background: var(--warning);
+            color: white;
+        }
+        .bot-status.empty {
+            background: var(--text-lighter);
+            color: white;
+        }
+        .bot-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        .btn-test {
+            background: var(--info);
+            color: white;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+        .btn-test:hover {
+            background: #2563eb;
+            transform: translateY(-1px);
+        }
+        .btn-test:disabled {
+            background: var(--text-lighter);
+            cursor: not-allowed;
+            transform: none;
+        }
+        .btn-clear {
+            background: var(--danger);
+            color: white;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+        .btn-clear:hover {
+            background: #dc2626;
+            transform: translateY(-1px);
+        }
+        .telegram-save-section {
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: var(--radius);
+            padding: 2rem;
+            border: 1px solid var(--border);
+            text-align: center;
+        }
+        [data-theme="dark"] .telegram-save-section {
+            background: rgba(30, 41, 59, 0.7);
+        }
+        [data-theme="dark"] .config-info {
+            background: rgba(59, 130, 246, 0.15) !important;
+            border-color: rgba(59, 130, 246, 0.3) !important;
+        }
+        .save-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-lg);
+        }
+        .save-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .form-input.token {
+            font-family: monospace;
+            font-size: 0.8rem;
+        }
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .hidden { display: none !important; }
+        .fade-in { animation: fadeIn 0.5s ease-in-out forwards; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Responsive design */
+        @media (max-width: 768px) {
+            body { padding: 1rem; }
+            .main-card { padding: 1.5rem; }
+            .header h1 { font-size: 1.75rem; }
+            .info-grid { grid-template-columns: 1fr; }
+            .settings-grid { grid-template-columns: 1fr; }
+            .quick-actions { grid-template-columns: 1fr; }
+            .nav-controls { 
+                flex-direction: column; 
+                gap: 0.5rem; 
+                align-items: stretch;
+            }
+        }
+
+        /* Utility classes */
+        .text-success { color: var(--secondary) !important; }
+        .text-warning { color: var(--warning) !important; }
+        .text-danger { color: var(--danger) !important; }
+        .text-info { color: var(--info) !important; }
+    </style>
+</head>
+<body data-theme="dark">
+
+    <div class="container">
+        <div class="main-card">
+            <!-- Navigation Bar -->
+            <div class="nav-bar">
+                <div class="nav-controls">
+                    <div class="nav-button active" data-tab="dashboard">📊 Dashboard</div>
+                    <div class="nav-button" data-tab="upload">📤 Upload</div>
+                    <div class="nav-button" data-tab="playlists">📺 Playlists</div>
+                    <div class="nav-button" data-tab="settings">⚙️ Settings</div>
+                    <div class="nav-button" data-tab="telegram">📡 Telegram Configuration</div>
+                    <div class="nav-button" data-tab="logs">📋 Logs</div>
+                </div>
+                <div class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
+                    <span id="theme-icon">☀️</span>
+                </div>
+            </div>
+
+            <header class="header">
+                <h1>Telegram HLS Streamer<span class="version-badge">v3.0</span></h1>
+                <p>Advanced video streaming with hybrid encoding and subtitle support</p>
+            </header>
+
+            <!-- Dashboard Tab -->
+            <div id="dashboard-tab" class="tab-content active">
+                <!-- Enhanced Information Grid with Live Updates -->
+                <div class="info-grid">
+                    <!-- System Status -->
+                    <div class="info-card">
+                        <h3>🖥️ System Status<span class="live-indicator" id="system-indicator"></span></h3>
+                        {% if system_stats %}
+                        <div class="info-row">
+                            <span class="info-label">🌐 Platform</span>
+                            <span class="info-value">{{ system_stats.platform }} {{ system_stats.platform_release }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">🐍 Python</span>
+                            <span class="info-value">{{ system_stats.python_version }}</span>
+                        </div>
+                        {% if system_stats.cpu_percent %}
+                        <div class="info-row">
+                            <span class="info-label">💻 CPU Usage</span>
+                            <span class="info-value" id="cpu-usage">{{ "%.1f"|format(system_stats.cpu_percent) }}%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="cpu-bar"
+                                 style="width: {{ system_stats.cpu_percent }}%"></div>
+                        </div>
+                        {% endif %}
+                        {% if system_stats.memory_percent %}
+                        <div class="info-row">
+                            <span class="info-label">💾 Memory</span>
+                            <span class="info-value" id="memory-usage">{{ "%.1f"|format(system_stats.memory_used / (1024**3)) }}GB / {{ "%.1f"|format(system_stats.memory_total / (1024**3)) }}GB</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="memory-bar"
+                                 style="width: {{ system_stats.memory_percent }}%"></div>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">💿 Disk Space</span>
+                            <span class="info-value" id="disk-usage">{{ "%.1f"|format(system_stats.disk_used / (1024**3)) }}GB / {{ "%.1f"|format(system_stats.disk_total / (1024**3)) }}GB</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="disk-bar"
+                                 style="width: {{ system_stats.disk_percent }}%"></div>
+                        </div>
+                        {% endif %}
+                        {% else %}
+                        <div class="info-row">
+                            <span class="info-label">Status</span>
+                            <span class="info-value text-warning">System stats unavailable</span>
+                        </div>
+                        <p style="font-size: 0.8rem; color: var(--text-light); margin-top: 0.5rem;">
+                            Install psutil for system monitoring: <code>pip install psutil</code>
+                        </p>
+                        {% endif %}
+                    </div>
+
+                    <!-- Network Configuration -->
+                    <div class="info-card">
+                        <h3>🌐 Network Configuration</h3>
+                        <div class="info-row">
+                            <span class="info-label">🏠 Local Access</span>
+                            <span class="info-value text-success">{{ local_ip }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">🌐 Public Domain</span>
+                            <span class="info-value {% if public_domain != 'Not configured' %}text-success{% else %}text-warning{% endif %}">
+                                {{ public_domain }}
+                            </span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">🔒 Protocol</span>
+                            <span class="info-value {% if ssl_enabled %}text-success{% else %}text-warning{% endif %}">
+                                {% if ssl_enabled %}✅ {{ protocol.upper() }}{% else %}⚠️ HTTP only{% endif %}
+                            </span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">📡 Telegram</span>
+                            <span class="info-value {% if telegram_configured %}text-success{% else %}text-danger{% endif %}">
+                                {% if telegram_configured %}✅ Configured{% else %}❌ Not configured{% endif %}
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Database & Cache -->
+                    <div class="info-card">
+                        <h3>💾 Database & Cache<span class="live-indicator" id="cache-indicator"></span></h3>
+                        {% if db_stats %}
+                        <div class="info-row">
+                            <span class="info-label">📹 Total Videos</span>
+                            <span class="info-value" id="total-videos">{{ db_stats.total_videos or 0 }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">🎬 Segments</span>
+                            <span class="info-value" id="total-segments">{{ db_stats.total_segments or 0 }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">📄 Subtitles</span>
+                            <span class="info-value" id="total-subtitles">{{ db_stats.total_subtitles or 0 }} tracks</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">💿 Storage Used</span>
+                            <span class="info-value" id="storage-used">{{ "%.1f"|format(db_stats.total_size_mb or 0) }} MB</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">⏱️ Total Duration</span>
+                            <span class="info-value" id="total-duration">{{ "%.1f"|format(db_stats.total_duration_hours or 0) }} hours</span>
+                        </div>
+                        {% else %}
+                        <div class="info-row">
+                            <span class="info-label">Database</span>
+                            <span class="info-value text-warning">No data yet</span>
+                        </div>
+                        {% endif %}
+
+                        {% if cache_stats %}
+                        <div class="info-row">
+                            <span class="info-label">💾 Cache Type</span>
+                            <span class="info-value">{{ cache_stats.cache_type.upper() or cache_type.upper() }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">📦 Cached Items</span>
+                            <span class="info-value" id="cached-items">{{ cache_stats.total_items or 0 }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">📊 Cache Usage</span>
+                            <span class="info-value" id="cache-usage">{{ "%.1f"|format(cache_stats.cache_utilization or 0) }}%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="cache-bar"
+                                 style="width: {{ cache_stats.cache_utilization or 0 }}%"></div>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Configuration -->
+                    <div class="info-card">
+                        <h3>⚙️ Configuration</h3>
+                        <div class="info-row">
+                            <span class="info-label">📦 Max Upload</span>
+                            <span class="info-value">{{ "%.1f"|format(config_info.max_upload_size / (1024**3)) }} GB</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">🔗 Chunk Size</span>
+                            <span class="info-value">{{ "%.1f"|format(config_info.max_chunk_size / (1024**2)) }} MB</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">⏱️ Segment Range</span>
+                            <span class="info-value">{{ config_info.min_segment_duration }}s - {{ config_info.max_segment_duration }}s</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">💾 Cache Size</span>
+                            <span class="info-value">{{ "%.1f"|format(config_info.cache_size / (1024**2)) }} MB</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">📝 Log Level</span>
+                            <span class="info-value">{{ config_info.log_level }}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">🚀 Hardware Accel</span>
+                            <span class="info-value {% if config_info.hardware_accel != 'None' %}text-success{% else %}text-warning{% endif %}">
+                                {{ config_info.hardware_accel }}
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Quick Actions -->
+                    <div class="info-card">
+                        <h3>🔧 Quick Actions</h3>
+                        <div class="quick-actions">
+                            <a href="/cache/stats" target="_blank" class="action-button">
+                                <div class="icon">📊</div>
+                                <div class="title">Cache Stats</div>
+                                <div class="description">View detailed cache statistics</div>
+                            </a>
+                            <div class="action-button" onclick="clearCache()">
+                                <div class="icon">🗑️</div>
+                                <div class="title">Clear Cache</div>
+                                <div class="description">Clear all cached segments</div>
+                            </div>
+                            {% if public_domain != 'Not configured' %}
+                            <a href="{{ protocol }}://{{ public_domain }}" target="_blank" class="action-button">
+                                <div class="icon">🌐</div>
+                                <div class="title">Public Access</div>
+                                <div class="description">Open public interface</div>
+                            </a>
+                            {% endif %}
+                            <div class="action-button" onclick="refreshStats()">
+                                <div class="icon">🔄</div>
+                                <div class="title">Refresh Stats</div>
+                                <div class="description">Update all statistics</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Alerts -->
+                {% if not telegram_configured %}
+                <div class="alert alert-danger">
+                    <strong>⚠️ Configuration Error:</strong> Your <code>BOT_TOKEN</code> or <code>CHAT_ID</code> is not set correctly.
+                    Please configure them in the Settings tab or create a <code>.env</code> file in the project root.
+                </div>
+                {% endif %}
+
+                {% if system_stats and system_stats.memory_percent > 85 %}
+                <div class="alert alert-info">
+                    <strong>💾 High Memory Usage:</strong> System memory usage is at {{ "%.1f"|format(system_stats.memory_percent) }}%.
+                    Consider reducing <code>CACHE_SIZE</code> or switching to disk cache in the Settings tab.
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Upload Tab -->
+            <div id="upload-tab" class="tab-content">
+                <!-- Upload Mode Selector -->
+                <div class="upload-mode-selector">
+                    <div class="mode-buttons">
+                        <button type="button" class="mode-btn active" data-mode="single">📄 Single Video</button>
+                        <button type="button" class="mode-btn" data-mode="batch">📁 Batch Folder</button>
+                    </div>
+                </div>
+
+                <!-- Single Video Upload -->
+                <div id="single-upload" class="upload-mode active">
+                    <form id="single-upload-form">
+                        <div class="file-input-container">
+                            <input type="file" id="video_file" name="video_file" accept="video/mp4,video/x-matroska,video/*" required>
+                            <label for="video_file" class="file-input-label" id="file-label">
+                                <div class="icon">📁</div>
+                                <div class="text">Choose a video file</div>
+                                <div class="subtext">or drag & drop here</div>
+                            </label>
+                            <div id="file-info" class="file-info"></div>
+                        </div>
+
+                        <button type="submit" id="single-submit-btn" class="submit-btn">
+                            <span id="single-btn-content">🚀 Upload and Process</span>
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Batch Folder Upload -->
+                <div id="batch-upload" class="upload-mode">
+                    <form id="batch-upload-form">
+                        <div class="file-input-container">
+                            <input type="file" id="folder_input" name="folder_input" webkitdirectory directory multiple>
+                            <label for="folder_input" class="file-input-label" id="folder-label">
+                                <div class="icon">📂</div>
+                                <div class="text">Choose a folder with videos</div>
+                                <div class="subtext">Select folder containing video files</div>
+                            </label>
+                            <div id="folder-info" class="file-info"></div>
+                        </div>
+
+                        <div class="batch-options">
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="recursive-scan" checked>
+                                    Scan subdirectories recursively
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="dry-run">
+                                    Dry run (analyze only, don't process)
+                                </label>
+                            </div>
+                        </div>
+
+                        <button type="submit" id="batch-submit-btn" class="submit-btn">
+                            <span id="batch-btn-content">🚀 Process Folder</span>
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Batch Progress -->
+                <div id="batch-progress" class="batch-progress hidden">
+                    <h4>📊 Batch Processing Progress</h4>
+                    <div class="progress-info">
+                        <div class="progress-stats">
+                            <span>Processed: <span id="batch-processed">0</span>/<span id="batch-total">0</span></span>
+                            <span>Success: <span id="batch-success">0</span></span>
+                            <span>Failed: <span id="batch-failed">0</span></span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="batch-progress-bar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="current-processing">
+                        <span id="current-file">Ready to start...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Playlists Tab -->
+            <div id="playlists-tab" class="tab-content">
+                <div class="playlist-section">
+                    <div class="playlist-header">
+                        <h3>📺 Generated Playlists</h3>
+                        <p style="color: var(--text-light); margin-bottom: 2rem;">
+                            Manage and access your generated video playlists. Each video has both local and public URLs.
+                        </p>
+                        <button onclick="refreshPlaylists()" class="refresh-btn">🔄 Refresh</button>
+                    </div>
+
+                    <div id="playlists-loading" class="loading-container" style="display: none;">
+                        <div class="loading-spinner"></div>
+                        <p>Loading playlists...</p>
+                    </div>
+
+                    <div id="playlists-content">
+                        <div id="no-playlists" class="empty-state" style="display: none;">
+                            <div class="icon">📺</div>
+                            <h4>No Playlists Found</h4>
+                            <p>Upload some videos to generate playlists.</p>
+                        </div>
+
+                        <div id="playlists-grid" class="playlists-grid">
+                            <!-- Playlists will be dynamically loaded here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div id="settings-tab" class="tab-content">
+                <div class="settings-panel">
+                    <h3>⚙️ System Configuration</h3>
+                    <p style="color: var(--text-light); margin-bottom: 2rem;">
+                        Modify environment variables and system settings. Changes require server restart.
+                    </p>
+
+                    <form id="settings-form">
+                        <div class="settings-grid">
+
+                            <!-- Network Settings -->
+                            <div class="settings-group">
+                                <h4>🌐 Network Configuration</h4>
+                                <div class="form-group">
+                                    <label for="local_host">Local Host</label>
+                                    <input type="text" id="local_host" name="LOCAL_HOST" class="form-control" 
+                                           placeholder="0.0.0.0" value="{{ local_ip }}">
+                                </div>
+                                <div class="form-group">
+                                    <label for="local_port">Local Port</label>
+                                    <input type="number" id="local_port" name="LOCAL_PORT" class="form-control" 
+                                           placeholder="8080" min="1" max="65535">
+                                </div>
+                                <div class="form-group">
+                                    <label for="public_domain">Public Domain</label>
+                                    <input type="text" id="public_domain" name="PUBLIC_DOMAIN" class="form-control" 
+                                           placeholder="example.com">
+                                </div>
+                            </div>
+
+                            <!-- Video Processing -->
+                            <div class="settings-group">
+                                <h4>🎬 Video Processing</h4>
+                                <div class="form-group">
+                                    <label for="max_upload_size">Max Upload Size (GB)</label>
+                                    <input type="number" id="max_upload_size" name="MAX_UPLOAD_SIZE" class="form-control" 
+                                           placeholder="50" min="1" max="1000" step="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="max_chunk_size">Max Chunk Size (MB)</label>
+                                    <input type="number" id="max_chunk_size" name="MAX_CHUNK_SIZE" class="form-control" 
+                                           placeholder="15" min="1" max="20" step="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="min_segment_duration">Min Segment Duration (s)</label>
+                                    <input type="number" id="min_segment_duration" name="MIN_SEGMENT_DURATION" class="form-control" 
+                                           placeholder="2" min="1" max="10">
+                                </div>
+                                <div class="form-group">
+                                    <label for="max_segment_duration">Max Segment Duration (s)</label>
+                                    <input type="number" id="max_segment_duration" name="MAX_SEGMENT_DURATION" class="form-control" 
+                                           placeholder="30" min="10" max="120">
+                                </div>
+                            </div>
+
+                            <!-- Cache Settings -->
+                            <div class="settings-group">
+                                <h4>💾 Cache Configuration</h4>
+                                <div class="form-group">
+                                    <label for="cache_type">Cache Type</label>
+                                    <select id="cache_type" name="CACHE_TYPE" class="form-control">
+                                        <option value="memory">Memory</option>
+                                        <option value="disk">Disk</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="cache_size">Cache Size (MB)</label>
+                                    <input type="number" id="cache_size" name="CACHE_SIZE" class="form-control" 
+                                           placeholder="500" min="100" max="10000">
+                                </div>
+                                <div class="form-group">
+                                    <label for="preload_segments">Preload Segments</label>
+                                    <input type="number" id="preload_segments" name="PRELOAD_SEGMENTS" class="form-control" 
+                                           placeholder="8" min="1" max="50">
+                                </div>
+                            </div>
+
+                            <!-- System Settings -->
+                            <div class="settings-group">
+                                <h4>🖥️ System Settings</h4>
+                                <div class="form-group">
+                                    <label for="log_level">Log Level</label>
+                                    <select id="log_level" name="LOG_LEVEL" class="form-control">
+                                        <option value="DEBUG">DEBUG</option>
+                                        <option value="INFO">INFO</option>
+                                        <option value="WARNING">WARNING</option>
+                                        <option value="ERROR">ERROR</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="ffmpeg_threads">FFmpeg Threads</label>
+                                    <input type="number" id="ffmpeg_threads" name="FFMPEG_THREADS" class="form-control" 
+                                           placeholder="2" min="1" max="16">
+                                </div>
+                                <div class="form-group">
+                                    <label for="hardware_accel">Hardware Acceleration</label>
+                                    <select id="hardware_accel" name="FFMPEG_HARDWARE_ACCEL" class="form-control">
+                                        <option value="auto">Auto-detect (recommended)</option>
+                                        <option value="none">Software encoding only</option>
+                                        <option value="nvenc">NVIDIA GPUs (NVENC)</option>
+                                        <option value="qsv">Intel GPUs (QuickSync)</option>
+                                        <option value="vaapi">Intel/AMD GPUs (VAAPI)</option>
+                                        <option value="amf">AMD GPUs (AMF)</option>
+                                        <option value="videotoolbox">macOS (VideoToolbox)</option>
+                                    </select>
+                                    <small class="form-text text-muted">
+                                        Hardware acceleration can significantly speed up video processing. 
+                                        Auto-detect will choose the best available option.
+                                    </small>
+                                </div>
+                            </div>
+
+                            <!-- SSL Settings -->
+                            <div class="settings-group">
+                                <h4>🔒 SSL Configuration</h4>
+                                <div class="form-group">
+                                    <label for="force_https">Force HTTPS</label>
+                                    <select id="force_https" name="FORCE_HTTPS" class="form-control">
+                                        <option value="false">Disabled</option>
+                                        <option value="true">Enabled</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="ssl_cert_path">SSL Certificate Path</label>
+                                    <input type="text" id="ssl_cert_path" name="SSL_CERT_PATH" class="form-control" 
+                                           placeholder="/path/to/cert.pem">
+                                </div>
+                                <div class="form-group">
+                                    <label for="ssl_key_path">SSL Key Path</label>
+                                    <input type="text" id="ssl_key_path" name="SSL_KEY_PATH" class="form-control" 
+                                           placeholder="/path/to/key.pem">
+                                </div>
+                            </div>
+
+                            <!-- Directory Configuration -->
+                            <div class="settings-group">
+                                <h4>📁 Directory Configuration</h4>
+                                <div class="form-group">
+                                    <label for="temp_upload_dir">Temp Upload Directory</label>
+                                    <input type="text" id="temp_upload_dir" name="TEMP_UPLOAD_DIR" class="form-control" 
+                                           placeholder="temp_uploads">
+                                </div>
+                                <div class="form-group">
+                                    <label for="segments_dir">Segments Directory</label>
+                                    <input type="text" id="segments_dir" name="SEGMENTS_DIR" class="form-control" 
+                                           placeholder="segments">
+                                </div>
+                                <div class="form-group">
+                                    <label for="playlists_dir">Playlists Directory</label>
+                                    <input type="text" id="playlists_dir" name="PLAYLISTS_DIR" class="form-control" 
+                                           placeholder="playlists">
+                                </div>
+                                <div class="form-group">
+                                    <label for="cache_dir">Cache Directory</label>
+                                    <input type="text" id="cache_dir" name="CACHE_DIR" class="form-control" 
+                                           placeholder="cache">
+                                </div>
+                                <div class="form-group">
+                                    <label for="db_path">Database Path</label>
+                                    <input type="text" id="db_path" name="DB_PATH" class="form-control" 
+                                           placeholder="video_streaming.db">
+                                </div>
+                            </div>
+
+                            <!-- Advanced Cache Settings -->
+                            <div class="settings-group">
+                                <h4>⚡ Advanced Cache Settings</h4>
+                                <div class="form-group">
+                                    <label for="max_concurrent_preloads">Max Concurrent Preloads</label>
+                                    <input type="number" id="max_concurrent_preloads" name="MAX_CONCURRENT_PRELOADS" class="form-control" 
+                                           placeholder="5" min="1" max="20">
+                                </div>
+                                <div class="form-group">
+                                    <label for="enable_cache_warming">Enable Cache Warming</label>
+                                    <select id="enable_cache_warming" name="ENABLE_CACHE_WARMING" class="form-control">
+                                        <option value="false">Disabled</option>
+                                        <option value="true">Enabled</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="cache_warming_segments">Cache Warming Segments</label>
+                                    <input type="number" id="cache_warming_segments" name="CACHE_WARMING_SEGMENTS" class="form-control" 
+                                           placeholder="10" min="1" max="50">
+                                </div>
+                                <div class="form-group">
+                                    <label for="session_cleanup_interval">Session Cleanup Interval (seconds)</label>
+                                    <input type="number" id="session_cleanup_interval" name="SESSION_CLEANUP_INTERVAL" class="form-control" 
+                                           placeholder="300" min="60" max="3600">
+                                </div>
+                                <div class="form-group">
+                                    <label for="session_idle_timeout">Session Idle Timeout (seconds)</label>
+                                    <input type="number" id="session_idle_timeout" name="SESSION_IDLE_TIMEOUT" class="form-control" 
+                                           placeholder="600" min="300" max="7200">
+                                </div>
+                            </div>
+
+                            <!-- Performance Settings -->
+                            <div class="settings-group">
+                                <h4>🚀 Performance Settings</h4>
+                                <div class="form-group">
+                                    <label for="streaming_threshold_gb">Streaming Threshold (GB)</label>
+                                    <input type="number" id="streaming_threshold_gb" name="STREAMING_THRESHOLD_GB" class="form-control" 
+                                           placeholder="2" min="0.5" max="50" step="0.5">
+                                    <small class="form-text text-muted">
+                                        Files larger than this size will use streaming processing.
+                                    </small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="log_file">Log File Path</label>
+                                    <input type="text" id="log_file" name="LOG_FILE" class="form-control" 
+                                           placeholder="Leave empty for console only">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="settings-actions">
+                            <button type="button" class="btn btn-secondary" onclick="loadCurrentSettings()">Reset to Current</button>
+                            <button type="button" class="btn btn-secondary" onclick="exportSettings()">Export Config</button>
+                            <button type="submit" class="btn btn-primary">Save Settings</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Telegram Configuration Tab -->
+            <div id="telegram-tab" class="tab-content">
+                <div class="telegram-config-section">
+                    <h3>📡 Telegram Bot Configuration</h3>
+                    <p style="color: var(--text-light); margin-bottom: 2rem;">
+                        Manage your Telegram bot settings and multi-bot configuration. All bots are loaded from your .env file.
+                    </p>
+
+                    <!-- Configuration Mode Info -->
+                    <div class="config-info" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 2rem; color: var(--info);">
+                        <strong style="color: var(--primary);">📋 Configuration Mode:</strong> 
+                        This page shows all bot configurations from your .env file. 
+                        You can manage up to 10 bots (BOT_TOKEN/BOT_TOKEN_1 through BOT_TOKEN_10 with corresponding CHAT_ID/CHAT_ID_1 through CHAT_ID_10).
+                        <br><br>
+                        <strong style="color: var(--primary);">Note:</strong> BOT_TOKEN and CHAT_ID (without numbers) are treated as Bot 1.
+                    </div>
+
+                    <!-- Bot Configuration Grid -->
+                    <div id="telegram-bot-grid" class="bot-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 2rem; margin-bottom: 3rem;">
+                        <!-- Bot cards will be populated by JavaScript -->
+                    </div>
+
+                    <!-- Save Section -->
+                    <div class="telegram-save-section" style="background: rgba(255, 255, 255, 0.7); border-radius: var(--radius); padding: 2rem; border: 1px solid var(--border); text-align: center;">
+                        <h3 style="margin-bottom: 1rem; color: var(--text-dark);">💾 Save Configuration</h3>
+                        <p style="margin-bottom: 1.5rem; color: var(--text-light);">
+                            Save all changes to your .env file. The server will need to be restarted to apply changes.
+                        </p>
+                        <button id="telegram-save-btn" class="save-btn" onclick="saveTelegramConfiguration()" style="background: linear-gradient(135deg, var(--primary), var(--primary-light)); color: white; border: none; border-radius: var(--radius); padding: 1rem 2rem; font-size: 1.1rem; font-weight: 600; cursor: pointer; transition: all 0.3s ease; font-family: inherit; min-width: 200px;">
+                            <span id="telegram-save-btn-content">💾 Save All Changes</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Enhanced Logs Tab -->
+            <div id="logs-tab" class="tab-content">
+                <div class="log-section">
+                    <div class="log-header">
+                        <h3>📋 Processing Log</h3>
+                        <div class="log-controls">
+                            <div class="log-stats" id="log-stats">
+                                <span>Lines: <span id="log-lines">0</span></span>
+                                <span>✅ <span id="log-success">0</span></span>
+                                <span>❌ <span id="log-errors">0</span></span>
+                                <span>⚠️ <span id="log-warnings">0</span></span>
+                            </div>
+                            <button class="log-control-btn" onclick="clearLogs()">Clear</button>
+                            <button class="log-control-btn" onclick="downloadLogs()">Download</button>
+                            <button class="log-control-btn" onclick="toggleAutoScroll()">
+                                <span id="autoscroll-text">Auto-scroll: ON</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="log-output" class="log-output">Ready to process video files...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Enhanced JavaScript with dynamic updates, settings panel, and improved logging
+        let currentTab = 'dashboard';
+        let autoScroll = true;
+        let logLineCount = 0;
+        let successCount = 0;
+        let errorCount = 0;
+        let warningCount = 0;
+        let updateInterval = null;
+
+        // Playlist Management Functions
+        async function refreshPlaylists() {
+            const loadingEl = document.getElementById('playlists-loading');
+            const contentEl = document.getElementById('playlists-content');
+            const gridEl = document.getElementById('playlists-grid');
+            const noPlaylistsEl = document.getElementById('no-playlists');
+
+            // Show loading state
+            loadingEl.style.display = 'block';
+            contentEl.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/videos');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                const videos = data.videos || [];
+                
+                // Hide loading
+                loadingEl.style.display = 'none';
+                contentEl.style.display = 'block';
+
+                if (videos.length === 0) {
+                    noPlaylistsEl.style.display = 'block';
+                    gridEl.style.display = 'none';
+                } else {
+                    noPlaylistsEl.style.display = 'none';
+                    gridEl.style.display = 'grid';
+                    renderPlaylistCards(videos);
+                }
+            } catch (error) {
+                console.error('Failed to fetch playlists:', error);
+                loadingEl.style.display = 'none';
+                contentEl.style.display = 'block';
+                
+                // Show error in grid
+                gridEl.innerHTML = `
+                    <div class="playlist-card" style="grid-column: 1 / -1; text-align: center; color: var(--danger);">
+                        <h4>❌ Failed to Load Playlists</h4>
+                        <p>${error.message}</p>
+                        <button onclick="refreshPlaylists()" class="refresh-btn" style="margin-top: 1rem;">🔄 Try Again</button>
+                    </div>
+                `;
+                gridEl.style.display = 'grid';
+                noPlaylistsEl.style.display = 'none';
+            }
+        }
+
+        function renderPlaylistCards(videos) {
+            const gridEl = document.getElementById('playlists-grid');
+            
+            gridEl.innerHTML = videos.map(video => {
+                const duration = formatDuration(video.total_duration);
+                const fileSize = formatFileSize(video.file_size);
+                const createdAt = new Date(video.created_at).toLocaleDateString();
+                
+                return `
+                    <div class="playlist-card">
+                        <div class="playlist-title" title="${video.original_filename}">
+                            📺 ${video.original_filename}
+                        </div>
+                        <div class="playlist-info">
+                            <span>📊 ${video.total_segments} segments</span>
+                            <span>⏱️ ${duration}</span>
+                            <span>📁 ${fileSize}</span>
+                            <span>📅 ${createdAt}</span>
+                        </div>
+                        <div class="playlist-buttons">
+                            <button class="copy-btn" onclick="copyPlaylistUrl('${video.local_url}', this)">
+                                📱 Copy Local URL
+                            </button>
+                            <button class="copy-btn" onclick="copyPlaylistUrl('${video.public_url}', this)">
+                                🌐 Copy Public URL
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function copyPlaylistUrl(playlistUrl, buttonElement) {
+            const originalText = buttonElement.textContent;
+            
+            try {
+                console.log('Attempting to copy URL:', playlistUrl);
+                
+                // Try modern clipboard API first
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(playlistUrl);
+                } else {
+                    // Fallback for older browsers or non-HTTPS
+                    await fallbackCopyToClipboard(playlistUrl);
+                }
+                
+                // Show success feedback
+                buttonElement.textContent = '✅ Copied!';
+                buttonElement.classList.add('copied');
+                
+                // Reset button after 2 seconds
+                setTimeout(() => {
+                    buttonElement.textContent = originalText;
+                    buttonElement.classList.remove('copied');
+                }, 2000);
+                
+            } catch (error) {
+                console.error('Failed to copy URL:', error);
+                
+                // Try fallback method if primary failed
+                try {
+                    await fallbackCopyToClipboard(playlistUrl);
+                    
+                    // Show success feedback
+                    buttonElement.textContent = '✅ Copied!';
+                    buttonElement.classList.add('copied');
+                    
+                    setTimeout(() => {
+                        buttonElement.textContent = originalText;
+                        buttonElement.classList.remove('copied');
+                    }, 2000);
+                    
+                } catch (fallbackError) {
+                    console.error('Fallback copy also failed:', fallbackError);
+                    
+                    // Show error feedback
+                    buttonElement.textContent = '❌ Failed';
+                    buttonElement.style.background = 'var(--danger)';
+                    buttonElement.style.color = 'white';
+                    
+                    // Reset button after 3 seconds
+                    setTimeout(() => {
+                        buttonElement.textContent = originalText;
+                        buttonElement.style.background = '';
+                        buttonElement.style.color = '';
+                    }, 3000);
+                    
+                    // Also show the URL in an alert as final fallback
+                    alert(`Copy failed. Please copy manually:\n\n${playlistUrl}`);
+                }
+            }
+        }
+
+        function fallbackCopyToClipboard(text) {
+            return new Promise((resolve, reject) => {
+                // Create temporary textarea
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '-999999px';
+                document.body.appendChild(textArea);
+                
+                try {
+                    textArea.focus();
+                    textArea.select();
+                    
+                    // Try to copy using execCommand
+                    const successful = document.execCommand('copy');
+                    document.body.removeChild(textArea);
+                    
+                    if (successful) {
+                        resolve();
+                    } else {
+                        reject(new Error('execCommand copy failed'));
+                    }
+                } catch (err) {
+                    document.body.removeChild(textArea);
+                    reject(err);
+                }
+            });
+        }
+
+        function formatDuration(seconds) {
+            if (seconds < 60) return `${Math.round(seconds)}s`;
+            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            return `${hours}h ${minutes}m`;
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeTheme();
+            initializeEventListeners();
+            startLiveUpdates();
+            loadCurrentSettings();
+        });
+
+        function initializeTheme() {
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            document.body.setAttribute('data-theme', savedTheme);
+            document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+        }
+
+        function initializeEventListeners() {
+            // Tab switching
+            document.querySelectorAll('.nav-button').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    switchTab(this.dataset.tab);
+                });
+            });
+
+            // Upload mode switching
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    switchUploadMode(this.dataset.mode);
+                });
+            });
+
+            // File input handling
+            const fileInput = document.getElementById('video_file');
+            const fileLabel = document.getElementById('file-label');
+            const fileInfo = document.getElementById('file-info');
+
+            if (fileInput) fileInput.addEventListener('change', handleFileSelect);
+
+            // Folder input handling
+            const folderInput = document.getElementById('folder_input');
+            if (folderInput) folderInput.addEventListener('change', handleFolderSelect);
+
+            // Drag and drop
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                document.addEventListener(eventName, preventDefaults, false);
+            });
+
+            document.addEventListener('dragenter', handleDragEnter);
+            document.addEventListener('dragleave', handleDragLeave);
+            document.addEventListener('drop', handleDrop);
+
+            // Form submissions
+            document.getElementById('single-upload-form').addEventListener('submit', handleSingleUpload);
+            document.getElementById('batch-upload-form').addEventListener('submit', handleBatchUpload);
+            document.getElementById('settings-form').addEventListener('submit', handleSettingsSave);
+
+            // Multi-bot configuration
+            document.getElementById('bot-config-mode').addEventListener('change', handleBotConfigModeChange);
+            document.getElementById('add-bot').addEventListener('click', addBotConfiguration);
+
+            // Initialize multi-bot interface
+            initializeMultiBotInterface();
+        }
+
+        function toggleTheme() {
+            const body = document.body;
+            const themeIcon = document.getElementById('theme-icon');
+            const currentTheme = body.getAttribute('data-theme');
+            if (currentTheme === 'dark') {
+                body.setAttribute('data-theme', 'light');
+                themeIcon.textContent = '🌙';
+                localStorage.setItem('theme', 'light');
+            } else {
+                body.setAttribute('data-theme', 'dark');
+                themeIcon.textContent = '☀️';
+                localStorage.setItem('theme', 'dark');
+            }
+        }
+
+        function switchTab(tabName) {
+            // Update nav buttons
+            document.querySelectorAll('.nav-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+
+            currentTab = tabName;
+            
+            // Load telegram configuration if switching to telegram tab
+            if (tabName === 'telegram') {
+                loadTelegramConfigurations();
+            }
+            
+            // Load playlists if switching to playlists tab
+            if (tabName === 'playlists') {
+                refreshPlaylists();
+            }
+        }
+
+        // Live updates for system stats
+        function startLiveUpdates() {
+            updateInterval = setInterval(async () => {
+                try {
+                    await updateSystemStats();
+                    await updateCacheStats();
+                    await updateDatabaseStats();
+                } catch (error) {
+                    console.warn('Failed to update stats:', error);
+                }
+            }, 5000); // Update every 5 seconds
+        }
+
+        async function updateSystemStats() {
+            try {
+                const response = await fetch('/api/system-stats');
+                const stats = await response.json();
+                
+                if (stats.cpu_percent !== undefined) {
+                    updateProgressBar('cpu-bar', stats.cpu_percent);
+                    updateElement('cpu-usage', `${stats.cpu_percent.toFixed(1)}%`);
+                }
+                
+                if (stats.memory_percent !== undefined) {
+                    updateProgressBar('memory-bar', stats.memory_percent);
+                    updateElement('memory-usage', 
+                        `${(stats.memory_used / (1024**3)).toFixed(1)}GB / ${(stats.memory_total / (1024**3)).toFixed(1)}GB`);
+                }
+                
+                if (stats.disk_percent !== undefined) {
+                    updateProgressBar('disk-bar', stats.disk_percent);
+                    updateElement('disk-usage', 
+                        `${(stats.disk_used / (1024**3)).toFixed(1)}GB / ${(stats.disk_total / (1024**3)).toFixed(1)}GB`);
+                }
+
+                // Update indicator
+                const indicator = document.getElementById('system-indicator');
+                if (indicator) {
+                    indicator.classList.remove('updating');
+                    setTimeout(() => indicator.classList.add('updating'), 100);
+                }
+            } catch (error) {
+                // Stats endpoint might not exist yet, ignore silently
+            }
+        }
+
+        async function updateCacheStats() {
+            try {
+                const response = await fetch('/cache/stats');
+                const stats = await response.json();
+                
+                updateElement('cached-items', stats.total_items || 0);
+                updateElement('cache-usage', `${(stats.cache_utilization || 0).toFixed(1)}%`);
+                updateProgressBar('cache-bar', stats.cache_utilization || 0);
+
+                // Update indicator
+                const indicator = document.getElementById('cache-indicator');
+                if (indicator) {
+                    indicator.classList.remove('updating');
+                    setTimeout(() => indicator.classList.add('updating'), 100);
+                }
+            } catch (error) {
+                // Ignore cache stat errors
+            }
+        }
+
+        async function updateDatabaseStats() {
+            try {
+                const response = await fetch('/api/database-stats');
+                const stats = await response.json();
+                
+                updateElement('total-videos', stats.total_videos || 0);
+                updateElement('total-segments', stats.total_segments || 0);
+                updateElement('total-subtitles', `${stats.total_subtitles || 0} tracks`);
+                updateElement('storage-used', `${(stats.total_size_mb || 0).toFixed(1)} MB`);
+                updateElement('total-duration', `${(stats.total_duration_hours || 0).toFixed(1)} hours`);
+            } catch (error) {
+                // Database stats endpoint might not exist
+            }
+        }
+
+        function updateElement(id, value) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.textContent = value;
+            }
+        }
+
+        function updateProgressBar(id, value) {
+            const bar = document.getElementById(id);
+            if (bar) {
+                bar.style.width = `${value}%`;
+                
+                // Update color based on value
+                bar.className = 'progress-fill';
+                if (value > 90) bar.classList.add('danger');
+                else if (value > 75) bar.classList.add('warning');
+            }
+        }
+
+        // File handling
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                displayFileInfo(file);
+            }
+        }
+
+        function displayFileInfo(file) {
+            const fileInfo = document.getElementById('file-info');
+            const fileSize = (file.size / (1024 * 1024 * 1024)).toFixed(2);
+            
+            fileInfo.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <div style="font-size: 2rem;">🎬</div>
+                    <div>
+                        <div style="font-weight: 600; margin-bottom: 0.25rem;">${file.name}</div>
+                        <div style="font-size: 0.9rem; color: var(--text-light);">
+                            Size: ${fileSize} GB | Type: ${file.type || 'Unknown'}
+                        </div>
+                    </div>
+                </div>
+            `;
+            fileInfo.classList.add('visible');
+
+            // Update label
+            const label = document.getElementById('file-label');
+            label.style.borderColor = 'var(--secondary)';
+            label.style.backgroundColor = 'rgba(16, 185, 129, 0.1)';
+        }
+
+        let dragCounter = 0;
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        function handleDragEnter(e) {
+            dragCounter++;
+            const label = document.getElementById('file-label');
+            label.style.borderColor = 'var(--primary)';
+            label.style.backgroundColor = 'rgba(99, 102, 241, 0.1)';
+            label.innerHTML = `
+                <div class="icon">📁</div>
+                <div class="text">Drop video file here</div>
+                <div class="subtext">Release to upload</div>
+            `;
+        }
+
+        function handleDragLeave(e) {
+            dragCounter--;
+            if (dragCounter === 0) {
+                const label = document.getElementById('file-label');
+                const fileInput = document.getElementById('video_file');
+                
+                if (fileInput.files.length === 0) {
+                    label.style.borderColor = 'var(--border)';
+                    label.style.backgroundColor = '';
+                    label.innerHTML = `
+                        <div class="icon">📁</div>
+                        <div class="text">Choose a video file</div>
+                        <div class="subtext">or drag & drop here</div>
+                    `;
+                }
+            }
+        }
+
+        function handleDrop(e) {
+            dragCounter = 0;
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                const fileInput = document.getElementById('video_file');
+                fileInput.files = files;
+                displayFileInfo(files[0]);
+            }
+        }
+
+        // Upload mode switching
+        function switchUploadMode(mode) {
+            // Update mode buttons
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.querySelector(`[data-mode="${mode}"]`).classList.add('active');
+
+            // Update upload sections
+            document.querySelectorAll('.upload-mode').forEach(section => {
+                section.classList.remove('active');
+            });
+            document.getElementById(`${mode}-upload`).classList.add('active');
+
+            // Reset forms
+            document.getElementById('single-upload-form').reset();
+            document.getElementById('batch-upload-form').reset();
+            resetUploadUI();
+        }
+
+        // Folder selection handling
+        function handleFolderSelect(event) {
+            const files = event.target.files;
+            if (files.length > 0) {
+                displayFolderInfo(files);
+            }
+        }
+
+        function displayFolderInfo(files) {
+            const folderInfo = document.getElementById('folder-info');
+            const videoFiles = Array.from(files).filter(file => {
+                const ext = file.name.toLowerCase().split('.').pop();
+                return ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', '3gp', 'mpg', 'mpeg', 'ts', 'mts', 'm2ts'].includes(ext);
+            });
+
+            const totalSize = videoFiles.reduce((sum, file) => sum + file.size, 0);
+            const totalSizeGB = (totalSize / (1024 * 1024 * 1024)).toFixed(2);
+
+            folderInfo.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <div style="font-size: 2rem;">📂</div>
+                    <div>
+                        <div style="font-weight: 600; margin-bottom: 0.25rem;">
+                            Found ${videoFiles.length} video files
+                        </div>
+                        <div style="font-size: 0.9rem; color: var(--text-light);">
+                            Total size: ${totalSizeGB} GB
+                        </div>
+                        <div style="font-size: 0.8rem; color: var(--text-lighter); margin-top: 0.25rem;">
+                            ${videoFiles.slice(0, 3).map(f => f.name).join(', ')}
+                            ${videoFiles.length > 3 ? ` and ${videoFiles.length - 3} more...` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+            folderInfo.classList.add('visible');
+
+            // Update folder label
+            const label = document.getElementById('folder-label');
+            label.style.borderColor = 'var(--secondary)';
+            label.style.backgroundColor = 'rgba(16, 185, 129, 0.1)';
+        }
+
+        // Single file upload handling
+        async function handleSingleUpload(event) {
+            event.preventDefault();
+            
+            const fileInput = document.getElementById('video_file');
+            if (fileInput.files.length === 0) {
+                alert('Please select a video file first.');
+                return;
+            }
+
+            // Switch to logs tab
+            switchTab('logs');
+
+            // Reset log counters
+            logLineCount = 0;
+            successCount = 0;
+            errorCount = 0;
+            warningCount = 0;
+            updateLogStats();
+
+            const submitBtn = document.getElementById('single-submit-btn');
+            const btnContent = document.getElementById('single-btn-content');
+            const logOutput = document.getElementById('log-output');
+
+            submitBtn.disabled = true;
+            btnContent.innerHTML = '<span class="loading-spinner"></span>Uploading...';
+            logOutput.innerHTML = '';
+
+            const formData = new FormData();
+            formData.append('video_file', fileInput.files[0]);
+
+            try {
+                const response = await fetch('/process', { method: 'POST', body: formData });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || `Server returned status ${response.status}`);
+                }
+
+                const result = await response.json();
+                if (!result.success || !result.task_id) {
+                    throw new Error(result.error || 'Failed to start processing task.');
+                }
+
+                appendLog('File upload complete. Starting process...', 'SUCCESS');
+                btnContent.innerHTML = '<span class="loading-spinner"></span>Processing...';
+
+                // Setup EventSource for status updates
+                const evtSource = new EventSource(`/status/${result.task_id}`);
+                evtSource.onmessage = (event) => {
+                    if (event.data.includes("---CLOSE---")) {
+                        evtSource.close();
+                        resetUploadUI();
+                        return;
+                    }
+                    if (event.data.includes("---STREAM_END---")) {
+                        appendLog('Process finished!', 'SUCCESS');
+                        btnContent.innerHTML = '✅ Complete';
+                        return;
+                    }
+
+                    const match = event.data.match(/^\[(INFO|SUCCESS|ERROR|RESULT|WARNING)\] (.*)$/s);
+                    if (match) {
+                        appendLog(match[2], match[1]);
+                    } else {
+                        appendLog(event.data);
+                    }
+                };
+                evtSource.onerror = () => {
+                    appendLog('Connection to server lost.', 'ERROR');
+                    evtSource.close();
+                    resetUploadUI();
+                };
+
+            } catch (error) {
+                appendLog(`An error occurred: ${error.message}`, 'ERROR');
+                resetUploadUI();
+            }
+        }
+
+        // Batch upload handling
+        async function handleBatchUpload(event) {
+            event.preventDefault();
+            
+            const folderInput = document.getElementById('folder_input');
+            if (folderInput.files.length === 0) {
+                alert('Please select a folder first.');
+                return;
+            }
+
+            const recursive = document.getElementById('recursive-scan').checked;
+            const dryRun = document.getElementById('dry-run').checked;
+
+            // Switch to logs tab and show batch progress
+            switchTab('logs');
+            document.getElementById('batch-progress').classList.remove('hidden');
+
+            // Reset counters
+            logLineCount = 0;
+            successCount = 0;
+            errorCount = 0;
+            warningCount = 0;
+            updateLogStats();
+
+            const submitBtn = document.getElementById('batch-submit-btn');
+            const btnContent = document.getElementById('batch-btn-content');
+            const logOutput = document.getElementById('log-output');
+
+            submitBtn.disabled = true;
+            btnContent.innerHTML = '<span class="loading-spinner"></span>Processing Folder...';
+            logOutput.innerHTML = '';
+
+            // Prepare form data with folder files
+            const formData = new FormData();
+            Array.from(folderInput.files).forEach(file => {
+                formData.append('folder_files', file, file.webkitRelativePath);
+            });
+            formData.append('recursive', recursive);
+            formData.append('dry_run', dryRun);
+
+            try {
+                const response = await fetch('/batch-process', { method: 'POST', body: formData });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || `Server returned status ${response.status}`);
+                }
+
+                const result = await response.json();
+                if (!result.success || !result.task_id) {
+                    throw new Error(result.error || 'Failed to start batch processing.');
+                }
+
+                appendLog(`Starting batch processing of ${result.file_count} videos...`, 'SUCCESS');
+                
+                // Update batch progress
+                document.getElementById('batch-total').textContent = result.file_count;
+                updateBatchProgress(0, result.file_count, 0, 0);
+
+                // Setup EventSource for batch status updates
+                const evtSource = new EventSource(`/batch-status/${result.task_id}`);
+                evtSource.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        if (data.type === 'progress') {
+                            updateBatchProgress(data.processed, data.total, data.success, data.failed);
+                            if (data.current_file) {
+                                document.getElementById('current-file').textContent = `Processing: ${data.current_file}`;
+                            }
+                        } else if (data.type === 'log') {
+                            appendLog(data.message, data.level || 'INFO');
+                        } else if (data.type === 'complete') {
+                            appendLog('Batch processing completed!', 'SUCCESS');
+                            btnContent.innerHTML = '✅ Complete';
+                            document.getElementById('current-file').textContent = 'Batch processing completed!';
+                            evtSource.close();
+                            resetUploadUI();
+                        }
+                    } catch (e) {
+                        appendLog(event.data);
+                    }
+                };
+                evtSource.onerror = () => {
+                    appendLog('Connection to server lost.', 'ERROR');
+                    evtSource.close();
+                    resetUploadUI();
+                };
+
+            } catch (error) {
+                appendLog(`Batch processing error: ${error.message}`, 'ERROR');
+                resetUploadUI();
+            }
+        }
+
+        function updateBatchProgress(processed, total, success, failed) {
+            document.getElementById('batch-processed').textContent = processed;
+            document.getElementById('batch-total').textContent = total;
+            document.getElementById('batch-success').textContent = success;
+            document.getElementById('batch-failed').textContent = failed;
+            
+            const percentage = total > 0 ? (processed / total) * 100 : 0;
+            document.getElementById('batch-progress-bar').style.width = `${percentage}%`;
+        }
+
+        // Multi-bot configuration
+        let botCount = 1;
+
+        function initializeMultiBotInterface() {
+            // Add initial bot configuration
+            addBotConfiguration();
+        }
+
+        function handleBotConfigModeChange(event) {
+            const mode = event.target.value;
+            const singleConfig = document.getElementById('single-bot-config');
+            const multiConfig = document.getElementById('multi-bot-config');
+
+            if (mode === 'multi') {
+                singleConfig.style.display = 'none';
+                multiConfig.style.display = 'block';
+            } else {
+                singleConfig.style.display = 'block';
+                multiConfig.style.display = 'none';
+            }
+        }
+
+        function addBotConfiguration() {
+            if (botCount >= 10) {
+                alert('Maximum 10 bots supported');
+                return;
+            }
+
+            botCount++;
+            const botList = document.getElementById('bot-list');
+            
+            const botItem = document.createElement('div');
+            botItem.className = 'bot-item';
+            botItem.innerHTML = `
+                <div class="bot-item-header">
+                    <span class="bot-number">🤖 Bot ${botCount}</span>
+                    <button type="button" class="bot-remove" onclick="removeBotConfiguration(this)">×</button>
+                </div>
+                <div class="bot-fields">
+                    <div class="form-group">
+                        <label>Bot Token</label>
+                        <input type="password" name="BOT_TOKEN_${botCount}" class="form-control" 
+                               placeholder="Bot token from @BotFather">
+                    </div>
+                    <div class="form-group">
+                        <label>Chat ID</label>
+                        <input type="text" name="CHAT_ID_${botCount}" class="form-control" 
+                               placeholder="@channel or numeric ID">
+                    </div>
+                </div>
+            `;
+            
+            botList.appendChild(botItem);
+            updateBotCount();
+        }
+
+        function removeBotConfiguration(button) {
+            if (botCount <= 1) {
+                alert('At least one bot configuration is required');
+                return;
+            }
+
+            button.closest('.bot-item').remove();
+            botCount--;
+            updateBotCount();
+            
+            // Renumber remaining bots
+            document.querySelectorAll('.bot-number').forEach((span, index) => {
+                span.textContent = `🤖 Bot ${index + 1}`;
+            });
+        }
+
+        function updateBotCount() {
+            document.getElementById('bot-count').textContent = botCount;
+        }
+
+        // Upload handling
+        async function handleUpload(event) {
+            event.preventDefault();
+            
+            const fileInput = document.getElementById('video_file');
+            if (fileInput.files.length === 0) {
+                alert('Please select a video file first.');
+                return;
+            }
+
+            // Switch to logs tab
+            switchTab('logs');
+
+            // Reset log counters
+            logLineCount = 0;
+            successCount = 0;
+            errorCount = 0;
+            warningCount = 0;
+            updateLogStats();
+
+            const submitBtn = document.getElementById('submit-btn');
+            const btnContent = document.getElementById('btn-content');
+            const logOutput = document.getElementById('log-output');
+
+            submitBtn.disabled = true;
+            btnContent.innerHTML = '<span class="loading-spinner"></span>Uploading...';
+            logOutput.innerHTML = '';
+
+            const formData = new FormData();
+            formData.append('video_file', fileInput.files[0]);
+
+            try {
+                const response = await fetch('/process', { method: 'POST', body: formData });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || `Server returned status ${response.status}`);
+                }
+
+                const result = await response.json();
+                if (!result.success || !result.task_id) {
+                    throw new Error(result.error || 'Failed to start processing task.');
+                }
+
+                appendLog('File upload complete. Starting process...', 'SUCCESS');
+                btnContent.innerHTML = '<span class="loading-spinner"></span>Processing...';
+
+                // Setup EventSource for status updates
+                const evtSource = new EventSource(`/status/${result.task_id}`);
+                evtSource.onmessage = (event) => {
+                    if (event.data.includes("---CLOSE---")) {
+                        evtSource.close();
+                        resetUploadUI();
+                        return;
+                    }
+                    if (event.data.includes("---STREAM_END---")) {
+                        appendLog('Process finished!', 'SUCCESS');
+                        btnContent.innerHTML = '✅ Complete';
+                        return;
+                    }
+
+                    const match = event.data.match(/^\[(INFO|SUCCESS|ERROR|RESULT|WARNING)\] (.*)$/s);
+                    if (match) {
+                        appendLog(match[2], match[1]);
+                    } else {
+                        appendLog(event.data);
+                    }
+                };
+                evtSource.onerror = () => {
+                    appendLog('Connection to server lost.', 'ERROR');
+                    evtSource.close();
+                    resetUploadUI();
+                };
+
+            } catch (error) {
+                appendLog(`An error occurred: ${error.message}`, 'ERROR');
+                resetUploadUI();
+            }
+        }
+
+        function appendLog(message, level = 'INFO') {
+            logLineCount++;
+            if (level === 'SUCCESS') successCount++;
+            if (level === 'ERROR') errorCount++;
+            if (level === 'WARNING') warningCount++;
+
+            updateLogStats();
+
+            const logOutput = document.getElementById('log-output');
+            const span = document.createElement('span');
+            span.className = `log-${level}`;
+
+            // Add timestamp
+            const timestamp = new Date().toLocaleTimeString();
+            const timestampSpan = document.createElement('span');
+            timestampSpan.style.color = 'var(--text-lighter)';
+            timestampSpan.style.fontSize = '0.8rem';
+            timestampSpan.textContent = `[${timestamp}] `;
+
+            // Sanitize and linkify the message
+            const safeMessage = message.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            const linkedMessage = safeMessage.replace(
+                /&lt;a href='(.*?)' target='_blank'&gt;(.*?)&lt;\/a&gt;/g,
+                '<a href="$1" target="_blank">$2</a>'
+            );
+
+            const messageSpan = document.createElement('span');
+            messageSpan.innerHTML = linkedMessage;
+
+            span.appendChild(timestampSpan);
+            span.appendChild(messageSpan);
+            logOutput.appendChild(span);
+            logOutput.appendChild(document.createTextNode('\n'));
+            
+            if (autoScroll) {
+                logOutput.scrollTop = logOutput.scrollHeight;
+            }
+        }
+
+        function updateLogStats() {
+            document.getElementById('log-lines').textContent = logLineCount;
+            document.getElementById('log-success').textContent = successCount;
+            document.getElementById('log-errors').textContent = errorCount;
+            document.getElementById('log-warnings').textContent = warningCount;
+        }
+
+        function resetUploadUI() {
+            const submitBtn = document.getElementById('submit-btn');
+            const btnContent = document.getElementById('btn-content');
+            const fileInput = document.getElementById('video_file');
+            const fileInfo = document.getElementById('file-info');
+            const label = document.getElementById('file-label');
+
+            submitBtn.disabled = false;
+            btnContent.innerHTML = '🚀 Upload and Process';
+            fileInput.value = '';
+            fileInfo.classList.remove('visible');
+            
+            label.style.borderColor = 'var(--border)';
+            label.style.backgroundColor = '';
+            label.innerHTML = `
+                <div class="icon">📁</div>
+                <div class="text">Choose a video file</div>
+                <div class="subtext">or drag & drop here</div>
+            `;
+        }
+
+        // Settings handling
+        async function loadCurrentSettings() {
+            try {
+                const response = await fetch('/api/settings');
+                const settings = await response.json();
+                
+                Object.keys(settings).forEach(key => {
+                    const element = document.querySelector(`[name="${key}"]`);
+                    if (element) {
+                        if (element.type === 'checkbox') {
+                            element.checked = settings[key] === 'true';
+                        } else {
+                            element.value = settings[key] || '';
+                        }
+                    }
+                });
+            } catch (error) {
+                console.warn('Could not load current settings:', error);
+            }
+        }
+
+        async function handleSettingsSave(event) {
+            event.preventDefault();
+            
+            const formData = new FormData(event.target);
+            const settings = {};
+            
+            for (let [key, value] of formData.entries()) {
+                settings[key] = value;
+            }
+
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(settings)
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ Settings saved successfully! Please restart the server for changes to take effect.');
+                } else {
+                    alert('❌ Failed to save settings: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('❌ Error saving settings: ' + error.message);
+            }
+        }
+
+        function exportSettings() {
+            const form = document.getElementById('settings-form');
+            const formData = new FormData(form);
+            const settings = {};
+            
+            for (let [key, value] of formData.entries()) {
+                if (value) {
+                    settings[key] = value;
+                }
+            }
+
+            const envContent = Object.entries(settings)
+                .map(([key, value]) => `${key}=${value}`)
+                .join('\n');
+
+            const blob = new Blob([envContent], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '.env';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Log controls
+        function clearLogs() {
+            document.getElementById('log-output').innerHTML = 'Logs cleared...';
+            logLineCount = 0;
+            successCount = 0;
+            errorCount = 0;
+            warningCount = 0;
+            updateLogStats();
+        }
+
+        function downloadLogs() {
+            const logContent = document.getElementById('log-output').textContent;
+            const blob = new Blob([logContent], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `streaming-logs-${new Date().toISOString().slice(0, 19)}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            document.getElementById('autoscroll-text').textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+        }
+
+        // Quick actions
+        async function clearCache() {
+            if (confirm('Are you sure you want to clear all cached segments? This will slow down video playback until segments are re-cached.')) {
+                try {
+                    const response = await fetch('/cache/clear', { method: 'POST' });
+                    const result = await response.json();
+                    if (result.success) {
+                        alert('✅ Cache cleared successfully!');
+                        await updateCacheStats();
+                    } else {
+                        alert('❌ Failed to clear cache');
+                    }
+                } catch (error) {
+                    alert('❌ Error clearing cache: ' + error.message);
+                }
+            }
+        }
+
+        async function refreshStats() {
+            try {
+                await updateSystemStats();
+                await updateCacheStats();
+                await updateDatabaseStats();
+                alert('✅ Statistics refreshed successfully!');
+            } catch (error) {
+                alert('❌ Error refreshing stats: ' + error.message);
+            }
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (updateInterval) {
+                clearInterval(updateInterval);
+            }
+        });
+        
+        // ============== Telegram Configuration Functions ==============
+        
+        let telegramBotConfigs = {};
+        let isTelegramDirty = false;
+        
+        // Load bot configurations from server
+        async function loadTelegramConfigurations() {
+            try {
+                const response = await fetch('/api/telegram-config');
+                const data = await response.json();
+                
+                if (data.success) {
+                    telegramBotConfigs = data.bots;
+                    console.log('Loaded telegram bot configs:', telegramBotConfigs);
+                    renderTelegramBotCards();
+                } else {
+                    showAlert('Failed to load bot configurations: ' + data.error, 'error');
+                }
+            } catch (error) {
+                console.error('Error loading telegram configurations:', error);
+                showAlert('Error loading configurations: ' + error.message, 'error');
+            }
+        }
+        
+        // Render bot configuration cards
+        function renderTelegramBotCards() {
+            const grid = document.getElementById('telegram-bot-grid');
+            grid.innerHTML = '';
+            
+            console.log('Rendering telegram bot cards for configs:', telegramBotConfigs);
+            
+            for (let i = 1; i <= 10; i++) {
+                const bot = telegramBotConfigs[i] || { id: i, token: '', chat_id: '', status: 'empty' };
+                console.log(`Creating card for bot ${i}:`, bot);
+                const card = createTelegramBotCard(bot);
+                grid.appendChild(card);
+            }
+        }
+        
+        // Create individual bot card
+        function createTelegramBotCard(bot) {
+            const card = document.createElement('div');
+            card.className = `bot-card ${bot.status}`;
+            
+            const statusLabel = bot.status === 'configured' ? 'Configured' : 
+                              bot.status === 'incomplete' ? 'Incomplete' : 'Empty';
+            
+            const statusIcon = bot.status === 'configured' ? '✅' : 
+                              bot.status === 'incomplete' ? '⚠️' : '⭕';
+            
+            card.innerHTML = `
+                <div class="bot-header">
+                    <div class="bot-title">
+                        🤖 Bot ${bot.id}
+                    </div>
+                    <div class="bot-status ${bot.status}">
+                        ${statusIcon} ${statusLabel}
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">🔑 Bot Token</label>
+                    <input type="text" 
+                           class="form-control token" 
+                           placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
+                           value="${bot.token || ''}"
+                           onchange="updateTelegramBot(${bot.id}, 'token', this.value)">
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">💬 Chat ID</label>
+                    <input type="text" 
+                           class="form-control" 
+                           placeholder="@channel or -1001234567890"
+                           value="${bot.chat_id || ''}"
+                           onchange="updateTelegramBot(${bot.id}, 'chat_id', this.value)">
+                </div>
+                
+                <div class="bot-actions">
+                    <button class="btn-test" onclick="testTelegramBot(${bot.id})" ${!bot.token || !bot.chat_id ? 'disabled' : ''}>
+                        🧪 Test Bot
+                    </button>
+                    <button class="btn-clear" onclick="clearTelegramBot(${bot.id})">
+                        🗑️ Clear
+                    </button>
+                </div>
+            `;
+            
+            return card;
+        }
+        
+        // Update bot configuration
+        function updateTelegramBot(botId, field, value) {
+            if (!telegramBotConfigs[botId]) {
+                telegramBotConfigs[botId] = { id: botId, token: '', chat_id: '', status: 'empty' };
+            }
+            
+            telegramBotConfigs[botId][field] = value.trim();
+            
+            // Update status
+            const hasToken = telegramBotConfigs[botId].token && telegramBotConfigs[botId].token.length > 0;
+            const hasChatId = telegramBotConfigs[botId].chat_id && telegramBotConfigs[botId].chat_id.length > 0;
+            
+            if (hasToken && hasChatId) {
+                telegramBotConfigs[botId].status = 'configured';
+            } else if (hasToken || hasChatId) {
+                telegramBotConfigs[botId].status = 'incomplete';
+            } else {
+                telegramBotConfigs[botId].status = 'empty';
+            }
+            
+            isTelegramDirty = true;
+            updateTelegramSaveButton();
+            renderTelegramBotCards();
+        }
+        
+        // Test bot configuration
+        async function testTelegramBot(botId) {
+            const bot = telegramBotConfigs[botId];
+            if (!bot || !bot.token || !bot.chat_id) return;
+            
+            const button = event.target;
+            const originalContent = button.innerHTML;
+            button.innerHTML = '<span class="loading-spinner"></span>Testing...';
+            button.disabled = true;
+            
+            try {
+                const response = await fetch('/api/telegram-test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        bot_id: botId,
+                        token: bot.token,
+                        chat_id: bot.chat_id
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showAlert(`✅ Bot ${botId} test successful! ${result.message}`, 'success');
+                } else {
+                    showAlert(`❌ Bot ${botId} test failed: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showAlert(`❌ Bot ${botId} test error: ${error.message}`, 'error');
+            } finally {
+                button.innerHTML = originalContent;
+                button.disabled = false;
+            }
+        }
+        
+        // Clear bot configuration
+        function clearTelegramBot(botId) {
+            if (confirm(`Are you sure you want to clear Bot ${botId} configuration?`)) {
+                telegramBotConfigs[botId] = { id: botId, token: '', chat_id: '', status: 'empty' };
+                isTelegramDirty = true;
+                updateTelegramSaveButton();
+                renderTelegramBotCards();
+            }
+        }
+        
+        // Save all configurations
+        async function saveTelegramConfiguration() {
+            const saveBtn = document.getElementById('telegram-save-btn');
+            const originalContent = saveBtn.innerHTML;
+            
+            saveBtn.innerHTML = '<span class="loading-spinner"></span>Saving...';
+            saveBtn.disabled = true;
+            
+            try {
+                // Prepare settings data
+                const settings = {};
+                
+                for (let i = 1; i <= 10; i++) {
+                    const bot = telegramBotConfigs[i];
+                    if (bot && (bot.token || bot.chat_id)) {
+                        // Handle bot 1 specially - it can use BOT_TOKEN/CHAT_ID or BOT_TOKEN_1/CHAT_ID_1
+                        if (i === 1) {
+                            // Use BOT_TOKEN_1/CHAT_ID_1 format for consistency
+                            if (bot.token) settings[`BOT_TOKEN_1`] = bot.token;
+                            if (bot.chat_id) settings[`CHAT_ID_1`] = bot.chat_id;
+                        } else {
+                            if (bot.token) settings[`BOT_TOKEN_${i}`] = bot.token;
+                            if (bot.chat_id) settings[`CHAT_ID_${i}`] = bot.chat_id;
+                        }
+                    }
+                }
+                
+                const response = await fetch('/api/telegram-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showAlert('✅ Configuration saved successfully! Please restart the server to apply changes.', 'success');
+                    isTelegramDirty = false;
+                    updateTelegramSaveButton();
+                } else {
+                    showAlert('❌ Failed to save configuration: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showAlert('❌ Error saving configuration: ' + error.message, 'error');
+            } finally {
+                saveBtn.innerHTML = originalContent;
+                saveBtn.disabled = false;
+            }
+        }
+        
+        // Update save button state
+        function updateTelegramSaveButton() {
+            const saveBtn = document.getElementById('telegram-save-btn');
+            const saveContent = document.getElementById('telegram-save-btn-content');
+            
+            if (isTelegramDirty) {
+                saveContent.textContent = '💾 Save Changes*';
+                saveBtn.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+            } else {
+                saveContent.textContent = '💾 Save All Changes';
+                saveBtn.style.background = 'linear-gradient(135deg, var(--primary), var(--primary-light))';
+            }
+        }
+        
+        // Warn about unsaved telegram changes
+        window.addEventListener('beforeunload', (e) => {
+            if (isTelegramDirty) {
+                e.preventDefault();
+                e.returnValue = 'You have unsaved Telegram configuration changes. Are you sure you want to leave?';
+            }
+        });
+    </script>
+</body>
+</html>
