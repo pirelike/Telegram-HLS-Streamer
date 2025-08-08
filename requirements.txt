@@ -1,9 +1,0 @@
-python-telegram-bot
-aiohttp
-aiofiles
-aiosqlite
-aiohttp-jinja2
-python-dotenv
-httpx
-Jinja2
-psutil
