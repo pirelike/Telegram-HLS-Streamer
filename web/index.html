@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram HLS Streamer 📺</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📺</text></svg>">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="nav">
+        <div class="nav-container">
+            <div class="nav-brand">
+                <span class="nav-emoji">📺</span>
+                <span class="nav-title">Telegram HLS Streamer</span>
+            </div>
+            <div class="nav-status">
+                <div class="status-indicator" id="serverStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Checking...</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main">
+        <!-- Tab Navigation -->
+        <div class="tabs">
+            <button class="tab-button active" data-tab="upload">📤 Upload</button>
+            <button class="tab-button" data-tab="library">📚 Library</button>
+            <button class="tab-button" data-tab="streaming">📺 Streaming</button>
+            <button class="tab-button" data-tab="system">⚙️ System</button>
+        </div>
+
+        <!-- Upload Tab -->
+        <div class="tab-content active" id="upload">
+            <div class="upload-container">
+                <div class="upload-header">
+                    <h2>🎬 Upload Video</h2>
+                    <p>Upload your video files to convert them into HLS streams stored on Telegram</p>
+                </div>
+
+                <div class="upload-zone" id="uploadZone">
+                    <div class="upload-zone-content">
+                        <div class="upload-icon">📁</div>
+                        <h3>Drop video files here or click to browse</h3>
+                        <p>Supports MP4, MKV, AVI, MOV, WebM and most video formats</p>
+                        <p class="upload-limits">Max file size: <span id="maxFileSize">50 GB</span></p>
+                        <input type="file" id="fileInput" accept="video/*" multiple hidden>
+                        <button class="btn btn-primary" id="browseBtn">Choose Files</button>
+                    </div>
+                </div>
+
+                <!-- Upload Queue -->
+                <div class="upload-queue" id="uploadQueue" style="display: none;">
+                    <h3>📋 Upload Queue</h3>
+                    <div class="queue-list" id="queueList"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Library Tab -->
+        <div class="tab-content" id="library">
+            <div class="library-container">
+                <div class="library-header">
+                    <h2>📚 Video Library</h2>
+                    <div class="library-controls">
+                        <select class="filter-select" id="statusFilter">
+                            <option value="">All Videos</option>
+                            <option value="completed">✅ Completed</option>
+                            <option value="processing">⏳ Processing</option>
+                            <option value="error">❌ Error</option>
+                        </select>
+                        <button class="btn btn-secondary" id="refreshLibrary">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div class="video-grid" id="videoGrid">
+                    <div class="loading-spinner" id="libraryLoading">
+                        <div class="spinner"></div>
+                        <p>Loading videos...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Streaming Tab -->
+        <div class="tab-content" id="streaming">
+            <div class="streaming-container">
+                <div class="streaming-header">
+                    <h2>📺 HLS Player</h2>
+                    <p>Test your streams directly in the browser</p>
+                </div>
+
+                <div class="player-container">
+                    <video 
+                        id="hlsPlayer" 
+                        class="video-player"
+                        controls 
+                        preload="metadata"
+                        poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 300'%3E%3Crect width='400' height='300' fill='%23f0f0f0'/%3E%3Ctext x='200' y='150' text-anchor='middle' dominant-baseline='middle' font-size='48'%3E📺%3C/text%3E%3Ctext x='200' y='200' text-anchor='middle' dominant-baseline='middle' font-size='14' fill='%23666'%3ESelect a video to start streaming%3C/text%3E%3C/svg%3E"
+                    >
+                        Your browser does not support HLS video playback.
+                    </video>
+                    
+                    <div class="player-controls">
+                        <select class="player-select" id="videoSelect" disabled>
+                            <option value="">Select a video...</option>
+                        </select>
+                        <div class="player-info" id="playerInfo" style="display: none;">
+                            <span class="info-item">Quality: <span id="currentQuality">Auto</span></span>
+                            <span class="info-item">Mode: <span id="processingMode">-</span></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Tab -->
+        <div class="tab-content" id="system">
+            <div class="system-container">
+                <div class="system-header">
+                    <h2>⚙️ System Status</h2>
+                    <button class="btn btn-secondary" id="refreshSystem">🔄 Refresh</button>
+                </div>
+
+                <!-- System Overview -->
+                <div class="system-grid">
+                    <div class="system-card">
+                        <h3>🤖 Telegram Bots</h3>
+                        <div class="system-stats" id="botStats">
+                            <div class="loading-spinner small">
+                                <div class="spinner"></div>
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" id="testBots">Test Bots</button>
+                    </div>
+
+                    <div class="system-card">
+                        <h3>💾 Cache Performance</h3>
+                        <div class="system-stats" id="cacheStats">
+                            <div class="loading-spinner small">
+                                <div class="spinner"></div>
+                            </div>
+                        </div>
+                        <button class="btn btn-warning btn-sm" id="clearCache">Clear Cache</button>
+                    </div>
+
+                    <div class="system-card">
+                        <h3>📊 Database Stats</h3>
+                        <div class="system-stats" id="databaseStats">
+                            <div class="loading-spinner small">
+                                <div class="spinner"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="system-card">
+                        <h3>🔧 Configuration</h3>
+                        <div class="system-stats" id="configStats">
+                            <div class="loading-spinner small">
+                                <div class="spinner"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- System Logs -->
+                <div class="logs-section">
+                    <div class="logs-header">
+                        <h3>📋 System Logs</h3>
+                        <div class="logs-controls">
+                            <select class="filter-select" id="logLevel">
+                                <option value="all">All Levels</option>
+                                <option value="debug">Debug</option>
+                                <option value="info">Info</option>
+                                <option value="warning">Warning</option>
+                                <option value="error">Error</option>
+                            </select>
+                            <button class="btn btn-secondary btn-sm" id="refreshLogs">🔄 Refresh</button>
+                            <button class="btn btn-secondary btn-sm" id="clearLogs">🗑️ Clear</button>
+                        </div>
+                    </div>
+                    <div class="logs-container" id="logsContainer">
+                        <div class="log-message info">
+                            <span class="log-time">Loading...</span>
+                            <span class="log-level">INFO</span>
+                            <span class="log-text">Fetching system logs...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Modal Dialogs -->
+    <div class="modal" id="videoModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Video Details</h3>
+                <button class="modal-close" id="modalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Content will be populated dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Processing Status Modal -->
+    <div class="modal" id="processingModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⏳ Processing Video</h3>
+            </div>
+            <div class="modal-body">
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">Starting...</div>
+                </div>
+                <div class="processing-details" id="processingDetails">
+                    <p><strong>File:</strong> <span id="processingFile">-</span></p>
+                    <p><strong>Mode:</strong> <span id="processingModeDetail">-</span></p>
+                    <p><strong>Status:</strong> <span id="processingStatus">-</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/upload.js"></script>
+    <script src="/static/js/library.js"></script>
+    <script src="/static/js/streaming.js"></script>
+    <script src="/static/js/system.js"></script>
+</body>
+</html>
