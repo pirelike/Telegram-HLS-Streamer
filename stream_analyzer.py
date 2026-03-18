@@ -1,5 +1,7 @@
 """Analyze video files using ffprobe to detect all streams (video, audio, subtitle)."""
 
+from __future__ import annotations
+
 import json
 import logging
 import subprocess

@@ -54,7 +54,9 @@ class TelegramUploader:
                 "index": i,
             })
         self._bot_counter = 0
-        self._bot_locks = [asyncio.Lock() for _ in self.bots]
+        # Locks are created lazily inside the event loop to support Python 3.8/3.9,
+        # where asyncio.Lock() cannot be created outside a running event loop.
+        self._bot_locks: list | None = None
 
     def _next_bot(self):
         """Round-robin bot selection."""
@@ -136,6 +138,10 @@ class TelegramUploader:
         """
         if not files:
             return {}
+
+        # Create per-bot locks inside the running event loop (required for Python 3.8/3.9).
+        if self._bot_locks is None:
+            self._bot_locks = [asyncio.Lock() for _ in self.bots]
 
         max_parallelism = min(
             len(self.bots),

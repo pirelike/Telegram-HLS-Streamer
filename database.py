@@ -10,7 +10,6 @@ Schema:
   segments   - One row per uploaded segment (maps segment_key -> Telegram file_id)
 """
 
-import json
 import logging
 import os
 import sqlite3
