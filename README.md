@@ -1,79 +1,424 @@
-# 🎬 Telegram HLS Streamer
+# Telegram HLS Streamer
 
-Transform Telegram into your unlimited personal Netflix storage! This sophisticated video streaming server uses multiple Telegram bots as cloud storage, automatically converts videos to HLS format, and provides a modern web interface for seamless streaming.
+Telegram HLS Streamer is a Flask-based video pipeline that accepts large resumable uploads, converts media into HLS-compatible streams, uploads segments to Telegram channels through multiple bots, and serves HLS playlists/segments through HTTP.
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/Status-Development-orange.svg)
+The project is designed for self-hosted personal media delivery with:
+- chunked uploads (multi-GB files)
+- FFmpeg/ffprobe stream analysis and processing
+- adaptive bitrate (ABR) tier generation
+- multi-audio and multi-subtitle HLS playlists
+- persistent SQLite mapping of HLS segment keys to Telegram `file_id`s
 
-## ✨ Features
+---
 
-### 🚀 Core Functionality
-- **HLS Video Streaming**: Automatic conversion to HTTP Live Streaming format with hardware acceleration
-- **Multi-Bot Distribution**: Uses 8 Telegram bots with intelligent round-robin distribution and bot isolation
-- **Unlimited Storage**: Leverage Telegram's infrastructure as your personal cloud storage
-- **Streaming Uploads**: Memory-efficient upload handling for large files (multi-GB support)
-- **Real-time Progress**: Live upload and processing progress with speed and ETA calculations
+## Table of Contents
 
-### 🧠 Intelligence Features  
-- **Copy Mode**: Lossless processing for HLS-compatible files ≥20MB (H.264/HEVC + AAC/MP3)
-- **Smart Caching**: LRU eviction with predictive preloading for optimal streaming performance
-- **Configurable Limits**: Telegram 20MB segment limit (future-proof and configurable)
-- **Hardware Acceleration**: VAAPI, NVENC, QSV support for blazing-fast encoding
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the server](#running-the-server)
+- [Web UI workflow](#web-ui-workflow)
+- [HTTP API reference](#http-api-reference)
+- [HLS output format](#hls-output-format)
+- [Storage, cleanup, and lifecycle](#storage-cleanup-and-lifecycle)
+- [Security and deployment notes](#security-and-deployment-notes)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Limitations](#limitations)
 
-## 🛠️ Quick Start
+---
 
-### ⚙️ Configuration
+## How it works
 
-### Telegram Bot Setup
+1. A client uploads a video in chunks using `/api/upload/init` + `/api/upload/chunk`.
+2. The server finalizes the upload (`/api/upload/finalize`) and starts a background job.
+3. The job pipeline performs:
+   - media analysis via `ffprobe`
+   - video/audio/subtitle extraction and HLS packaging via `ffmpeg`
+   - parallel upload of generated files to Telegram using multiple bots
+   - persistence of metadata and segment mappings to SQLite
+4. The server exposes HLS playlists (`/hls/...`) and segment proxy endpoints (`/segment/...`) so players can stream content.
 
-You need 8 Telegram bots for optimal performance. For each bot:
+---
 
-1. Create a bot via [@BotFather](https://t.me/BotFather)
-2. Create a private channel for the bot
-3. Add the bot as an administrator to the channel
-4. Add tokens and channel IDs to `.env`
+## Architecture
 
-### Environment Variables
+### Core modules
+
+- `app.py` — Flask app, upload endpoints, job lifecycle, HLS and segment routes.
+- `stream_analyzer.py` — wraps `ffprobe`; detects video/audio/subtitle streams, codec metadata.
+- `video_processor.py` — wraps `ffmpeg`; builds HLS video/audio playlists and VTT subtitles.
+- `telegram_uploader.py` — async uploader with multi-bot round-robin and retry/backoff.
+- `hls_manager.py` — generates master/media playlists and resolves segment metadata.
+- `database.py` — SQLite schema and persistence for jobs, tracks, and segments.
+- `config.py` — environment-driven runtime configuration.
+
+### Data model (SQLite)
+
+The database (`streamer.db`) is the source of truth for playback.
+
+- `jobs`: one row per uploaded media job.
+- `tracks`: one row per track variant (video tier, audio track, subtitle track).
+- `segments`: maps `segment_key` (e.g. `video_0/video_0001.ts`) to Telegram `file_id` + `bot_index`.
+
+If `segments` data is lost, the server cannot resolve files back from Telegram for streaming.
+
+---
+
+## Requirements
+
+### System dependencies
+
+- Python 3.8+
+- FFmpeg (must include `ffmpeg` and `ffprobe` in PATH)
+- Linux/macOS/WSL recommended for FFmpeg + optional hardware acceleration
+
+### Python dependencies
+
+Defined in `requirements.txt`:
+- `flask`
+- `python-dotenv`
+- `aiohttp`
+- `aiofiles`
+- `python-telegram-bot`
+
+---
+
+## Installation
 
 ```bash
-# Server Configuration
+git clone <your-fork-or-repo-url>
+cd Telegram-HLS-Streamer
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Create a `.env` file in the repository root (see full template below).
+
+---
+
+## Configuration
+
+All runtime config is environment-variable based (`config.py`).
+
+### Required Telegram settings
+
+You can configure up to 8 bots/channels:
+
+```bash
+TELEGRAM_BOT_TOKEN_1=123456:ABCDEF...
+TELEGRAM_CHANNEL_ID_1=-1001234567890
+
+TELEGRAM_BOT_TOKEN_2=...
+TELEGRAM_CHANNEL_ID_2=-100...
+# ... up to 8
+```
+
+Notes:
+- Channel IDs must be negative integers (Telegram private channel format).
+- Placeholder values like `your_...` are ignored.
+- Each configured bot should be admin in its corresponding channel.
+
+### Full `.env` template
+
+```bash
+# Server
 LOCAL_HOST=0.0.0.0
 LOCAL_PORT=5050
 FORCE_HTTPS=false
 BEHIND_PROXY=true
 
-# File Handling
-TELEGRAM_MAX_FILE_SIZE=20971520  # 20MB (configurable)
-MAX_UPLOAD_SIZE=21474836480      # 20GB
+# File handling
+TELEGRAM_MAX_FILE_SIZE=20971520
+MAX_UPLOAD_SIZE=107374182400
+UPLOAD_CHUNK_SIZE=10485760
 ENABLE_COPY_MODE=true
 
-# Hardware Acceleration (auto-detected)
+# Processing
+HLS_SEGMENT_DURATION=4
+VIDEO_BITRATE=4M
+AUDIO_BITRATE=128k
+
+# Hardware acceleration
 ENABLE_HARDWARE_ACCELERATION=true
-PREFERRED_ENCODER=vaapi  # vaapi, nvenc, qsv
-VIDEO_BITRATE=4M         # target video bitrate when encoding
+PREFERRED_ENCODER=vaapi
 
-# Bot Tokens
-TELEGRAM_BOT_TOKEN_1=your_bot_1_token
-TELEGRAM_BOT_TOKEN_2=your_bot_2_token
-# ... up to 8 bots
+# Adaptive bitrate
+ABR_ENABLED=true
 
-# Channel IDs  
-TELEGRAM_CHANNEL_ID_1=-100xxxxxxxxxx
-TELEGRAM_CHANNEL_ID_2=-100xxxxxxxxxx
-# ... corresponding channels
+# Reliability / cleanup
+JOB_TIMEOUT_SECONDS=7200
+PENDING_UPLOAD_TTL_SECONDS=86400
+PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS=300
 
-# Upload performance
-UPLOAD_PARALLELISM=8     # concurrent uploads cap across bots
+# Upload security (optional)
+UPLOAD_API_KEY=
+UPLOAD_BASIC_USER=
+UPLOAD_BASIC_PASSWORD=
+
+# CORS
+CORS_ALLOWED_ORIGINS=https://your-player.example.com,https://another-origin.example
+
+# Telegram upload behavior
+UPLOAD_PARALLELISM=8
+
+# Telegram bots/channels
+TELEGRAM_BOT_TOKEN_1=
+TELEGRAM_CHANNEL_ID_1=
+TELEGRAM_BOT_TOKEN_2=
+TELEGRAM_CHANNEL_ID_2=
+TELEGRAM_BOT_TOKEN_3=
+TELEGRAM_CHANNEL_ID_3=
+TELEGRAM_BOT_TOKEN_4=
+TELEGRAM_CHANNEL_ID_4=
+TELEGRAM_BOT_TOKEN_5=
+TELEGRAM_CHANNEL_ID_5=
+TELEGRAM_BOT_TOKEN_6=
+TELEGRAM_CHANNEL_ID_6=
+TELEGRAM_BOT_TOKEN_7=
+TELEGRAM_CHANNEL_ID_7=
+TELEGRAM_BOT_TOKEN_8=
+TELEGRAM_CHANNEL_ID_8=
 ```
 
-### Copy Mode Logic
+### Important behavior notes
 
-The system intelligently determines when to use lossless copy mode:
+- `TELEGRAM_MAX_FILE_SIZE` is currently config for segment planning context; FFmpeg segmentation output and upload flow still determine actual file boundaries.
+- `ENABLE_COPY_MODE=true` allows direct stream copy when codec/container compatibility permits (faster, lossless).
+- `UPLOAD_CHUNK_SIZE` must match frontend expectation if using bundled UI (currently 10MB).
 
-- **File size**: Must be ≥20MB 
-- **Video codec**: H.264 or HEVC
-- **Audio codec**: AAC or MP3
-- **Container**: Compatible with HLS
+---
 
-When copy mode is used, files are processed without re-encoding, dramatically reducing processing time and preserving quality.
+## Running the server
+
+```bash
+python app.py
+```
+
+By default, the app starts on `0.0.0.0:5050`.
+
+Open:
+- UI: `http://localhost:5050/`
+- Jobs API: `http://localhost:5050/api/jobs`
+
+---
+
+## Web UI workflow
+
+The included UI (`templates/index.html`) supports:
+- drag/drop file select
+- resumable chunked upload using localStorage
+- upload + processing progress display
+- stream analysis badges
+- listing previous jobs
+- copyable master playlist URL
+
+The UI uses this upload flow:
+1. `POST /api/upload/init`
+2. `POST /api/upload/chunk` repeatedly
+3. `POST /api/upload/finalize`
+4. Poll `GET /api/status/<job_id>` until complete
+
+---
+
+## HTTP API reference
+
+### Upload APIs
+
+#### `POST /api/upload/init`
+Start an upload session.
+
+**Request JSON**
+```json
+{
+  "filename": "movie.mkv",
+  "total_size": 734003200,
+  "total_chunks": 70
+}
+```
+
+**Response JSON**
+```json
+{
+  "upload_id": "abcd1234ef567890",
+  "chunk_size": 10485760
+}
+```
+
+#### `POST /api/upload/chunk`
+Upload one binary chunk.
+
+**Headers**
+- `X-Upload-Id`: upload session id
+- `X-Chunk-Index`: zero-based chunk index
+
+**Body**
+- raw bytes
+
+The server validates chunk ordering, overlap, and size consistency.
+
+#### `POST /api/upload/finalize`
+Finalize upload and enqueue processing.
+
+**Request JSON**
+```json
+{
+  "upload_id": "abcd1234ef567890"
+}
+```
+
+**Response JSON**
+```json
+{
+  "job_id": "f0e1d2c3b4a5",
+  "status": "queued"
+}
+```
+
+#### `GET /api/upload/status/<upload_id>`
+Returns current chunked upload progress.
+
+### Job APIs
+
+#### `GET /api/status/<job_id>`
+Returns live/in-memory status for active jobs, or persisted metadata for completed jobs.
+
+#### `GET /api/jobs?page=1&limit=20`
+Returns paginated completed jobs (`limit` max 50).
+
+### Playlist APIs
+
+- `GET /hls/<job_id>/master.m3u8`
+- `GET /hls/<job_id>/video.m3u8` (legacy/single-tier compatibility)
+- `GET /hls/<job_id>/video_<index>.m3u8`
+- `GET /hls/<job_id>/audio_<index>.m3u8`
+- `GET /hls/<job_id>/sub_<index>.m3u8`
+
+### Segment API
+
+- `GET /segment/<job_id>/<segment_key>`
+
+This endpoint downloads the segment from Telegram with the original bot and returns bytes to the player.
+
+---
+
+## HLS output format
+
+### Master playlist
+
+Master playlists include:
+- `EXT-X-MEDIA` entries for audio tracks
+- `EXT-X-MEDIA` entries for subtitle tracks
+- video quality tiers and `EXT-X-STREAM-INF` references
+
+### Video tiers (ABR)
+
+When enabled, the processor creates:
+- original-resolution tier (index 0)
+- additional tiers according to configured ABR heights (`Config.ABR_TIERS`) up to source height
+
+### Audio and subtitles
+
+- each audio track is emitted as an independent HLS audio rendition
+- subtitles are extracted to WebVTT and exposed as HLS subtitle playlists
+
+---
+
+## Storage, cleanup, and lifecycle
+
+### Directories
+
+- `uploads/`: incoming upload files before processing completes
+- `processing/<job_id>/`: temporary FFmpeg outputs before Telegram upload finalizes
+- `streamer.db`: persistent metadata/segment mapping database
+
+### Cleanup behavior
+
+- completed jobs remove temporary files from `uploads/` and `processing/`
+- pending/incomplete uploads are cleaned by TTL (`PENDING_UPLOAD_TTL_SECONDS`)
+- long jobs can be force-marked as timed out via watcher (`JOB_TIMEOUT_SECONDS`)
+
+---
+
+## Security and deployment notes
+
+### Auth options for upload endpoints
+
+If configured, upload APIs require either:
+- header API key (`X-API-Key`), or
+- Basic Auth credentials (`UPLOAD_BASIC_USER` / `UPLOAD_BASIC_PASSWORD`)
+
+### CORS
+
+CORS is applied to `/api`, `/hls`, and `/segment` routes. Origins must be explicitly listed in `CORS_ALLOWED_ORIGINS`.
+
+### Reverse proxy
+
+If running behind Nginx/Caddy/Traefik:
+- keep `BEHIND_PROXY=true`
+- use `FORCE_HTTPS=true` if TLS is terminated at proxy and you need HTTPS playlist URLs in responses
+
+---
+
+## Troubleshooting
+
+### `ffprobe not found` / `ffmpeg not found`
+Install FFmpeg and verify:
+
+```bash
+ffprobe -version
+ffmpeg -version
+```
+
+### Upload starts but never completes
+
+- confirm `MAX_UPLOAD_SIZE` is greater than your file
+- confirm frontend and backend chunk size alignment (`UPLOAD_CHUNK_SIZE`)
+- check disk space for `uploads/` and `processing/`
+
+### Telegram upload failures
+
+- verify bot token correctness
+- verify bot has permission in target channel
+- confirm channel id format is negative integer (`-100...`)
+- lower `UPLOAD_PARALLELISM` if you hit frequent network/rate-limit issues
+
+### Playback fails for older jobs after bot changes
+
+Segments are tied to the uploading bot. If you remove or rotate bots, old `bot_index` mappings may no longer resolve correctly.
+
+---
+
+## Development
+
+Run tests:
+
+```bash
+pytest
+```
+
+Useful files while developing:
+- `tests/test_telegram_uploader.py`
+- `tests/test_database_hls_manager.py`
+- `tests/test_stream_analyzer.py`
+- `tests/test_config_video_processor.py`
+- `tests/test_app_p0_todos.py`
+
+---
+
+## Limitations
+
+- No distributed queue/worker architecture yet (single-process job manager).
+- In-memory active job state is not durable across process restarts.
+- Segment proxy fetches bytes from Telegram per request (no built-in CDN layer).
+- ABR tiers are static config; no per-title complexity optimization.
+- Existing `TELEGRAM_MAX_FILE_SIZE` is not currently enforced as a strict hard cap during upload.
+
+---
+
+## License
+
+MIT (see repository licensing files/settings).
