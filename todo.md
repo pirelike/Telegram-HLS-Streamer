@@ -13,10 +13,10 @@
 
 ## P2 — Reliability / Error Handling
 
-- [ ] `app.py`: `_active_jobs` dict grows unboundedly — completed and errored jobs are never removed from the in-memory dict, causing slow memory leak over long-running server instances
-- [ ] `app.py`: `_pending_uploads` iterated without a lock in `_cleanup_expired_pending_uploads` — concurrent upload chunk requests can modify the dict during iteration, risking `RuntimeError: dictionary changed size during iteration`
-- [ ] `app.py`: New `TelegramUploader` instance created on every segment proxy request (line 744) — each instantiation creates fresh `Bot` objects, wasting resources and connections; should use a shared singleton
-- [ ] `database.py`: Thread-local database connections are never explicitly closed — when worker threads terminate, SQLite connections may not be properly cleaned up
+- [x] `app.py`: `_active_jobs` dict grows unboundedly — completed and errored jobs are never removed from the in-memory dict, causing slow memory leak over long-running server instances
+- [x] `app.py`: `_pending_uploads` iterated without a lock in `_cleanup_expired_pending_uploads` — concurrent upload chunk requests can modify the dict during iteration, risking `RuntimeError: dictionary changed size during iteration`
+- [x] `app.py`: New `TelegramUploader` instance created on every segment proxy request (line 744) — each instantiation creates fresh `Bot` objects, wasting resources and connections; should use a shared singleton
+- [x] `database.py`: Thread-local database connections are never explicitly closed — when worker threads terminate, SQLite connections may not be properly cleaned up
 
 ## P3 — Performance
 
