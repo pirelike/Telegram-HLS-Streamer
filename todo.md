@@ -33,7 +33,7 @@
 
 ## P5 — Maintainability
 
-- [ ] **`requirements.txt`** — Pin dependency upper bounds → unguarded `>=` risks silent breakage on major releases
+- [x] **`requirements.txt`** — Pin dependency upper bounds → unguarded `>=` risks silent breakage on major releases
 
 ## P6 — UX Improvements
 
