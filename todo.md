@@ -8,10 +8,10 @@
 
 ## P1 — Security / Data Integrity
 
-- [ ] `app.py`: Filename sanitization only uses `os.path.basename()` — insufficient against path traversal attacks
-- [ ] `app.py`: Source video file deleted before verifying all Telegram segment uploads succeeded — unrecoverable on partial failure
-- [ ] `telegram_uploader.py`: No integrity verification (checksum) of uploaded segments — corruption during transmission goes undetected
-- [ ] `database.py`: Partial segment saves possible if commit crashes mid-transaction — can leave orphaned segments with inconsistent state
+- [x] `app.py`: Filename sanitization only uses `os.path.basename()` — insufficient against path traversal attacks
+- [x] `app.py`: Source video file deleted before verifying all Telegram segment uploads succeeded — unrecoverable on partial failure
+- [x] `telegram_uploader.py`: No integrity verification (checksum) of uploaded segments — corruption during transmission goes undetected
+- [x] `database.py`: Partial segment saves possible if commit crashes mid-transaction — can leave orphaned segments with inconsistent state
 
 ## P2 — Reliability / Error Handling
 

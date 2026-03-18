@@ -15,6 +15,7 @@ import os
 import time
 import uuid
 from threading import Lock, Thread
+from werkzeug.utils import secure_filename
 
 from flask import (
     Flask, jsonify, render_template, request, Response,
@@ -208,7 +209,7 @@ def upload_init():
     if not data or "filename" not in data or "total_size" not in data:
         return jsonify({"error": "filename and total_size required"}), 400
 
-    filename = os.path.basename(data["filename"])
+    filename = secure_filename(data["filename"]) or "unnamed_upload"
     if not filename:
         return jsonify({"error": "Invalid filename"}), 400
     total_size = int(data["total_size"])
@@ -474,8 +475,6 @@ def _process_job(job_id, file_path):
         logger.exception("Job %s failed", job_id)
         _active_jobs[job_id]["status"] = "error"
         _active_jobs[job_id]["error"] = str(e)
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
 
 # ─── Job Status ───

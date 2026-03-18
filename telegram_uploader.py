@@ -85,6 +85,9 @@ class TelegramUploader:
                         connect_timeout=30,
                     )
                 file_id = message.document.file_id
+                if message.document.file_size != file_size:
+                    raise RuntimeError(f"Upload corrupted: size mismatch {message.document.file_size} != {file_size}")
+
                 logger.debug(
                     "Uploaded %s via bot %d -> file_id=%s",
                     file_name, bot_entry["index"], file_id[:20],
