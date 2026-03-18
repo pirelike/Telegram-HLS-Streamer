@@ -185,7 +185,16 @@ class TelegramUploader:
         return result
 
     async def get_file_url(self, file_id, bot_index):
-        """Get a temporary download URL for a file from Telegram."""
-        bot = self.bots[bot_index % len(self.bots)]["bot"]
+        """Get a temporary download URL for a file from Telegram.
+
+        The bot_index must match the bot that originally uploaded the file,
+        since Telegram file_ids are only valid for the bot that created them.
+        """
+        if bot_index < 0 or bot_index >= len(self.bots):
+            raise RuntimeError(
+                f"Bot index {bot_index} out of range (only {len(self.bots)} bots configured). "
+                f"The segment was uploaded by a bot that is no longer available."
+            )
+        bot = self.bots[bot_index]["bot"]
         file = await bot.get_file(file_id)
         return file.file_path
