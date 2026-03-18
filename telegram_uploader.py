@@ -183,9 +183,9 @@ class TelegramUploader:
         uploaded_files = 0
 
         # Count total files
-        if processing_result.video_playlist:
+        for _, tier_dir, _, _, _ in processing_result.video_playlists:
             total_files += len([
-                f for f in os.listdir(processing_result.output_dir)
+                f for f in os.listdir(tier_dir)
                 if f.endswith(".ts")
             ])
         for _, audio_dir, _, _, _ in processing_result.audio_playlists:
@@ -202,11 +202,11 @@ class TelegramUploader:
             if progress_callback:
                 progress_callback(uploaded_files, total_files, name)
 
-        # Upload video segments
-        if processing_result.video_playlist:
+        # Upload video segments (each ABR tier separately)
+        for i, (_, tier_dir, _, _, _) in enumerate(processing_result.video_playlists):
             video_files = [
-                (f"video/{filename}", os.path.join(processing_result.output_dir, filename))
-                for filename in sorted(os.listdir(processing_result.output_dir))
+                (f"video_{i}/{filename}", os.path.join(tier_dir, filename))
+                for filename in sorted(os.listdir(tier_dir))
                 if filename.endswith(".ts")
             ]
             video_segments = await self.upload_files(video_files, on_segment)
