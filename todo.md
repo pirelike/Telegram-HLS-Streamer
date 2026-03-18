@@ -2,9 +2,9 @@
 
 ## P0 — Breaks Core Functionality
 
-- [ ] `app.py`: Job cancellation check misidentifies timeout errors as cancellation — `_is_job_cancelled` matches "timed out" string instead of using an explicit cancellation flag
-- [ ] `app.py`: Chunk upload can corrupt files — writes at calculated offset without verifying file size, creating sparse file gaps on out-of-order chunks
-- [ ] `hls_manager.py`: Media playlist generation missing stream_index validation for audio streams — can return None for valid audio tracks
+- [x] `app.py`: Job cancellation check misidentifies timeout errors as cancellation — `_is_job_cancelled` matches "timed out" string instead of using an explicit cancellation flag
+- [x] `app.py`: Chunk upload can corrupt files — writes at calculated offset without verifying file size, creating sparse file gaps on out-of-order chunks
+- [x] `hls_manager.py`: Media playlist generation missing stream_index validation for audio streams — can return None for valid audio tracks
 
 ## P1 — Security / Data Integrity
 

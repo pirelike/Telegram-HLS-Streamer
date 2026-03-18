@@ -199,11 +199,25 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
     if not job:
         return None
 
+    if stream_index is not None:
+        try:
+            stream_index = int(stream_index)
+        except (TypeError, ValueError):
+            return None
+        if stream_index < 0:
+            return None
+
     if stream_type == "video":
         prefix = f"video_{stream_index}" if stream_index is not None else "video"
     elif stream_type == "audio" and stream_index is not None:
+        track = _get_track(job_id, "audio", stream_index)
+        if not track:
+            return None
         prefix = f"audio_{stream_index}"
     elif stream_type == "sub" and stream_index is not None:
+        track = _get_track(job_id, "subtitle", stream_index)
+        if not track:
+            return None
         return _generate_subtitle_playlist(job_id, job, stream_index)
     else:
         return None
@@ -247,3 +261,12 @@ def _generate_subtitle_playlist(job_id, job, sub_index):
 
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
+
+
+def _get_track(job_id, track_type, track_index):
+    """Return the track dict for a specific job/type/index, or None."""
+    tracks = db.get_job_tracks(job_id, track_type)
+    for track in tracks:
+        if track["track_index"] == track_index:
+            return track
+    return None
