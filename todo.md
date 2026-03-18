@@ -7,9 +7,9 @@
 
 ## P1 — Security / Data Integrity
 
-- [ ] `templates/index.html`: XSS vulnerability in `renderJobItem` — server filename is interpolated directly into `innerHTML` (`${j.filename || id}`) without HTML escaping; `secure_filename` strips most characters but defense-in-depth requires escaping at render time
-- [ ] `app.py`: `total_size` and `total_chunks` in upload init are not safely validated — `int(data["total_size"])` raises unhandled `ValueError` on non-numeric input, returning a raw 500 to the client instead of a 400
-- [ ] `app.py`: `register_job` failure after Telegram upload completes leaves segments orphaned — segments are on Telegram with no DB record and the source file is deleted in the `finally` block, making recovery impossible
+- [x] `templates/index.html`: XSS vulnerability in `renderJobItem` — server filename is interpolated directly into `innerHTML` (`${j.filename || id}`) without HTML escaping; `secure_filename` strips most characters but defense-in-depth requires escaping at render time
+- [x] `app.py`: `total_size` and `total_chunks` in upload init are not safely validated — `int(data["total_size"])` raises unhandled `ValueError` on non-numeric input, returning a raw 500 to the client instead of a 400
+- [x] `app.py`: `register_job` failure after Telegram upload completes leaves segments orphaned — segments are on Telegram with no DB record and the source file is deleted in the `finally` block, making recovery impossible
 
 ## P2 — Reliability / Error Handling
 

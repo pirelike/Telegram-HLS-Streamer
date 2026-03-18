@@ -360,8 +360,16 @@ def upload_init():
         return jsonify({"error": "filename and total_size required"}), 400
 
     filename = secure_filename(data["filename"]) or "unnamed_upload"
-    total_size = int(data["total_size"])
-    total_chunks = int(data.get("total_chunks", 0))
+    try:
+        total_size = int(data["total_size"])
+        total_chunks = int(data.get("total_chunks", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "total_size and total_chunks must be valid integers"}), 400
+
+    if total_size <= 0:
+        return jsonify({"error": "total_size must be a positive integer"}), 400
+    if total_chunks < 0:
+        return jsonify({"error": "total_chunks must be non-negative"}), 400
 
     if total_size > Config.MAX_UPLOAD_SIZE:
         return jsonify({
@@ -619,7 +627,19 @@ def _process_job(job_id, file_path):
             return
 
         # Step 4: Register for serving
-        register_job(job_id, analysis, result, upload_result)
+        try:
+            register_job(job_id, analysis, result, upload_result)
+        except Exception as reg_err:
+            # Segments are already on Telegram — log enough detail for manual recovery.
+            logger.error(
+                "Job %s: register_job failed AFTER Telegram upload. "
+                "Segments are on Telegram but not recorded in the database. "
+                "Upload result: %s | Error: %s",
+                job_id, upload_result, reg_err,
+            )
+            raise RuntimeError(
+                f"Failed to register job after uploading segments: {reg_err}"
+            ) from reg_err
 
         with _job_status_lock:
             # Only mark complete if the user hasn't cancelled in the meantime.
