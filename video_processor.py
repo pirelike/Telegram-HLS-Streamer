@@ -117,7 +117,7 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
         "-hls_segment_type", "mpegts",
         playlist,
     ]
-    return cmd, playlist, tier_dir
+    return cmd, playlist
 
 
 def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, output_dir: str):
@@ -252,11 +252,28 @@ class ProcessingResult:
         self.audio_playlists = []   # list of (playlist_path, audio_dir, language, title, channels)
         self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title)
 
+    @property
+    def video_playlist(self):
+        """Backward-compatible: return the first video playlist path or None."""
+        if self.video_playlists:
+            return self.video_playlists[0][0]
+        if hasattr(self, "_legacy_video_playlist"):
+            return self._legacy_video_playlist
+        return None
+
+    @video_playlist.setter
+    def video_playlist(self, playlist_path):
+        """Backward-compatible setter for tests/legacy callers."""
+        self._legacy_video_playlist = playlist_path
+
     def all_segment_dirs(self):
         """Return all directories containing segments to upload."""
         dirs = []
-        for _, tier_dir, _, _, _ in self.video_playlists:
-            dirs.append(tier_dir)
+        if self.video_playlists:
+            for _, tier_dir, _, _, _ in self.video_playlists:
+                dirs.append(tier_dir)
+        elif self.video_playlist:
+            dirs.append(self.output_dir)
         for _, audio_dir, _, _, _ in self.audio_playlists:
             dirs.append(audio_dir)
         for _, sub_dir, _, _ in self.subtitle_files:
@@ -320,7 +337,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
     # 1. Video streams (original + ABR tiers)
     if analysis.has_video:
         # Tier 0: original resolution
-        cmd, playlist, tier_dir = _build_video_cmd(
+        cmd, playlist = _build_video_cmd(
             analysis, output_dir, hw_encoder, tier_index=0,
         )
         _run_ffmpeg_with_progress(
@@ -328,6 +345,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb("Encoding video (original)"),
         )
+        tier_dir = os.path.dirname(playlist)
         result.video_playlists.append((
             playlist, tier_dir, source_width, source_height, Config.VIDEO_BITRATE,
         ))
@@ -339,7 +357,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             # Calculate proportional width (even number)
             target_w = int(source_width * target_h / source_height)
             target_w = target_w + (target_w % 2)  # ensure even
-            cmd, playlist, tier_dir = _build_video_cmd(
+            cmd, playlist = _build_video_cmd(
                 analysis, output_dir, hw_encoder,
                 tier_index=ti, target_height=target_h, target_bitrate=tier["bitrate"],
             )
@@ -348,6 +366,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
                 duration_seconds=media_duration,
                 step_progress_cb=make_step_progress_cb(f"Encoding video ({target_h}p)"),
             )
+            tier_dir = os.path.dirname(playlist)
             result.video_playlists.append((
                 playlist, tier_dir, target_w, target_h, tier["bitrate"],
             ))
