@@ -14,6 +14,9 @@ import collections
 import logging
 import os
 import queue
+import re
+import shutil
+import subprocess
 import time
 import uuid
 from threading import Lock, Thread
@@ -905,10 +908,43 @@ def add_cors(response):
     return response
 
 
+def _start_cloudflared_tunnel(port: int) -> None:
+    """Start a cloudflared quick tunnel and print the public URL.
+
+    Runs cloudflared as a subprocess, parses the assigned *.trycloudflare.com
+    URL from its stderr output, and logs it.  If cloudflared is not installed
+    the function prints an install hint instead.
+    """
+    if not shutil.which("cloudflared"):
+        print("  [!] cloudflared nincs telepítve - tunnel nem elérhető")
+        print("      Telepítés: sudo pacman -S cloudflared")
+        return
+
+    try:
+        proc = subprocess.Popen(
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+        for line in proc.stdout:
+            match = url_pattern.search(line)
+            if match:
+                logger.info("Cloudflared tunnel active: %s", match.group())
+                print(f"  [✓] Cloudflared tunnel: {match.group()}")
+                break
+        proc.wait()
+    except Exception as exc:
+        logger.warning("cloudflared tunnel failed: %s", exc)
+
+
 if __name__ == "__main__":
     _cleanup_expired_pending_uploads(force=True)
     logger.info("Starting Telegram HLS Streamer on %s:%d", Config.HOST, Config.PORT)
     logger.info("Configured bots: %d", len(Config.BOTS))
     logger.info("Max upload size: %d GB", Config.MAX_UPLOAD_SIZE // (1024**3))
     logger.info("Chunk size: %d MB", Config.UPLOAD_CHUNK_SIZE // (1024**2))
+    tunnel_thread = Thread(target=_start_cloudflared_tunnel, args=(Config.PORT,), daemon=True)
+    tunnel_thread.start()
     app.run(host=Config.HOST, port=Config.PORT, debug=False, threaded=True)
