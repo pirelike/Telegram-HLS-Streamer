@@ -55,7 +55,7 @@ class TestVideoProcessor(unittest.TestCase):
             has_video=True,
             audio_streams=[],
             subtitle_streams=[],
-            video_streams=[SimpleNamespace(index=0, codec_name="h264", is_copy_compatible=True)],
+            video_streams=[SimpleNamespace(index=0, codec_name="h264", is_copy_compatible=True, width=1280, height=720)],
         )
 
     @patch("video_processor.subprocess.run")
@@ -77,16 +77,16 @@ class TestVideoProcessor(unittest.TestCase):
     def test_build_video_cmd_variants(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                cmd, playlist = vp._build_video_cmd(self.analysis, tmpdir, None)
+                cmd, playlist, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
             self.assertIn("copy", cmd)
             self.assertTrue(playlist.endswith("video.m3u8"))
 
             with patch.object(vp.Config, "ENABLE_COPY_MODE", False), patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                hw_cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]))
+                hw_cmd, _, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]))
             self.assertIn("h264_vaapi", hw_cmd)
 
             with patch.object(vp.Config, "ENABLE_COPY_MODE", False), patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                sw_cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
+                sw_cmd, _, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
             self.assertIn("libx264", sw_cmd)
 
     def test_build_audio_cmd_and_extract_subtitle(self):
@@ -119,20 +119,22 @@ class TestVideoProcessor(unittest.TestCase):
 
     def test_processing_result_dirs(self):
         result = vp.ProcessingResult("id", "/tmp/out")
-        result.video_playlist = "/tmp/out/video.m3u8"
+        result.video_playlists = [("/tmp/out/video_0/video.m3u8", "/tmp/out/video_0", 1280, 720, "2500k")]
         result.audio_playlists = [("a", "/tmp/out/audio_0", "eng", "", 2)]
         result.subtitle_files = [("s", "/tmp/out/sub_0", "eng", "")]
-        self.assertEqual(result.all_segment_dirs(), ["/tmp/out", "/tmp/out/audio_0", "/tmp/out/sub_0"])
+        self.assertEqual(result.all_segment_dirs(), ["/tmp/out/video_0", "/tmp/out/audio_0", "/tmp/out/sub_0"])
 
+    @patch("video_processor._run_ffmpeg_with_progress")
     @patch("video_processor._run_ffmpeg")
     @patch("video_processor._detect_hw_encoder", return_value=None)
-    def test_process_and_cleanup(self, _detect, _run):
+    def test_process_and_cleanup(self, _detect, _run, _run_with_progress):
         with tempfile.TemporaryDirectory() as proc_dir:
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
                     has_video=True,
-                    video_streams=[SimpleNamespace(index=0, codec_name="h264", is_copy_compatible=True)],
+                    duration=12.0,
+                    video_streams=[SimpleNamespace(index=0, codec_name="h264", is_copy_compatible=True, width=1280, height=720)],
                     audio_streams=[SimpleNamespace(index=1, is_copy_compatible=True, language="eng", title="", codec_name="aac", channels=2)],
                     subtitle_streams=[
                         SimpleNamespace(index=2, is_text_based=True, language="eng", title=""),
@@ -142,7 +144,7 @@ class TestVideoProcessor(unittest.TestCase):
 
                 progress = []
                 result = vp.process(analysis, "jobx", lambda c, t, n: progress.append((c, t, n)))
-                self.assertTrue(result.video_playlist.endswith("video.m3u8"))
+                self.assertGreaterEqual(len(result.video_playlists), 1)
                 self.assertEqual(len(result.audio_playlists), 1)
                 self.assertEqual(len(result.subtitle_files), 1)
                 self.assertGreater(len(progress), 0)

@@ -208,6 +208,10 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
             return None
 
     if stream_type == "video":
+        if stream_index is not None:
+            track = _get_track(job_id, "video", stream_index)
+            if not track:
+                return None
         prefix = f"video_{stream_index}" if stream_index is not None else "video"
     elif stream_type == "audio" and stream_index is not None:
         track = _get_track(job_id, "audio", stream_index)

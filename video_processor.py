@@ -131,12 +131,20 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
     cmd = ["ffmpeg", "-y", "-i", analysis.file_path]
     cmd += ["-map", f"0:{audio_stream.index}", "-vn", "-sn"]
 
-    # Audio: always copy (lossless passthrough)
-    cmd += ["-c:a", "copy"]
-    logger.info(
-        "Audio track %d (%s): copy mode (codec=%s)",
-        audio_index, audio_stream.language, audio_stream.codec_name,
-    )
+    use_copy = Config.ENABLE_COPY_MODE and getattr(audio_stream, "is_copy_compatible", False)
+    if use_copy:
+        cmd += ["-c:a", "copy"]
+        logger.info(
+            "Audio track %d (%s): copy mode (codec=%s)",
+            audio_index, audio_stream.language, audio_stream.codec_name,
+        )
+    else:
+        audio_bitrate = getattr(Config, "AUDIO_BITRATE", "128k")
+        cmd += ["-c:a", "aac", "-b:a", audio_bitrate]
+        logger.info(
+            "Audio track %d (%s): AAC encode at %s",
+            audio_index, audio_stream.language, audio_bitrate,
+        )
 
     cmd += [
         "-f", "hls",
@@ -244,13 +252,6 @@ class ProcessingResult:
         self.audio_playlists = []   # list of (playlist_path, audio_dir, language, title, channels)
         self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title)
 
-    @property
-    def video_playlist(self):
-        """Backward-compatible: return the first video playlist path or None."""
-        if self.video_playlists:
-            return self.video_playlists[0][0]
-        return None
-
     def all_segment_dirs(self):
         """Return all directories containing segments to upload."""
         dirs = []
@@ -282,9 +283,10 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
     # Determine ABR tiers
     abr_tiers = []
     if analysis.has_video:
-        source_height = analysis.video_streams[0].height
-        source_width = analysis.video_streams[0].width
+        source_height = getattr(analysis.video_streams[0], "height", 0) or 0
+        source_width = getattr(analysis.video_streams[0], "width", 0) or 0
         abr_tiers = _get_abr_tiers(source_height)
+    media_duration = getattr(analysis, "duration", 0) or 0
 
     # Total steps: original video + ABR tiers + audio + subtitles
     total_steps = (
@@ -323,7 +325,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         )
         _run_ffmpeg_with_progress(
             cmd, f"video tier 0 (original) for {job_id}",
-            duration_seconds=analysis.duration,
+            duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb("Encoding video (original)"),
         )
         result.video_playlists.append((
@@ -343,7 +345,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             )
             _run_ffmpeg_with_progress(
                 cmd, f"video tier {ti} ({target_h}p) for {job_id}",
-                duration_seconds=analysis.duration,
+                duration_seconds=media_duration,
                 step_progress_cb=make_step_progress_cb(f"Encoding video ({target_h}p)"),
             )
             result.video_playlists.append((
@@ -356,7 +358,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         cmd, playlist, audio_dir = _build_audio_cmd(analysis, audio, i, output_dir)
         _run_ffmpeg_with_progress(
             cmd, f"audio track {i} ({audio.language}) for {job_id}",
-            duration_seconds=analysis.duration,
+            duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb(f"Encoding audio {i}"),
         )
         result.audio_playlists.append((
