@@ -102,7 +102,7 @@ class TestDatabaseAndHLS(unittest.TestCase):
         self.assertEqual(hls_manager.get_job("job3")["job_id"], "job3")
         listing = hls_manager.list_jobs()
         self.assertIn("job3", listing)
-        self.assertEqual(listing["job3"]["audio_tracks"][0]["language"], "eng")
+        self.assertEqual(listing["job3"]["audio_count"], 1)
 
         seg = hls_manager.get_segment_info("job3", "video/video_0001.ts")
         self.assertEqual(seg["bot_index"], 0)

@@ -30,28 +30,19 @@ def get_job(job_id):
 def list_jobs(limit=50, offset=0):
     """List jobs with summary info, newest first.
 
-    Returns a dict keyed by job_id.
+    Returns a dict keyed by job_id. Uses counts from db.list_jobs()
+    directly to avoid 2N extra queries per page.
     """
     jobs = db.list_jobs(limit=limit, offset=offset)
     result = {}
     for j in jobs:
         job_id = j["job_id"]
-        audio_tracks = db.get_job_tracks(job_id, "audio")
-        subtitle_tracks = db.get_job_tracks(job_id, "subtitle")
         result[job_id] = {
             "job_id": job_id,
             "filename": j["filename"],
             "duration": j["duration"],
-            "audio_tracks": [
-                {"index": t["track_index"], "language": t["language"],
-                 "title": t["title"], "channels": t["channels"]}
-                for t in audio_tracks
-            ],
-            "subtitle_tracks": [
-                {"index": t["track_index"], "language": t["language"],
-                 "title": t["title"]}
-                for t in subtitle_tracks
-            ],
+            "audio_count": j["audio_count"],
+            "subtitle_count": j["subtitle_count"],
             "segment_count": j["segment_count"],
         }
     return result
