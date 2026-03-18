@@ -131,20 +131,12 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
     cmd = ["ffmpeg", "-y", "-i", analysis.file_path]
     cmd += ["-map", f"0:{audio_stream.index}", "-vn", "-sn"]
 
-    # Audio encoding
-    use_copy = Config.ENABLE_COPY_MODE and audio_stream.is_copy_compatible
-    if use_copy:
-        cmd += ["-c:a", "copy"]
-        logger.info(
-            "Audio track %d (%s): copy mode (codec=%s)",
-            audio_index, audio_stream.language, audio_stream.codec_name,
-        )
-    else:
-        cmd += ["-c:a", "aac", "-b:a", "128k", "-ac", str(audio_stream.channels)]
-        logger.info(
-            "Audio track %d (%s): encoding to AAC",
-            audio_index, audio_stream.language,
-        )
+    # Audio: always copy (lossless passthrough)
+    cmd += ["-c:a", "copy"]
+    logger.info(
+        "Audio track %d (%s): copy mode (codec=%s)",
+        audio_index, audio_stream.language, audio_stream.codec_name,
+    )
 
     cmd += [
         "-f", "hls",
