@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 
 from config import Config
 from stream_analyzer import MediaAnalysis
@@ -153,6 +154,62 @@ def _run_ffmpeg(cmd, description=""):
     return proc
 
 
+def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_progress_cb=None):
+    """Run an FFmpeg command, reporting within-step progress via step_progress_cb(pct).
+
+    Falls back to _run_ffmpeg when no callback or duration is provided.
+    Uses FFmpeg's -progress pipe:1 to emit progress key=value pairs to stdout.
+    """
+    if not step_progress_cb or duration_seconds <= 0:
+        return _run_ffmpeg(cmd, description)
+
+    logger.info("Running FFmpeg with progress: %s", description)
+    logger.debug("Command: %s", " ".join(cmd))
+
+    # Inject -progress pipe:1 as a global option (right after the ffmpeg binary)
+    cmd_with_progress = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
+
+    proc = subprocess.Popen(
+        cmd_with_progress,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    stderr_chunks = []
+
+    def _read_stderr():
+        for line in proc.stderr:
+            stderr_chunks.append(line)
+
+    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stderr_thread.start()
+
+    for line in proc.stdout:
+        if line.startswith("out_time="):
+            time_str = line.split("=", 1)[1].strip()
+            if time_str.startswith("N/A"):
+                continue
+            try:
+                parts = time_str.split(":")
+                secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                if secs >= 0:
+                    pct = min(99, int(secs / duration_seconds * 100))
+                    step_progress_cb(pct)
+            except (ValueError, IndexError):
+                pass
+
+    proc.wait()
+    stderr_thread.join(timeout=5)
+
+    if proc.returncode != 0:
+        stderr_output = "".join(stderr_chunks)
+        logger.error("FFmpeg failed for %s:\n%s", description, stderr_output[-2000:])
+        raise RuntimeError(f"FFmpeg failed: {description}\n{stderr_output[-500:]}")
+
+    return proc
+
+
 class ProcessingResult:
     """Result of processing a single media file."""
 
@@ -204,17 +261,40 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         if progress_callback:
             progress_callback(current_step, total_steps, step_name)
 
+    def make_step_progress_cb(step_label):
+        """Create a within-step progress callback for FFmpeg.
+
+        Emits fractional progress so the overall bar moves smoothly during
+        each FFmpeg invocation rather than jumping at step completion.
+        """
+        if not progress_callback or total_steps == 0:
+            return None
+
+        def cb(pct):
+            fractional = current_step + pct / 100.0
+            progress_callback(fractional, total_steps, f"{step_label} ({pct}%)")
+
+        return cb
+
     # 1. Video stream
     if analysis.has_video:
         cmd, playlist = _build_video_cmd(analysis, output_dir, hw_encoder)
-        _run_ffmpeg(cmd, f"video extraction for {job_id}")
+        _run_ffmpeg_with_progress(
+            cmd, f"video extraction for {job_id}",
+            duration_seconds=analysis.duration,
+            step_progress_cb=make_step_progress_cb("Encoding video"),
+        )
         result.video_playlist = playlist
         report("Video extracted")
 
     # 2. Audio streams - each track gets its own HLS stream
     for i, audio in enumerate(analysis.audio_streams):
         cmd, playlist, audio_dir = _build_audio_cmd(analysis, audio, i, output_dir)
-        _run_ffmpeg(cmd, f"audio track {i} ({audio.language}) for {job_id}")
+        _run_ffmpeg_with_progress(
+            cmd, f"audio track {i} ({audio.language}) for {job_id}",
+            duration_seconds=analysis.duration,
+            step_progress_cb=make_step_progress_cb(f"Encoding audio {i}"),
+        )
         result.audio_playlists.append((
             playlist, audio_dir, audio.language, audio.title, audio.channels,
         ))

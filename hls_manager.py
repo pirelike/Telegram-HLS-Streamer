@@ -25,9 +25,12 @@ def get_job(job_id):
     return db.get_job(job_id)
 
 
-def list_jobs():
-    """List all jobs with summary info."""
-    jobs = db.list_jobs()
+def list_jobs(limit=50, offset=0):
+    """List jobs with summary info, newest first.
+
+    Returns a dict keyed by job_id.
+    """
+    jobs = db.list_jobs(limit=limit, offset=offset)
     result = {}
     for j in jobs:
         job_id = j["job_id"]
@@ -50,6 +53,11 @@ def list_jobs():
             "segment_count": j["segment_count"],
         }
     return result
+
+
+def count_jobs():
+    """Return the total number of completed jobs."""
+    return db.count_jobs()
 
 
 def get_segment_info(job_id, segment_key):
