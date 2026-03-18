@@ -491,8 +491,17 @@ def master_playlist(job_id):
 
 @app.route("/hls/<job_id>/video.m3u8")
 def video_playlist(job_id):
-    """Serve video-only media playlist."""
+    """Serve video-only media playlist (legacy, single-tier)."""
     playlist = generate_media_playlist(job_id, "video")
+    if not playlist:
+        return jsonify({"error": "Not found"}), 404
+    return Response(playlist, content_type="application/vnd.apple.mpegurl")
+
+
+@app.route("/hls/<job_id>/video_<int:index>.m3u8")
+def video_tier_playlist(job_id, index):
+    """Serve video media playlist for a specific quality tier."""
+    playlist = generate_media_playlist(job_id, "video", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")

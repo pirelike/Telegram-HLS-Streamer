@@ -102,24 +102,91 @@ def generate_master_playlist(job_id, base_url):
             f'AUTOSELECT={is_default},URI="{uri}"'
         )
 
-    # Video stream-inf with estimated bandwidth
-    bandwidth = job["file_size"] * 8
+    # Video variant streams (one per quality tier)
+    video_tracks = db.get_job_tracks(job_id, "video")
+    video_group = "video"
     duration = job["duration"] or 1
-    if duration > 0:
-        bandwidth = int(bandwidth / duration)
 
-    stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}"
-    if job["video_width"] and job["video_height"]:
-        stream_inf += f',RESOLUTION={job["video_width"]}x{job["video_height"]}'
-    if audio_tracks:
-        stream_inf += f',AUDIO="{audio_group}"'
-    if subtitle_tracks:
-        stream_inf += f',SUBTITLES="{sub_group}"'
+    if video_tracks:
+        # EXT-X-MEDIA:TYPE=VIDEO entries with named quality tiers
+        for t in video_tracks:
+            i = t["track_index"]
+            is_default = "YES" if i == 0 else "NO"
+            name = _video_tier_name(t["height"], is_original=(i == 0))
+            uri = f"{base_url}/hls/{job_id}/video_{i}.m3u8"
+            lines.append(
+                f'#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="{video_group}",'
+                f'NAME="{name}",DEFAULT={is_default},'
+                f'AUTOSELECT={is_default},URI="{uri}"'
+            )
 
-    lines.append(stream_inf)
-    lines.append(f"{base_url}/hls/{job_id}/video.m3u8")
+        # STREAM-INF entries referencing the video group
+        for t in video_tracks:
+            bw = _parse_bitrate(t["bitrate"]) if t["bitrate"] else 0
+            if bw == 0:
+                bw = int(job["file_size"] * 8 / duration) if duration > 0 else 0
+
+            stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bw}"
+            if t["width"] and t["height"]:
+                stream_inf += f',RESOLUTION={t["width"]}x{t["height"]}'
+            stream_inf += f',VIDEO="{video_group}"'
+            if audio_tracks:
+                stream_inf += f',AUDIO="{audio_group}"'
+            if subtitle_tracks:
+                stream_inf += f',SUBTITLES="{sub_group}"'
+
+            lines.append(stream_inf)
+            lines.append(f"{base_url}/hls/{job_id}/video_{t['track_index']}.m3u8")
+    else:
+        # Legacy: single video stream (no video tracks in DB)
+        bandwidth = job["file_size"] * 8
+        if duration > 0:
+            bandwidth = int(bandwidth / duration)
+
+        stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}"
+        if job["video_width"] and job["video_height"]:
+            stream_inf += f',RESOLUTION={job["video_width"]}x{job["video_height"]}'
+        if audio_tracks:
+            stream_inf += f',AUDIO="{audio_group}"'
+        if subtitle_tracks:
+            stream_inf += f',SUBTITLES="{sub_group}"'
+
+        lines.append(stream_inf)
+        lines.append(f"{base_url}/hls/{job_id}/video.m3u8")
 
     return "\n".join(lines) + "\n"
+
+
+def _video_tier_name(height, is_original=False):
+    """Generate a human-readable name for a video quality tier."""
+    label = _height_to_label(height)
+    if is_original:
+        return f"Original ({label})"
+    return label
+
+
+def _height_to_label(height):
+    """Convert a pixel height to a display label (e.g. 2160 -> '4K')."""
+    labels = {2160: "4K", 4320: "8K"}
+    if height in labels:
+        return labels[height]
+    return f"{height}p"
+
+
+def _parse_bitrate(bitrate_str):
+    """Parse a bitrate string like '5M' or '600k' into bits per second."""
+    if not bitrate_str:
+        return 0
+    s = bitrate_str.strip().upper()
+    try:
+        if s.endswith("M"):
+            return int(float(s[:-1]) * 1_000_000)
+        elif s.endswith("K"):
+            return int(float(s[:-1]) * 1_000)
+        else:
+            return int(s)
+    except (ValueError, IndexError):
+        return 0
 
 
 def generate_media_playlist(job_id, stream_type, stream_index=None):
@@ -133,7 +200,7 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
         return None
 
     if stream_type == "video":
-        prefix = "video"
+        prefix = f"video_{stream_index}" if stream_index is not None else "video"
     elif stream_type == "audio" and stream_index is not None:
         prefix = f"audio_{stream_index}"
     elif stream_type == "sub" and stream_index is not None:
