@@ -2,16 +2,16 @@
 
 ## P0 — Breaks Core Functionality
 
-- [ ] **`stream_analyzer.py`** — Fix `h265` vs `hevc` codec name mismatch → all HEVC videos re-encode unnecessarily or fail copy mode
-- [ ] **`stream_analyzer.py`** — Fix `mov_text` misclassified as text-based → subtitle extraction silently fails
-- [ ] **`telegram_uploader.py`** — Fix bot index inconsistency between upload and retrieval → segments served from wrong bot → 404s
+- [x] **`stream_analyzer.py`** — Fix `h265` vs `hevc` codec name mismatch → all HEVC videos re-encode unnecessarily or fail copy mode
+- [x] **`stream_analyzer.py`** — Fix `mov_text` misclassified as text-based → subtitle extraction silently fails
+- [x] **`telegram_uploader.py`** — Fix bot index inconsistency between upload and retrieval → segments served from wrong bot → 404s
 
 ## P1 — Security / Data Integrity
 
-- [ ] **`app.py`** — Fix path traversal on filename input → can write files outside `uploads/`
-- [ ] **`app.py`** — Fix silent file truncation on re-init → can destroy an in-progress upload
-- [ ] **`app.py` / `video_processor.py` / `telegram_uploader.py`** — Fix mismatched `progress_callback` signatures → runtime crashes
-- [ ] **`database.py`** — Add transaction rollback in `save_job()` → partial writes leave DB inconsistent
+- [x] **`app.py`** — Fix path traversal on filename input → can write files outside `uploads/`
+- [x] **`app.py`** — Fix silent file truncation on re-init → can destroy an in-progress upload
+- [x] **`app.py` / `video_processor.py` / `telegram_uploader.py`** — Fix mismatched `progress_callback` signatures → runtime crashes
+- [x] **`database.py`** — Add transaction rollback in `save_job()` → partial writes leave DB inconsistent
 
 ## P2 — Reliability / Error Handling
 
