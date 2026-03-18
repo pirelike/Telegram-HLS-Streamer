@@ -30,11 +30,11 @@
 
 ## P5 — Maintainability
 
-- [ ] `telegram_uploader.py`: `TelegramUploader` is instantiated in two separate places (`_process_job` for upload and `serve_segment` for download) with no shared state — extracting a module-level singleton would simplify connection management and reduce Bot instantiation overhead
+- [x] `telegram_uploader.py`: `TelegramUploader` is instantiated in two separate places (`_process_job` for upload and `serve_segment` for download) with no shared state — extracting a module-level singleton would simplify connection management and reduce Bot instantiation overhead
 
 ## P6 — UX Improvements
 
-- [ ] `templates/index.html`: Job list doesn't show duration or file size — `renderJobItem` only displays audio/subtitle/segment counts despite the API returning duration and file_size metadata
-- [ ] `templates/index.html`: No visual feedback when delete request is in-flight — user can click delete multiple times; button should show loading state
+- [x] `templates/index.html`: Job list doesn't show duration or file size — `renderJobItem` only displays audio/subtitle/segment counts despite the API returning duration and file_size metadata
+- [x] `templates/index.html`: No visual feedback when delete request is in-flight — user can click delete multiple times; button should show loading state
 
 ## P7 — New Features
