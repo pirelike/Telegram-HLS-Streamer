@@ -57,7 +57,7 @@ def _get_abr_tiers(source_height):
 
     tiers = []
     for tier in Config.ABR_TIERS:
-        if tier["height"] < source_height:
+        if tier["height"] <= source_height:
             tiers.append(tier)
     return tiers
 

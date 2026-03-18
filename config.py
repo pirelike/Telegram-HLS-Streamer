@@ -28,7 +28,6 @@ class Config:
     # Adaptive Bitrate Streaming
     ABR_ENABLED = os.getenv("ABR_ENABLED", "true").lower() == "true"
     ABR_TIERS = [
-        {"height": 2160, "bitrate": "20M"},
         {"height": 1080, "bitrate": "10M"},
         {"height": 720, "bitrate": "5M"},
         {"height": 480, "bitrate": "2M"},
