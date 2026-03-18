@@ -27,9 +27,9 @@
 
 ## P4 — Security Hardening
 
-- [ ] **`app.py`** — Restrict CORS policy → wildcard `Access-Control-Allow-Origin: *` on segment endpoints
-- [ ] **`app.py`** — Add optional API key / basic auth to upload endpoints → currently fully public
-- [ ] **`config.py`** — Validate channel IDs are negative integers on startup
+- [x] **`app.py`** — Restrict CORS policy → wildcard `Access-Control-Allow-Origin: *` on segment endpoints
+- [x] **`app.py`** — Add optional API key / basic auth to upload endpoints → currently fully public
+- [x] **`config.py`** — Validate channel IDs are negative integers on startup
 
 ## P5 — Maintainability
 

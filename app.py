@@ -9,6 +9,7 @@ Web server that handles:
 """
 
 import asyncio
+import base64
 import logging
 import os
 import time
@@ -58,6 +59,50 @@ def _get_base_url():
     else:
         scheme = request.scheme
     return f"{scheme}://{request.host}"
+
+
+def _is_origin_allowed(origin: str) -> bool:
+    """Check whether CORS origin is allowed."""
+    if not origin:
+        return False
+    return origin in Config.CORS_ALLOWED_ORIGINS
+
+
+def _is_upload_authorized():
+    """Validate optional API key / basic auth for upload APIs."""
+    if not (Config.UPLOAD_API_KEY or Config.UPLOAD_BASIC_USER):
+        return True
+
+    if Config.UPLOAD_API_KEY:
+        api_key = request.headers.get("X-API-Key", "").strip()
+        if api_key and api_key == Config.UPLOAD_API_KEY:
+            return True
+
+    if Config.UPLOAD_BASIC_USER:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            b64 = auth_header.split(" ", 1)[1]
+            try:
+                decoded = base64.b64decode(b64).decode("utf-8")
+                username, password = decoded.split(":", 1)
+            except Exception:
+                return False
+            if (
+                username == Config.UPLOAD_BASIC_USER
+                and password == Config.UPLOAD_BASIC_PASSWORD
+            ):
+                return True
+
+    return False
+
+
+def _require_upload_auth():
+    """Return auth response tuple if unauthorized, otherwise None."""
+    if request.method == "OPTIONS":
+        return None
+    if _is_upload_authorized():
+        return None
+    return jsonify({"error": "Unauthorized"}), 401
 
 
 def _cleanup_expired_pending_uploads(force=False):
@@ -152,6 +197,9 @@ def index():
 @app.route("/api/upload/init", methods=["POST"])
 def upload_init():
     """Initialize a chunked upload session."""
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
     _cleanup_expired_pending_uploads()
     data = request.get_json()
     if not data or "filename" not in data or "total_size" not in data:
@@ -217,6 +265,9 @@ def upload_chunk():
       X-Chunk-Index: 0-based chunk number
     Body: raw binary chunk data
     """
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
     _cleanup_expired_pending_uploads()
     upload_id = request.headers.get("X-Upload-Id")
     chunk_index = request.headers.get("X-Chunk-Index")
@@ -257,6 +308,9 @@ def upload_chunk():
 @app.route("/api/upload/finalize", methods=["POST"])
 def upload_finalize():
     """Finalize a chunked upload and start processing."""
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
     _cleanup_expired_pending_uploads()
     data = request.get_json()
     upload_id = data.get("upload_id") if data else None
@@ -297,6 +351,9 @@ def upload_finalize():
 @app.route("/api/upload/status/<upload_id>")
 def upload_status(upload_id):
     """Check how many chunks have been received for a pending upload."""
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
     _cleanup_expired_pending_uploads()
     if upload_id not in _pending_uploads:
         return jsonify({"error": "Unknown upload_id"}), 404
@@ -454,14 +511,14 @@ def serve_segment(job_id, segment_key):
     uploader = TelegramUploader()
     loop = asyncio.new_event_loop()
     try:
-        file_url = loop.run_until_complete(
-            uploader.get_file_url(file_id, bot_index)
+        segment_bytes = loop.run_until_complete(
+            uploader.get_file_bytes(file_id, bot_index)
         )
     finally:
         loop.close()
 
-    if not file_url:
-        return jsonify({"error": "Could not get file URL"}), 500
+    if not segment_bytes:
+        return jsonify({"error": "Could not download segment from Telegram"}), 500
 
     if segment_key.endswith(".vtt"):
         content_type = "text/vtt"
@@ -470,28 +527,11 @@ def serve_segment(job_id, segment_key):
     else:
         content_type = "application/octet-stream"
 
-    def stream_from_telegram():
-        import urllib.request
-        try:
-            with urllib.request.urlopen(file_url) as resp:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    yield chunk
-        except Exception as e:
-            logger.error(
-                "Segment stream failed for job=%s segment=%s: %s",
-                job_id, segment_key, e,
-            )
-            raise
-
     return Response(
-        stream_from_telegram(),
+        bytes(segment_bytes),
         content_type=content_type,
         headers={
             "Cache-Control": "public, max-age=86400",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -501,10 +541,13 @@ def serve_segment(job_id, segment_key):
 @app.after_request
 def add_cors(response):
     if request.path.startswith(("/hls/", "/segment/", "/api/")):
-        response.headers["Access-Control-Allow-Origin"] = "*"
+        origin = request.headers.get("Origin", "")
+        if _is_origin_allowed(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = (
-            "Content-Type, X-Upload-Id, X-Chunk-Index"
+            "Content-Type, Authorization, X-API-Key, X-Upload-Id, X-Chunk-Index"
         )
     return response
 
