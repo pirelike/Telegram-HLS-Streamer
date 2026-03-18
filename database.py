@@ -10,6 +10,7 @@ Schema:
   segments   - One row per uploaded segment (maps segment_key -> Telegram file_id)
 """
 
+import atexit
 import logging
 import os
 import sqlite3
@@ -24,6 +25,9 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "streamer.db")
 
 # Thread-local connections for SQLite (which doesn't allow sharing across threads)
 _local = threading.local()
+# Track all opened connections so they can be closed on shutdown
+_all_connections = []
+_all_connections_lock = threading.Lock()
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -32,7 +36,43 @@ def _get_conn() -> sqlite3.Connection:
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
         _local.conn.execute("PRAGMA foreign_keys=ON")
+        with _all_connections_lock:
+            _all_connections.append(_local.conn)
     return _local.conn
+
+
+def close_conn():
+    """Explicitly close the current thread's database connection.
+
+    Call this when a worker thread is about to terminate to ensure the
+    SQLite connection is properly released.
+    """
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _local.conn = None
+        with _all_connections_lock:
+            try:
+                _all_connections.remove(conn)
+            except ValueError:
+                pass
+
+
+def _close_all_connections():
+    """Close all tracked database connections (called at interpreter shutdown)."""
+    with _all_connections_lock:
+        for conn in _all_connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _all_connections.clear()
+
+
+atexit.register(_close_all_connections)
 
 
 def init_db():

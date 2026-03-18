@@ -48,6 +48,7 @@ _active_jobs = {}
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
 _pending_filenames = {}  # filename -> upload_id (for O(1) duplicate check)
+_pending_uploads_lock = Lock()  # protects _pending_uploads, _pending_filenames, _upload_locks
 _upload_locks = {}
 _last_pending_cleanup = 0.0
 _watcher_started = False
@@ -143,24 +144,32 @@ def _cleanup_expired_pending_uploads(force=False):
 
     ttl = Config.PENDING_UPLOAD_TTL_SECONDS
     expired_ids = []
-    for upload_id, info in _pending_uploads.items():
-        last_activity = info.get("last_activity_ts", info.get("created_ts", now))
-        if now - last_activity > ttl:
-            expired_ids.append(upload_id)
+    paths_to_remove = []
 
-    for upload_id in expired_ids:
-        info = _pending_uploads.pop(upload_id, None)
-        if not info:
-            continue
-        _pending_filenames.pop(info.get("filename"), None)
-        _upload_locks.pop(upload_id, None)
-        path = info.get("path")
-        if path and os.path.exists(path):
+    with _pending_uploads_lock:
+        for upload_id, info in list(_pending_uploads.items()):
+            last_activity = info.get("last_activity_ts", info.get("created_ts", now))
+            if now - last_activity > ttl:
+                expired_ids.append(upload_id)
+
+        for upload_id in expired_ids:
+            info = _pending_uploads.pop(upload_id, None)
+            if not info:
+                continue
+            _pending_filenames.pop(info.get("filename"), None)
+            _upload_locks.pop(upload_id, None)
+            path = info.get("path")
+            if path:
+                paths_to_remove.append((upload_id, info.get("filename"), path))
+
+    # Remove files outside the lock to avoid holding it during I/O
+    for upload_id, filename, path in paths_to_remove:
+        if os.path.exists(path):
             try:
                 os.remove(path)
             except OSError:
                 logger.warning("Could not remove expired pending upload file: %s", path)
-        logger.info("Cleaned expired pending upload: %s (%s)", upload_id, info.get("filename"))
+        logger.info("Cleaned expired pending upload: %s (%s)", upload_id, filename)
 
     _last_pending_cleanup = now
 
@@ -325,6 +334,10 @@ def delete_job_endpoint(job_id):
     return jsonify({"message": "Job deleted"})
 
 
+# Shared TelegramUploader singleton — avoids creating fresh Bot objects on every
+# segment proxy request or processing job.
+_telegram_uploader = TelegramUploader()
+
 _start_timeout_watcher()
 _start_queue_workers()
 _start_retention_cleanup()
@@ -377,12 +390,13 @@ def upload_init():
         }), 413
 
     # Reject if there's already a pending upload for this filename
-    if filename in _pending_filenames:
-        uid = _pending_filenames[filename]
-        return jsonify({
-            "error": "An upload for this file is already in progress",
-            "upload_id": uid,
-        }), 409
+    with _pending_uploads_lock:
+        if filename in _pending_filenames:
+            uid = _pending_filenames[filename]
+            return jsonify({
+                "error": "An upload for this file is already in progress",
+                "upload_id": uid,
+            }), 409
 
     upload_id = uuid.uuid4().hex[:16]
     upload_path = os.path.join(Config.UPLOAD_DIR, f"{upload_id}_{filename}")
@@ -397,19 +411,20 @@ def upload_init():
         logger.error("Failed to create upload file %s: %s", upload_path, e)
         return jsonify({"error": "Failed to create upload file on server"}), 500
 
-    _pending_uploads[upload_id] = {
-        "path": upload_path,
-        "filename": filename,
-        "total_size": total_size,
-        "total_chunks": total_chunks,
-        "received_bytes": 0,
-        "received_chunks": 0,
-        "received_chunk_indices": set(),
-        "created_ts": time.time(),
-        "last_activity_ts": time.time(),
-    }
-    _pending_filenames[filename] = upload_id
-    _upload_locks[upload_id] = Lock()
+    with _pending_uploads_lock:
+        _pending_uploads[upload_id] = {
+            "path": upload_path,
+            "filename": filename,
+            "total_size": total_size,
+            "total_chunks": total_chunks,
+            "received_bytes": 0,
+            "received_chunks": 0,
+            "received_chunk_indices": set(),
+            "created_ts": time.time(),
+            "last_activity_ts": time.time(),
+        }
+        _pending_filenames[filename] = upload_id
+        _upload_locks[upload_id] = Lock()
 
     logger.info(
         "Upload initialized: %s, file=%s, size=%d bytes (%d chunks)",
@@ -521,12 +536,13 @@ def upload_finalize():
     data = request.get_json()
     upload_id = data.get("upload_id") if data else None
 
-    if not upload_id or upload_id not in _pending_uploads:
-        return jsonify({"error": "Unknown upload_id"}), 404
+    with _pending_uploads_lock:
+        if not upload_id or upload_id not in _pending_uploads:
+            return jsonify({"error": "Unknown upload_id"}), 404
 
-    upload = _pending_uploads.pop(upload_id)
-    _pending_filenames.pop(upload["filename"], None)
-    _upload_locks.pop(upload_id, None)
+        upload = _pending_uploads.pop(upload_id)
+        _pending_filenames.pop(upload["filename"], None)
+        _upload_locks.pop(upload_id, None)
     file_path = upload["path"]
     filename = upload["filename"]
 
@@ -619,9 +635,8 @@ def _process_job(job_id, file_path):
                 _active_jobs[job_id]["upload_current"] = current
                 _active_jobs[job_id]["upload_total"] = total
 
-        uploader = TelegramUploader()
         upload_result = _run_async(
-            uploader.upload_job(result, progress_callback=on_upload_progress)
+            _telegram_uploader.upload_job(result, progress_callback=on_upload_progress)
         )
         if _is_job_cancelled(job_id):
             return
@@ -785,8 +800,7 @@ def serve_segment(job_id, segment_key):
     file_id = info["file_id"]
     bot_index = info["bot_index"]
 
-    uploader = TelegramUploader()
-    segment_bytes = _run_async(uploader.get_file_bytes(file_id, bot_index))
+    segment_bytes = _run_async(_telegram_uploader.get_file_bytes(file_id, bot_index))
 
     if not segment_bytes:
         return jsonify({"error": "Could not download segment from Telegram"}), 500
