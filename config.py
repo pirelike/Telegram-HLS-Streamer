@@ -35,6 +35,16 @@ class Config:
     PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS = int(
         os.getenv("PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS", "300")
     )
+    CORS_ALLOWED_ORIGINS = [
+        origin.strip()
+        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+
+    # Optional auth for upload endpoints
+    UPLOAD_API_KEY = os.getenv("UPLOAD_API_KEY", "").strip()
+    UPLOAD_BASIC_USER = os.getenv("UPLOAD_BASIC_USER", "").strip()
+    UPLOAD_BASIC_PASSWORD = os.getenv("UPLOAD_BASIC_PASSWORD", "").strip()
 
     # Telegram bots
     BOTS = []
@@ -47,7 +57,17 @@ class Config:
             token = os.getenv(f"TELEGRAM_BOT_TOKEN_{i}")
             channel = os.getenv(f"TELEGRAM_CHANNEL_ID_{i}")
             if token and channel and not token.startswith("your_"):
-                cls.BOTS.append({"token": token, "channel_id": int(channel)})
+                try:
+                    channel_id = int(channel)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid TELEGRAM_CHANNEL_ID_{i}: expected integer, got {channel!r}"
+                    ) from exc
+                if channel_id >= 0:
+                    raise ValueError(
+                        f"Invalid TELEGRAM_CHANNEL_ID_{i}: expected negative integer, got {channel_id}"
+                    )
+                cls.BOTS.append({"token": token, "channel_id": channel_id})
         return cls.BOTS
 
 

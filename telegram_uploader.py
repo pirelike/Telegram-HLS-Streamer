@@ -244,3 +244,14 @@ class TelegramUploader:
         bot = self.bots[bot_index]["bot"]
         file = await bot.get_file(file_id)
         return file.file_path
+
+    async def get_file_bytes(self, file_id, bot_index):
+        """Download bytes for a file using the same bot that uploaded it."""
+        if bot_index < 0 or bot_index >= len(self.bots):
+            raise RuntimeError(
+                f"Bot index {bot_index} out of range (only {len(self.bots)} bots configured). "
+                f"The segment was uploaded by a bot that is no longer available."
+            )
+        bot = self.bots[bot_index]["bot"]
+        file = await bot.get_file(file_id)
+        return await file.download_as_bytearray()
