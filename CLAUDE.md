@@ -63,7 +63,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 4. `video_processor.py` runs FFmpeg:
    - Video tier 0 → lossless copy of source as HLS `.ts` segments
    - Video tiers 1–N → re-encoded at lower resolutions (1080p, 720p, 480p, 360p as applicable)
-   - Each audio track → separate HLS stream (always lossless copy)
+   - Each audio track → separate HLS stream (lossless copy when compatible, otherwise AAC re-encode)
    - Each subtitle track → WebVTT `.vtt` file
 5. `telegram_uploader.py` uploads all output files across bots (round-robin), with retry/backoff
 6. `hls_manager.py` writes master `.m3u8` and per-stream playlists, persists to SQLite
@@ -107,7 +107,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - `process(analysis, job_id, progress_callback)` → `ProcessingResult`
 - `_detect_hw_encoder()` probes for VAAPI, NVENC, QSV in that order; falls back to libx264
 - Adaptive bitrate: tier 0 is always a lossless copy of the source; additional tiers re-encode at lower resolutions (1080p, 720p, 480p, 360p) — only tiers ≤ source height are produced
-- Audio is always copied losslessly (never re-encoded)
+- Audio is copied losslessly when `ENABLE_COPY_MODE` is true and the codec is HLS-compatible; otherwise re-encoded to AAC at `AUDIO_BITRATE` (default 128k)
 - `_run_ffmpeg_with_progress()` reports within-step FFmpeg progress via `-progress pipe:1`
 - Separate FFmpeg invocations for each video tier, each audio track, each subtitle track
 - `cleanup(job_id)` removes the `processing/<job_id>/` directory

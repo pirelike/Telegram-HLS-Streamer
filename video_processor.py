@@ -139,11 +139,10 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
             audio_index, audio_stream.language, audio_stream.codec_name,
         )
     else:
-        audio_bitrate = getattr(Config, "AUDIO_BITRATE", "128k")
-        cmd += ["-c:a", "aac", "-b:a", audio_bitrate]
+        cmd += ["-c:a", "aac", "-b:a", Config.AUDIO_BITRATE]
         logger.info(
             "Audio track %d (%s): AAC encode at %s",
-            audio_index, audio_stream.language, audio_bitrate,
+            audio_index, audio_stream.language, Config.AUDIO_BITRATE,
         )
 
     cmd += [
@@ -254,26 +253,16 @@ class ProcessingResult:
 
     @property
     def video_playlist(self):
-        """Backward-compatible: return the first video playlist path or None."""
+        """Return the first video playlist path or None."""
         if self.video_playlists:
             return self.video_playlists[0][0]
-        if hasattr(self, "_legacy_video_playlist"):
-            return self._legacy_video_playlist
         return None
-
-    @video_playlist.setter
-    def video_playlist(self, playlist_path):
-        """Backward-compatible setter for tests/legacy callers."""
-        self._legacy_video_playlist = playlist_path
 
     def all_segment_dirs(self):
         """Return all directories containing segments to upload."""
         dirs = []
-        if self.video_playlists:
-            for _, tier_dir, _, _, _ in self.video_playlists:
-                dirs.append(tier_dir)
-        elif self.video_playlist:
-            dirs.append(self.output_dir)
+        for _, tier_dir, _, _, _ in self.video_playlists:
+            dirs.append(tier_dir)
         for _, audio_dir, _, _, _ in self.audio_playlists:
             dirs.append(audio_dir)
         for _, sub_dir, _, _ in self.subtitle_files:
