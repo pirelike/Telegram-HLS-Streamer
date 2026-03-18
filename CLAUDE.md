@@ -61,8 +61,9 @@ HLS playback: /hls/<job_id>/master.m3u8
 2. All chunks assembled and verified on server
 3. `stream_analyzer.py` runs FFprobe to enumerate all streams
 4. `video_processor.py` runs FFmpeg:
-   - Video → H.264/HEVC HLS `.ts` segments (hardware-accelerated if available)
-   - Each audio track → separate HLS stream
+   - Video tier 0 → lossless copy of source as HLS `.ts` segments
+   - Video tiers 1–N → re-encoded at lower resolutions (1080p, 720p, 480p, 360p as applicable)
+   - Each audio track → separate HLS stream (always lossless copy)
    - Each subtitle track → WebVTT `.vtt` file
 5. `telegram_uploader.py` uploads all output files across bots (round-robin), with retry/backoff
 6. `hls_manager.py` writes master `.m3u8` and per-stream playlists, persists to SQLite
@@ -76,22 +77,25 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Flask app and all route handlers
 - Chunked resumable upload: `/api/upload/init`, `/api/upload/chunk`, `/api/upload/finalize`
 - Job status polling: `/api/status/<job_id>`
-- HLS serving: `/hls/<job_id>/master.m3u8`, media playlists
+- HLS serving: `/hls/<job_id>/master.m3u8`, `/hls/<job_id>/video_<N>.m3u8`, audio/subtitle playlists
 - Segment proxy: `/segment/<job_id>/<segment_key>` — fetches TS/VTT from Telegram
 - CORS headers on HLS endpoints (required for cross-origin HLS playback)
 - Spawns a background thread per job for the full pipeline
 
 ### `config.py`
 - All settings loaded from environment variables (via `python-dotenv`)
-- Key settings: `MAX_UPLOAD_SIZE` (100 GB), `CHUNK_SIZE` (10 MB), `TELEGRAM_SEGMENT_SIZE` (20 MB), `HLS_SEGMENT_DURATION` (4 s)
+- Key settings: `MAX_UPLOAD_SIZE` (100 GB), `UPLOAD_CHUNK_SIZE` (10 MB), `TELEGRAM_MAX_FILE_SIZE` (20 MB), `HLS_SEGMENT_DURATION` (4 s)
+- ABR settings: `ABR_ENABLED` (default true), `ABR_TIERS` defines re-encoded quality tiers (1080p/10M, 720p/5M, 480p/2M, 360p/1.2M)
 - Dynamically reads up to 8 bot tokens (`TELEGRAM_BOT_TOKEN_1`…`TELEGRAM_BOT_TOKEN_8`) and channel IDs (`TELEGRAM_CHANNEL_ID_1`…`TELEGRAM_CHANNEL_ID_8`)
 - Creates `uploads/` and `processing/` directories on import
 
 ### `database.py`
 - SQLite via standard `sqlite3`, thread-safe with connection pooling
 - Tables: `jobs`, `tracks`, `segments`
+- `tracks` stores video tiers (with width, height, bitrate), audio tracks, and subtitle tracks
 - `segments` stores `(job_id, segment_key, file_id, bot_index)` — maps HLS keys to Telegram file_ids
 - Indexed for fast lookup; cascade delete on job removal
+- Auto-migrates schema on startup (adds new columns if missing)
 
 ### `stream_analyzer.py`
 - Runs `ffprobe -v quiet -print_format json -show_streams`
@@ -100,10 +104,12 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Filters out album art streams (codec_name == "mjpeg", disposition attached_pic)
 
 ### `video_processor.py`
-- `process(input_path, job_id, analysis, config)` → `ProcessingResult`
+- `process(analysis, job_id, progress_callback)` → `ProcessingResult`
 - `_detect_hw_encoder()` probes for VAAPI, NVENC, QSV in that order; falls back to libx264
-- Copy mode: if `is_copy_compatible`, uses `-c copy` (lossless, fast)
-- Separate FFmpeg invocations for video, each audio track, each subtitle track
+- Adaptive bitrate: tier 0 is always a lossless copy of the source; additional tiers re-encode at lower resolutions (1080p, 720p, 480p, 360p) — only tiers ≤ source height are produced
+- Audio is always copied losslessly (never re-encoded)
+- `_run_ffmpeg_with_progress()` reports within-step FFmpeg progress via `-progress pipe:1`
+- Separate FFmpeg invocations for each video tier, each audio track, each subtitle track
 - `cleanup(job_id)` removes the `processing/<job_id>/` directory
 
 ### `telegram_uploader.py`
@@ -114,10 +120,11 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Async throughout (asyncio + aiohttp)
 
 ### `hls_manager.py`
-- `generate_master_playlist(job_id, result, analysis, db)` → master M3U8 string
-- Audio groups and subtitle groups referenced by name in master playlist
-- Bandwidth estimated from file size and duration
-- `generate_media_playlist(job_id, track_key, db)` → per-stream M3U8
+- `generate_master_playlist(job_id, base_url)` → master M3U8 string
+- Multi-variant ABR: `#EXT-X-MEDIA:TYPE=VIDEO` entries with named tiers — tier 0 labeled "Original (1080p)" / "Original (4K)", lower tiers labeled "1080p", "720p", etc.
+- Audio and subtitle groups referenced by name via `#EXT-X-MEDIA`
+- `generate_media_playlist(job_id, stream_type, stream_index)` → per-stream M3U8
+- Legacy support for single-stream jobs without video tracks in DB
 
 ### `templates/index.html`
 - Single-page UI, dark theme, no JavaScript framework
@@ -154,6 +161,9 @@ HLS_SEGMENT_DURATION=4
 ENABLE_HARDWARE_ACCELERATION=true
 PREFERRED_ENCODER=vaapi        # vaapi | nvenc | qsv
 VIDEO_BITRATE=4M
+
+# Adaptive Bitrate
+ABR_ENABLED=true               # lossless copy + re-encoded tiers
 ```
 
 ---
@@ -202,8 +212,10 @@ There is currently no automated test suite. When making changes, manually verify
 
 ### HLS
 - Segment URLs in playlists point to `/segment/<job_id>/<segment_key>` (proxied, never direct Telegram URLs)
-- Master playlist must correctly define `#EXT-X-MEDIA` groups for audio and subtitles before `#EXT-X-STREAM-INF` entries
-- WebVTT subtitles use `#EXT-X-TARGETDURATION:0` and single-segment playlists
+- Master playlist defines `#EXT-X-MEDIA` groups for video (named quality tiers), audio, and subtitles before `#EXT-X-STREAM-INF` entries
+- Video tiers use `#EXT-X-MEDIA:TYPE=VIDEO` with `NAME` attributes (e.g. "Original (4K)", "1080p") so players can distinguish lossless from re-encoded
+- Per-tier video playlists served at `/hls/<job_id>/video_<index>.m3u8`
+- WebVTT subtitles use single-segment playlists with duration-based `#EXT-X-TARGETDURATION`
 
 ### Telegram Bots
 - Always respect rate limits — the uploader has built-in backoff, do not remove it
