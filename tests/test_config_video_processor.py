@@ -18,7 +18,7 @@ class TestConfig(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "TELEGRAM_BOT_TOKEN_1": "token1",
+                "TELEGRAM_BOT_TOKEN_1": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
                 "TELEGRAM_CHANNEL_ID_1": "-1001",
                 "TELEGRAM_BOT_TOKEN_2": "your_token",
                 "TELEGRAM_CHANNEL_ID_2": "-1002",
@@ -32,7 +32,7 @@ class TestConfig(unittest.TestCase):
     def test_load_bots_invalid_channel_type(self):
         with patch.dict(
             os.environ,
-            {"TELEGRAM_BOT_TOKEN_1": "token1", "TELEGRAM_CHANNEL_ID_1": "abc"},
+            {"TELEGRAM_BOT_TOKEN_1": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi", "TELEGRAM_CHANNEL_ID_1": "abc"},
             clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "expected integer"):
@@ -41,7 +41,7 @@ class TestConfig(unittest.TestCase):
     def test_load_bots_requires_negative_channel_id(self):
         with patch.dict(
             os.environ,
-            {"TELEGRAM_BOT_TOKEN_1": "token1", "TELEGRAM_CHANNEL_ID_1": "100"},
+            {"TELEGRAM_BOT_TOKEN_1": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi", "TELEGRAM_CHANNEL_ID_1": "100"},
             clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "expected negative integer"):

@@ -24,6 +24,7 @@ class TestP0TodoFixes(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         app_module._pending_uploads.clear()
+        app_module._pending_filenames.clear()
         app_module._active_jobs.clear()
         self.upload_dir_patch = patch.object(app_module.Config, "UPLOAD_DIR", self.temp.name)
         self.chunk_size_patch = patch.object(app_module.Config, "UPLOAD_CHUNK_SIZE", 4)

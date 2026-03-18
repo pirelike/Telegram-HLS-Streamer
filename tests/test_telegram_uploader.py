@@ -198,17 +198,17 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         fake_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"x"))
         self.bot_instances[0].get_file = AsyncMock(return_value=fake_file)
 
-        url = await self.uploader.get_file_url("id", 0)
+        url = await self.uploader.get_file_url("A" * 50, 0)
         self.assertEqual(url, "http://file")
 
-        data = await self.uploader.get_file_bytes("id", 0)
+        data = await self.uploader.get_file_bytes("A" * 50, 0)
         self.assertEqual(bytes(data), b"x")
 
         with self.assertRaisesRegex(RuntimeError, "out of range"):
-            await self.uploader.get_file_url("id", 99)
+            await self.uploader.get_file_url("A" * 50, 99)
 
         with self.assertRaisesRegex(RuntimeError, "out of range"):
-            await self.uploader.get_file_bytes("id", -1)
+            await self.uploader.get_file_bytes("A" * 50, -1)
 
 
 if __name__ == "__main__":

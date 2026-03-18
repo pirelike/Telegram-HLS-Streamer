@@ -175,7 +175,7 @@
     // ── localStorage helpers for resume ──────────────────────────────────────
     function savePendingUpload(uploadId, filename, fileSize, totalChunks, nextChunk) {
         localStorage.setItem(PENDING_UPLOAD_KEY, JSON.stringify(
-            {uploadId, filename, fileSize, totalChunks, nextChunk}
+            {uploadId, filename, fileSize, totalChunks, nextChunk, timestamp: Date.now()}
         ));
     }
 
@@ -448,11 +448,13 @@
 
     // ── Job list with pagination ───────────────────────────────────────────────
     function loadJobs() {
+        const container = document.getElementById('jobsList');
+        container.innerHTML = '<p style="color:#8b949e;">Loading...</p>';
+
         fetch(`/api/jobs?page=1&limit=${JOBS_PER_PAGE}`)
             .then(r => r.json())
             .then(data => {
                 jobsPage = 1;
-                const container = document.getElementById('jobsList');
                 const jobs = data.jobs || {};
                 const ids = Object.keys(jobs);
                 if (ids.length === 0) {
@@ -469,7 +471,7 @@
                 }
             })
             .catch(() => {
-                document.getElementById('jobsList').innerHTML = '<p style="color:#8b949e;">Could not load jobs.</p>';
+                container.innerHTML = '<p style="color:#8b949e;">Could not load jobs.</p>';
             });
     }
 
@@ -508,12 +510,18 @@
     (function checkResume() {
         const pending = getPendingUpload();
         if (!pending) return;
+
+        const age = Math.round((Date.now() - (pending.timestamp || Date.now())) / 1000);
+        let ageStr = age < 60 ? 'just now' : `${Math.round(age / 60)}m ago`;
+        if (age > 3600) ageStr = `${Math.round(age / 3600)}h ago`;
+        if (age > 86400) ageStr = `${Math.round(age / 86400)}d ago`;
+
         const pct = pending.totalChunks > 0
             ? Math.round(pending.nextChunk / pending.totalChunks * 100)
             : 0;
         resumeBannerText.textContent =
             `Incomplete upload: "${pending.filename}" (${pending.nextChunk}/${pending.totalChunks} chunks, ~${pct}%). ` +
-            'Re-select the same file to resume.';
+            `Last activity: ${ageStr}. Re-select the same file to resume.`;
         resumeBanner.classList.add('active');
     })();
 

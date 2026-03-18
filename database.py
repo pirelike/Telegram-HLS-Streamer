@@ -202,6 +202,7 @@ def get_segment(job_id, segment_key):
         (job_id, segment_key),
     ).fetchone()
     if not row:
+        logger.warning("Segment not found: job_id=%s, segment_key=%s", job_id, segment_key)
         return None
     return {"file_id": row["file_id"], "bot_index": row["bot_index"]}
 
@@ -224,15 +225,14 @@ def list_jobs(limit=50, offset=0):
         offset: Number of jobs to skip (for pagination).
     """
     conn = _get_conn()
+    # Use subqueries instead of JOIN + GROUP BY to avoid Cartesian product
+    # before limiting, which is much faster with many segments per job.
     rows = conn.execute("""
         SELECT j.*,
-               COUNT(DISTINCT CASE WHEN t.track_type = 'audio' THEN t.id END) as audio_count,
-               COUNT(DISTINCT CASE WHEN t.track_type = 'subtitle' THEN t.id END) as subtitle_count,
-               COUNT(DISTINCT s.id) as segment_count
+               (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'audio') as audio_count,
+               (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'subtitle') as subtitle_count,
+               (SELECT COUNT(*) FROM segments s WHERE s.job_id = j.job_id) as segment_count
         FROM jobs j
-        LEFT JOIN tracks t ON t.job_id = j.job_id
-        LEFT JOIN segments s ON s.job_id = j.job_id
-        GROUP BY j.job_id
         ORDER BY j.created_at DESC
         LIMIT ? OFFSET ?
     """, (limit, offset)).fetchall()

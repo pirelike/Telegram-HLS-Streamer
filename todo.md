@@ -15,34 +15,34 @@
 
 ## P2 — Reliability / Error Handling
 
-- [ ] `app.py`: Event loop leaked on exception — `asyncio.new_event_loop()` not cleaned up if `run_until_complete()` fails (repeated in 3 places: upload + 2 segment proxies)
-- [ ] `app.py`: Race condition in job timeout checker — modifies `_active_jobs` dict concurrently with processing thread
-- [ ] `video_processor.py`: FFmpeg timeout kills process abruptly and truncates stderr to 500 chars — loses error context for debugging
-- [ ] `video_processor.py`: Subtitle extraction failure silently skipped — user sees no indication a subtitle track was lost
-- [ ] `database.py`: `get_segment()` returns None silently — no logging for segment retrieval failures, makes debugging proxy 404s difficult
+- [x] `app.py`: Event loop leaked on exception — `asyncio.new_event_loop()` not cleaned up if `run_until_complete()` fails (repeated in 3 places: upload + 2 segment proxies)
+- [x] `app.py`: Race condition in job timeout checker — modifies `_active_jobs` dict concurrently with processing thread
+- [x] `video_processor.py`: FFmpeg timeout kills process abruptly and truncates stderr to 500 chars — loses error context for debugging
+- [x] `video_processor.py`: Subtitle extraction failure silently skipped — user sees no indication a subtitle track was lost
+- [x] `database.py`: `get_segment()` returns None silently — no logging for segment retrieval failures, makes debugging proxy 404s difficult
 
 ## P3 — Performance
 
-- [ ] `telegram_uploader.py`: Directory listing done twice per segment type — once for counting, once for uploading
-- [ ] `hls_manager.py`: `list_jobs` pagination queries entire result set before applying LIMIT/OFFSET
-- [ ] `app.py`: O(n) linear scan for duplicate filename on each upload init — bottleneck with many concurrent uploads
+- [x] `telegram_uploader.py`: Directory listing done twice per segment type — once for counting, once for uploading
+- [x] `hls_manager.py`: `list_jobs` pagination queries entire result set before applying LIMIT/OFFSET
+- [x] `app.py`: O(n) linear scan for duplicate filename on each upload init — bottleneck with many concurrent uploads
 
 ## P4 — Security Hardening
 
-- [ ] `config.py`: Bot token format not validated beyond checking for `"your_"` prefix — malformed tokens only fail at runtime
-- [ ] `app.py`: CORS_ALLOWED_ORIGINS splitting on empty string produces malformed origin list
-- [ ] `telegram_uploader.py`: No validation of file_id format before sending to Telegram API — corrupted DB entries cause unexpected errors
+- [x] `config.py`: Bot token format not validated beyond checking for `"your_"` prefix — malformed tokens only fail at runtime
+- [x] `app.py`: CORS_ALLOWED_ORIGINS splitting on empty string produces malformed origin list
+- [x] `telegram_uploader.py`: No validation of file_id format before sending to Telegram API — corrupted DB entries cause unexpected errors
 
 ## P5 — Maintainability
 
-- [ ] `app.py`: Event loop creation pattern duplicated 3 times — extract to helper function
-- [ ] `hls_manager.py`: Bitrate parsing logic duplicated — should cache computed bandwidths
+- [x] `app.py`: Event loop creation pattern duplicated 3 times — extract to helper function
+- [x] `hls_manager.py`: Bitrate parsing logic duplicated — should cache computed bandwidths
 
 ## P6 — UX Improvements
 
-- [ ] `app.py`: Timeout error message doesn't indicate which pipeline step timed out (analyzing, encoding, or uploading)
-- [ ] `templates/index.html`: No feedback when job list is empty vs. still loading — should show "No uploads yet"
-- [ ] `templates/index.html`: Resume UI shows chunk number but not how long the upload has been pending
+- [x] `app.py`: Timeout error message doesn't indicate which pipeline step timed out (analyzing, encoding, or uploading)
+- [x] `templates/index.html`: No feedback when job list is empty vs. still loading — should show "No uploads yet"
+- [x] `templates/index.html`: Resume UI shows chunk number but not how long the upload has been pending
 
 ## P7 — New Features
 

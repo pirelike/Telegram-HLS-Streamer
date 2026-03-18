@@ -6,7 +6,9 @@ and subtitle variant streams per the HLS specification (RFC 8216).
 All job/segment data is stored in SQLite via the database module.
 """
 
+import functools
 import logging
+import os
 
 import database as db
 from config import Config
@@ -173,6 +175,7 @@ def _height_to_label(height):
     return f"{height}p"
 
 
+@functools.lru_cache(maxsize=128)
 def _parse_bitrate(bitrate_str):
     """Parse a bitrate string like '5M' or '600k' into bits per second."""
     if not bitrate_str:
@@ -184,7 +187,7 @@ def _parse_bitrate(bitrate_str):
         elif s.endswith("K"):
             return int(float(s[:-1]) * 1_000)
         else:
-            return int(s)
+            return int(float(s))
     except (ValueError, IndexError):
         return 0
 

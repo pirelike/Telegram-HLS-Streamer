@@ -45,6 +45,7 @@ _active_jobs = {}
 
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
+_pending_filenames = {}  # filename -> upload_id (for O(1) duplicate check)
 _upload_locks = {}
 _last_pending_cleanup = 0.0
 _watcher_started = False
@@ -67,7 +68,20 @@ def _is_origin_allowed(origin: str) -> bool:
     """Check whether CORS origin is allowed."""
     if not origin:
         return False
+    if "*" in Config.CORS_ALLOWED_ORIGINS:
+        return True
     return origin in Config.CORS_ALLOWED_ORIGINS
+
+
+def _run_async(coro):
+    """Run an async coroutine synchronously from a Flask thread."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 def _is_upload_authorized():
@@ -125,6 +139,7 @@ def _cleanup_expired_pending_uploads(force=False):
         info = _pending_uploads.pop(upload_id, None)
         if not info:
             continue
+        _pending_filenames.pop(info.get("filename"), None)
         _upload_locks.pop(upload_id, None)
         path = info.get("path")
         if path and os.path.exists(path):
@@ -153,19 +168,21 @@ def _start_timeout_watcher():
     def watch():
         while True:
             time.sleep(5)
-            for job_id, job in _active_jobs.items():
+            # Use list() to avoid dictionary changed size during iteration
+            for job_id, job in list(_active_jobs.items()):
                 status = job.get("status")
                 if status in _TERMINAL_JOB_STATES:
                     continue
                 if _job_timed_out(job):
                     job["status"] = "error"
                     job["timed_out"] = True
+                    step = job.get("step", "processing")
                     job["error"] = (
                         f"Job timed out after {Config.JOB_TIMEOUT_SECONDS} seconds "
-                        "while processing."
+                        f"at step: {step}"
                     )
                     job["step"] = "Timed out"
-                    logger.error("Job %s timed out", job_id)
+                    logger.error("Job %s timed out at %s", job_id, step)
 
     Thread(target=watch, daemon=True).start()
 
@@ -221,12 +238,12 @@ def upload_init():
         }), 413
 
     # Reject if there's already a pending upload for this filename
-    for uid, info in _pending_uploads.items():
-        if info["filename"] == filename:
-            return jsonify({
-                "error": "An upload for this file is already in progress",
-                "upload_id": uid,
-            }), 409
+    if filename in _pending_filenames:
+        uid = _pending_filenames[filename]
+        return jsonify({
+            "error": "An upload for this file is already in progress",
+            "upload_id": uid,
+        }), 409
 
     upload_id = uuid.uuid4().hex[:16]
     upload_path = os.path.join(Config.UPLOAD_DIR, f"{upload_id}_{filename}")
@@ -249,6 +266,7 @@ def upload_init():
         "created_ts": time.time(),
         "last_activity_ts": time.time(),
     }
+    _pending_filenames[filename] = upload_id
     _upload_locks[upload_id] = Lock()
 
     logger.info(
@@ -358,6 +376,7 @@ def upload_finalize():
         return jsonify({"error": "Unknown upload_id"}), 404
 
     upload = _pending_uploads.pop(upload_id)
+    _pending_filenames.pop(upload["filename"], None)
     _upload_locks.pop(upload_id, None)
     file_path = upload["path"]
     filename = upload["filename"]
@@ -444,14 +463,9 @@ def _process_job(job_id, file_path):
             _active_jobs[job_id]["step"] = f"Uploading {name}"
 
         uploader = TelegramUploader()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            upload_result = loop.run_until_complete(
-                uploader.upload_job(result, progress_callback=on_upload_progress)
-            )
-        finally:
-            loop.close()
+        upload_result = _run_async(
+            uploader.upload_job(result, progress_callback=on_upload_progress)
+        )
         if _is_job_cancelled(job_id):
             return
 
@@ -576,13 +590,7 @@ def serve_segment(job_id, segment_key):
     bot_index = info["bot_index"]
 
     uploader = TelegramUploader()
-    loop = asyncio.new_event_loop()
-    try:
-        segment_bytes = loop.run_until_complete(
-            uploader.get_file_bytes(file_id, bot_index)
-        )
-    finally:
-        loop.close()
+    segment_bytes = _run_async(uploader.get_file_bytes(file_id, bot_index))
 
     if not segment_bytes:
         return jsonify({"error": "Could not download segment from Telegram"}), 500

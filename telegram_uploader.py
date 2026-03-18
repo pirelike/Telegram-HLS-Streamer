@@ -7,6 +7,7 @@ storing file_ids for later retrieval during streaming.
 import asyncio
 import logging
 import os
+import re
 import time
 
 from telegram import Bot
@@ -185,19 +186,37 @@ class TelegramUploader:
         total_files = 0
         uploaded_files = 0
 
-        # Count total files
-        for _, tier_dir, _, _, _ in processing_result.video_playlists:
-            total_files += len([
-                f for f in os.listdir(tier_dir)
-                if f.endswith(".ts")
-            ])
-        for _, audio_dir, _, _, _ in processing_result.audio_playlists:
-            total_files += len([
-                f for f in os.listdir(audio_dir)
-                if f.endswith(".ts")
-            ])
-        for vtt_path, _, _, _ in processing_result.subtitle_files:
-            total_files += 1
+        # Collect all files to upload first to avoid double listdir()
+        # and to get accurate total count
+        all_upload_tasks = []
+
+        # 1. Video files
+        for i, (_, tier_dir, _, _, _) in enumerate(processing_result.video_playlists):
+            video_files = [
+                (f"video_{i}/{filename}", os.path.join(tier_dir, filename))
+                for filename in sorted(os.listdir(tier_dir))
+                if filename.endswith(".ts")
+            ]
+            all_upload_tasks.append(("video", video_files))
+            total_files += len(video_files)
+
+        # 2. Audio files
+        for i, (_, audio_dir, _, _, _) in enumerate(processing_result.audio_playlists):
+            audio_files = [
+                (f"audio_{i}/{filename}", os.path.join(audio_dir, filename))
+                for filename in sorted(os.listdir(audio_dir))
+                if filename.endswith(".ts")
+            ]
+            all_upload_tasks.append(("audio", audio_files))
+            total_files += len(audio_files)
+
+        # 3. Subtitle files
+        subtitle_files = [
+            (f"sub_{i}/subtitles.vtt", vtt_path)
+            for i, (vtt_path, _, _, _) in enumerate(processing_result.subtitle_files)
+        ]
+        all_upload_tasks.append(("sub", subtitle_files))
+        total_files += len(subtitle_files)
 
         def on_segment(current, total, name):
             nonlocal uploaded_files
@@ -205,33 +224,12 @@ class TelegramUploader:
             if progress_callback:
                 progress_callback(uploaded_files, total_files, name)
 
-        # Upload video segments (each ABR tier separately)
-        for i, (_, tier_dir, _, _, _) in enumerate(processing_result.video_playlists):
-            video_files = [
-                (f"video_{i}/{filename}", os.path.join(tier_dir, filename))
-                for filename in sorted(os.listdir(tier_dir))
-                if filename.endswith(".ts")
-            ]
-            video_segments = await self.upload_files(video_files, on_segment)
-            result.segments.update(video_segments)
-
-        # Upload audio track segments
-        for i, (_, audio_dir, lang, title, _) in enumerate(processing_result.audio_playlists):
-            audio_files = [
-                (f"audio_{i}/{filename}", os.path.join(audio_dir, filename))
-                for filename in sorted(os.listdir(audio_dir))
-                if filename.endswith(".ts")
-            ]
-            audio_segments = await self.upload_files(audio_files, on_segment)
-            result.segments.update(audio_segments)
-
-        # Upload subtitle files
-        subtitle_files = [
-            (f"sub_{i}/subtitles.vtt", vtt_path)
-            for i, (vtt_path, _, _, _) in enumerate(processing_result.subtitle_files)
-        ]
-        subtitle_segments = await self.upload_files(subtitle_files, on_segment)
-        result.segments.update(subtitle_segments)
+        # Execute uploads using the pre-collected lists
+        for category, file_list in all_upload_tasks:
+            if not file_list:
+                continue
+            category_segments = await self.upload_files(file_list, on_segment)
+            result.segments.update(category_segments)
 
         result.total_files = len(result.segments)
         result.total_bytes = sum(s.file_size for s in result.segments.values())
@@ -248,6 +246,10 @@ class TelegramUploader:
         The bot_index must match the bot that originally uploaded the file,
         since Telegram file_ids are only valid for the bot that created them.
         """
+        # Telegram file_id validation (no whitespace/newlines)
+        if not file_id or not re.match(r"^[a-zA-Z0-9_-]{50,255}$", str(file_id)):
+            raise ValueError("Invalid or malformed Telegram file_id")
+
         if bot_index < 0 or bot_index >= len(self.bots):
             raise RuntimeError(
                 f"Bot index {bot_index} out of range (only {len(self.bots)} bots configured). "
@@ -259,6 +261,10 @@ class TelegramUploader:
 
     async def get_file_bytes(self, file_id, bot_index):
         """Download bytes for a file using the same bot that uploaded it."""
+        # Telegram file_id validation (no whitespace/newlines)
+        if not file_id or not re.match(r"^[a-zA-Z0-9_-]{50,255}$", str(file_id)):
+            raise ValueError("Invalid or malformed Telegram file_id")
+
         if bot_index < 0 or bot_index >= len(self.bots):
             raise RuntimeError(
                 f"Bot index {bot_index} out of range (only {len(self.bots)} bots configured). "

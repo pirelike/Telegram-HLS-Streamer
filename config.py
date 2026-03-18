@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,10 +64,13 @@ class Config:
     @classmethod
     def load_bots(cls):
         cls.BOTS = []
+        token_pattern = re.compile(r"^[0-9]{8,12}:[a-zA-Z0-9_-]{35,45}$")
         for i in range(1, 9):
             token = os.getenv(f"TELEGRAM_BOT_TOKEN_{i}")
             channel = os.getenv(f"TELEGRAM_CHANNEL_ID_{i}")
             if token and channel and not token.startswith("your_"):
+                if not token_pattern.match(token):
+                    raise ValueError(f"Invalid TELEGRAM_BOT_TOKEN_{i}: malformed token format")
                 try:
                     channel_id = int(channel)
                 except ValueError as exc:

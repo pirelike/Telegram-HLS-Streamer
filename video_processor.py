@@ -176,12 +176,17 @@ def _run_ffmpeg(cmd, description=""):
     logger.info("Running FFmpeg: %s", description)
     logger.debug("Command: %s", " ".join(cmd))
 
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=7200,
-    )
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=7200,
+        )
+    except subprocess.TimeoutExpired as e:
+        logger.error("FFmpeg timed out for %s:\n%s", description, e.stderr[-2000:] if e.stderr else "")
+        raise RuntimeError(f"FFmpeg timed out: {description}") from e
+
     if proc.returncode != 0:
         logger.error("FFmpeg failed for %s:\n%s", description, proc.stderr[-2000:])
-        raise RuntimeError(f"FFmpeg failed: {description}\n{proc.stderr[-500:]}")
+        raise RuntimeError(f"FFmpeg failed: {description}\n{proc.stderr[-2000:]}")
     return proc
 
 
@@ -216,27 +221,38 @@ def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_prog
     stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
     stderr_thread.start()
 
-    for line in proc.stdout:
-        if line.startswith("out_time="):
-            time_str = line.split("=", 1)[1].strip()
-            if time_str.startswith("N/A"):
-                continue
-            try:
-                parts = time_str.split(":")
-                secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                if secs >= 0:
-                    pct = min(99, int(secs / duration_seconds * 100))
-                    step_progress_cb(pct)
-            except (ValueError, IndexError):
-                pass
+    try:
+        for line in proc.stdout:
+            if line.startswith("out_time="):
+                time_str = line.split("=", 1)[1].strip()
+                if time_str.startswith("N/A"):
+                    continue
+                try:
+                    parts = time_str.split(":")
+                    secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                    if secs >= 0:
+                        pct = min(99, int(secs / duration_seconds * 100))
+                        step_progress_cb(pct)
+                except (ValueError, IndexError):
+                    pass
+    except Exception as e:
+        logger.warning("Error reading FFmpeg progress: %s", e)
 
-    proc.wait()
+    try:
+        # Popen doesn't have a direct timeout in wait(), but we can use wait(timeout)
+        proc.wait(timeout=7200)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stderr_output = "".join(stderr_chunks)
+        logger.error("FFmpeg with progress timed out for %s:\n%s", description, stderr_output[-2000:])
+        raise RuntimeError(f"FFmpeg timed out: {description}")
+
     stderr_thread.join(timeout=5)
 
     if proc.returncode != 0:
         stderr_output = "".join(stderr_chunks)
         logger.error("FFmpeg failed for %s:\n%s", description, stderr_output[-2000:])
-        raise RuntimeError(f"FFmpeg failed: {description}\n{stderr_output[-500:]}")
+        raise RuntimeError(f"FFmpeg failed: {description}\n{stderr_output[-2000:]}")
 
     return proc
 
@@ -390,9 +406,10 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             _run_ffmpeg(cmd, f"subtitle track {i} ({sub.language}) for {job_id}")
             result.subtitle_files.append((vtt_file, sub_dir, sub.language, sub.title))
             report(f"Subtitle track {i} ({sub.language}) extracted")
-        except RuntimeError:
-            logger.warning("Failed to extract subtitle track %d, skipping", i)
-            report(f"Subtitle track {i} skipped")
+        except RuntimeError as e:
+            logger.warning("Failed to extract subtitle track %d, skipping: %s", i, e)
+            # Report failure to user so they know why a track is missing
+            report(f"Subtitle track {i} FAILED (Skipped)")
 
     logger.info(
         "Processing complete for %s: video=%d tiers, audio=%d tracks, subs=%d tracks",
