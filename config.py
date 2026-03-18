@@ -61,6 +61,11 @@ class Config:
     PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS = _int_env(
         "PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS", 300
     )
+    # Retention: automatically delete completed jobs older than N days (0 = disabled)
+    JOB_RETENTION_DAYS = _int_env("JOB_RETENTION_DAYS", 0)
+
+    # Queue: max number of jobs processed concurrently
+    MAX_CONCURRENT_JOBS = _int_env("MAX_CONCURRENT_JOBS", 1)
     CORS_ALLOWED_ORIGINS = [
         origin.strip()
         for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")

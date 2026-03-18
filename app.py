@@ -12,6 +12,7 @@ import asyncio
 import base64
 import logging
 import os
+import queue
 import time
 import uuid
 from threading import Lock, Thread
@@ -29,6 +30,7 @@ from hls_manager import (
     register_job, generate_master_playlist, generate_media_playlist,
     get_segment_info, list_jobs, get_job, count_jobs,
 )
+import database as db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +55,13 @@ _watcher_started = False
 _TERMINAL_JOB_STATES = {"complete", "error"}
 # Protects status transitions so cancel_job cannot overwrite a just-completed job.
 _job_status_lock = Lock()
+
+# ─── Job Queue ───
+# Supports multiple concurrent processing jobs via a bounded worker pool.
+_job_queue = queue.Queue()
+_queue_order = []         # ordered list of job_ids waiting to be processed
+_queue_order_lock = Lock()
+_queue_workers_started = False
 
 
 def _get_base_url():
@@ -200,6 +209,62 @@ def _is_job_cancelled(job_id):
         return bool(job.get("timed_out") or job.get("cancelled"))
 
 
+def _start_queue_workers():
+    """Start worker threads that pull jobs from the queue and process them."""
+    global _queue_workers_started
+    if _queue_workers_started:
+        return
+    _queue_workers_started = True
+
+    def worker():
+        while True:
+            job_id, file_path = _job_queue.get()
+            try:
+                with _queue_order_lock:
+                    if job_id in _queue_order:
+                        _queue_order.remove(job_id)
+                _process_job(job_id, file_path)
+            finally:
+                _job_queue.task_done()
+
+    n_workers = max(1, Config.MAX_CONCURRENT_JOBS)
+    for _ in range(n_workers):
+        Thread(target=worker, daemon=True).start()
+    logger.info("Started %d job queue worker(s)", n_workers)
+
+
+def _enqueue_job(job_id, file_path):
+    """Add a job to the processing queue and record its position."""
+    with _queue_order_lock:
+        _queue_order.append(job_id)
+        position = len(_queue_order)
+    with _job_status_lock:
+        _active_jobs[job_id]["queue_position"] = position
+    _job_queue.put((job_id, file_path))
+
+
+def _start_retention_cleanup():
+    """Background thread that periodically purges old completed jobs from the DB."""
+    if Config.JOB_RETENTION_DAYS <= 0:
+        return
+
+    def cleanup_loop():
+        while True:
+            time.sleep(3600)  # check hourly
+            try:
+                count = db.delete_old_jobs(Config.JOB_RETENTION_DAYS)
+                if count:
+                    logger.info("Retention: purged %d old job(s)", count)
+            except Exception:
+                logger.exception("Retention cleanup failed")
+
+    Thread(target=cleanup_loop, daemon=True).start()
+    logger.info(
+        "Retention cleanup enabled: jobs older than %d days will be purged hourly",
+        Config.JOB_RETENTION_DAYS,
+    )
+
+
 @app.route("/api/cancel/<job_id>", methods=["POST"])
 def cancel_job(job_id):
     """Cancel a running job."""
@@ -224,7 +289,29 @@ def cancel_job(job_id):
     return jsonify({"message": "Job cancellation requested"})
 
 
+@app.route("/api/jobs/<job_id>", methods=["DELETE"])
+def delete_job_endpoint(job_id):
+    """Delete a completed job from the database."""
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
+
+    if job_id in _active_jobs:
+        status = _active_jobs[job_id].get("status")
+        if status not in _TERMINAL_JOB_STATES:
+            return jsonify({"error": "Cannot delete an active job; cancel it first"}), 400
+
+    if not get_job(job_id):
+        return jsonify({"error": "Job not found"}), 404
+
+    db.delete_job(job_id)
+    logger.info("Job %s deleted by user", job_id)
+    return jsonify({"message": "Job deleted"})
+
+
 _start_timeout_watcher()
+_start_queue_workers()
+_start_retention_cleanup()
 
 
 # ─── Web UI ───
@@ -427,7 +514,7 @@ def upload_finalize():
             "error": f"Incomplete upload: got {actual_size} bytes, expected {expected_size}",
         }), 400
 
-    # Create job and start processing
+    # Create job and enqueue for processing
     job_id = uuid.uuid4().hex[:12]
     _active_jobs[job_id] = {
         "status": "queued",
@@ -436,10 +523,10 @@ def upload_finalize():
         "progress": 0,
         "step": "Queued for processing...",
         "started_ts": time.time(),
+        "queue_position": None,
     }
 
-    thread = Thread(target=_process_job, args=(job_id, file_path), daemon=True)
-    thread.start()
+    _enqueue_job(job_id, file_path)
 
     logger.info("Upload finalized: %s -> job %s (%d bytes)", upload_id, job_id, actual_size)
     return jsonify({"job_id": job_id, "status": "queued"})
@@ -505,6 +592,8 @@ def _process_job(job_id, file_path):
             with _job_status_lock:
                 _active_jobs[job_id]["progress"] = 50 + int(current / total * 50) if total else 50
                 _active_jobs[job_id]["step"] = f"Uploading {name}"
+                _active_jobs[job_id]["upload_current"] = current
+                _active_jobs[job_id]["upload_total"] = total
 
         uploader = TelegramUploader()
         upload_result = _run_async(
@@ -551,6 +640,14 @@ def job_status(job_id):
     if job_id in _active_jobs:
         with _job_status_lock:
             snapshot = dict(_active_jobs[job_id])
+        # Compute live queue position so the client sees it decreasing
+        if snapshot.get("status") == "queued":
+            with _queue_order_lock:
+                try:
+                    snapshot["queue_position"] = _queue_order.index(job_id) + 1
+                    snapshot["queue_length"] = len(_queue_order)
+                except ValueError:
+                    snapshot["queue_position"] = None
         return jsonify(snapshot)
     job = get_job(job_id)
     if job:
