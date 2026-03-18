@@ -81,7 +81,9 @@ def upload_init():
     if not data or "filename" not in data or "total_size" not in data:
         return jsonify({"error": "filename and total_size required"}), 400
 
-    filename = data["filename"]
+    filename = os.path.basename(data["filename"])
+    if not filename:
+        return jsonify({"error": "Invalid filename"}), 400
     total_size = int(data["total_size"])
     total_chunks = int(data.get("total_chunks", 0))
 
@@ -90,12 +92,23 @@ def upload_init():
             "error": f"File too large. Max {Config.MAX_UPLOAD_SIZE // (1024**3)}GB"
         }), 413
 
+    # Reject if there's already a pending upload for this filename
+    for uid, info in _pending_uploads.items():
+        if info["filename"] == filename:
+            return jsonify({
+                "error": "An upload for this file is already in progress",
+                "upload_id": uid,
+            }), 409
+
     upload_id = uuid.uuid4().hex[:16]
     upload_path = os.path.join(Config.UPLOAD_DIR, f"{upload_id}_{filename}")
 
-    # Create empty file
-    with open(upload_path, "wb") as f:
-        pass
+    # Create empty file (exclusive creation to avoid overwriting)
+    try:
+        fd = os.open(upload_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        return jsonify({"error": "Upload file already exists"}), 409
 
     _pending_uploads[upload_id] = {
         "path": upload_path,
@@ -230,7 +243,7 @@ def _process_job(job_id, file_path):
         _active_jobs[job_id]["status"] = "processing"
 
         def on_process_progress(current, total, step_name):
-            _active_jobs[job_id]["progress"] = int(current / total * 50)
+            _active_jobs[job_id]["progress"] = int(current / total * 50) if total else 0
             _active_jobs[job_id]["step"] = step_name
 
         result = process(analysis, job_id, progress_callback=on_process_progress)
@@ -239,7 +252,7 @@ def _process_job(job_id, file_path):
         _active_jobs[job_id]["status"] = "uploading_telegram"
 
         def on_upload_progress(current, total, name):
-            _active_jobs[job_id]["progress"] = 50 + int(current / total * 50)
+            _active_jobs[job_id]["progress"] = 50 + int(current / total * 50) if total else 50
             _active_jobs[job_id]["step"] = f"Uploading {name}"
 
         uploader = TelegramUploader()

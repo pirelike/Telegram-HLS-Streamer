@@ -34,6 +34,9 @@ class AudioStream(StreamInfo):
 
 class VideoStream(StreamInfo):
     def __init__(self, index, codec_name, width=0, height=0, bit_rate=None, **kwargs):
+        # Normalize h265 → hevc (ffprobe uses "hevc" but some sources report "h265")
+        if codec_name == "h265":
+            codec_name = "hevc"
         super().__init__(index, "video", codec_name, **kwargs)
         self.width = width
         self.height = height
@@ -41,7 +44,7 @@ class VideoStream(StreamInfo):
 
     @property
     def is_copy_compatible(self):
-        return self.codec_name in ("h264", "hevc", "h265")
+        return self.codec_name in ("h264", "hevc")
 
 
 class SubtitleStream(StreamInfo):
@@ -50,7 +53,7 @@ class SubtitleStream(StreamInfo):
 
     @property
     def is_text_based(self):
-        return self.codec_name in ("subrip", "srt", "ass", "ssa", "webvtt", "mov_text")
+        return self.codec_name in ("subrip", "srt", "ass", "ssa", "webvtt")
 
 
 class MediaAnalysis:

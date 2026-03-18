@@ -214,8 +214,17 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         ))
         report(f"Audio track {i} ({audio.language}) extracted")
 
-    # 3. Subtitle streams - extract to WebVTT
+    # 3. Subtitle streams - extract text-based subtitles to WebVTT
+    #    Skip bitmap formats (dvd_subtitle, hdmv_pgs_subtitle, mov_text, etc.)
+    #    which cannot be converted to WebVTT
     for i, sub in enumerate(analysis.subtitle_streams):
+        if not sub.is_text_based:
+            logger.info(
+                "Skipping subtitle track %d (%s): codec %s is not text-based",
+                i, sub.language, sub.codec_name,
+            )
+            report(f"Subtitle track {i} skipped (non-text)")
+            continue
         cmd, vtt_file, sub_dir = _extract_subtitle(analysis, sub, i, output_dir)
         try:
             _run_ffmpeg(cmd, f"subtitle track {i} ({sub.language}) for {job_id}")
