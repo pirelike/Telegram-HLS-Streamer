@@ -9,9 +9,9 @@ Web server that handles:
 """
 
 import asyncio
-import hashlib
 import logging
 import os
+import time
 import uuid
 from threading import Thread
 
@@ -43,6 +43,10 @@ _active_jobs = {}
 
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
+_last_pending_cleanup = 0.0
+_watcher_started = False
+
+_TERMINAL_JOB_STATES = {"complete", "error"}
 
 
 def _get_base_url():
@@ -54,6 +58,77 @@ def _get_base_url():
     else:
         scheme = request.scheme
     return f"{scheme}://{request.host}"
+
+
+def _cleanup_expired_pending_uploads(force=False):
+    """Delete stale pending uploads from memory + disk."""
+    global _last_pending_cleanup
+    now = time.time()
+    if not force and (now - _last_pending_cleanup) < Config.PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS:
+        return
+
+    ttl = Config.PENDING_UPLOAD_TTL_SECONDS
+    expired_ids = []
+    for upload_id, info in _pending_uploads.items():
+        last_activity = info.get("last_activity_ts", info.get("created_ts", now))
+        if now - last_activity > ttl:
+            expired_ids.append(upload_id)
+
+    for upload_id in expired_ids:
+        info = _pending_uploads.pop(upload_id, None)
+        if not info:
+            continue
+        path = info.get("path")
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                logger.warning("Could not remove expired pending upload file: %s", path)
+        logger.info("Cleaned expired pending upload: %s (%s)", upload_id, info.get("filename"))
+
+    _last_pending_cleanup = now
+
+
+def _job_timed_out(job):
+    started = job.get("started_ts")
+    if not started:
+        return False
+    return (time.time() - started) > Config.JOB_TIMEOUT_SECONDS
+
+
+def _start_timeout_watcher():
+    global _watcher_started
+    if _watcher_started:
+        return
+    _watcher_started = True
+
+    def watch():
+        while True:
+            time.sleep(5)
+            for job_id, job in _active_jobs.items():
+                status = job.get("status")
+                if status in _TERMINAL_JOB_STATES:
+                    continue
+                if _job_timed_out(job):
+                    job["status"] = "error"
+                    job["error"] = (
+                        f"Job timed out after {Config.JOB_TIMEOUT_SECONDS} seconds "
+                        "while processing."
+                    )
+                    job["step"] = "Timed out"
+                    logger.error("Job %s timed out", job_id)
+
+    Thread(target=watch, daemon=True).start()
+
+
+def _is_job_cancelled(job_id):
+    job = _active_jobs.get(job_id)
+    if not job:
+        return True
+    return job.get("status") == "error" and "timed out" in str(job.get("error", "")).lower()
+
+
+_start_timeout_watcher()
 
 
 # ─── Web UI ───
@@ -77,6 +152,7 @@ def index():
 @app.route("/api/upload/init", methods=["POST"])
 def upload_init():
     """Initialize a chunked upload session."""
+    _cleanup_expired_pending_uploads()
     data = request.get_json()
     if not data or "filename" not in data or "total_size" not in data:
         return jsonify({"error": "filename and total_size required"}), 400
@@ -117,6 +193,8 @@ def upload_init():
         "total_chunks": total_chunks,
         "received_bytes": 0,
         "received_chunks": 0,
+        "created_ts": time.time(),
+        "last_activity_ts": time.time(),
     }
 
     logger.info(
@@ -139,6 +217,7 @@ def upload_chunk():
       X-Chunk-Index: 0-based chunk number
     Body: raw binary chunk data
     """
+    _cleanup_expired_pending_uploads()
     upload_id = request.headers.get("X-Upload-Id")
     chunk_index = request.headers.get("X-Chunk-Index")
 
@@ -166,6 +245,7 @@ def upload_chunk():
 
     upload["received_bytes"] += chunk_len
     upload["received_chunks"] += 1
+    upload["last_activity_ts"] = time.time()
 
     return jsonify({
         "chunk_index": chunk_index,
@@ -177,6 +257,7 @@ def upload_chunk():
 @app.route("/api/upload/finalize", methods=["POST"])
 def upload_finalize():
     """Finalize a chunked upload and start processing."""
+    _cleanup_expired_pending_uploads()
     data = request.get_json()
     upload_id = data.get("upload_id") if data else None
 
@@ -203,6 +284,7 @@ def upload_finalize():
         "file_size": actual_size,
         "progress": 0,
         "step": "Queued for processing...",
+        "started_ts": time.time(),
     }
 
     thread = Thread(target=_process_job, args=(job_id, file_path), daemon=True)
@@ -215,6 +297,7 @@ def upload_finalize():
 @app.route("/api/upload/status/<upload_id>")
 def upload_status(upload_id):
     """Check how many chunks have been received for a pending upload."""
+    _cleanup_expired_pending_uploads()
     if upload_id not in _pending_uploads:
         return jsonify({"error": "Unknown upload_id"}), 404
     upload = _pending_uploads[upload_id]
@@ -231,6 +314,8 @@ def upload_status(upload_id):
 def _process_job(job_id, file_path):
     """Full pipeline: analyze -> process -> upload -> register."""
     try:
+        if _is_job_cancelled(job_id):
+            return
         # Step 1: Analyze
         _active_jobs[job_id]["status"] = "analyzing"
         _active_jobs[job_id]["step"] = "Analyzing streams..."
@@ -243,15 +328,21 @@ def _process_job(job_id, file_path):
         _active_jobs[job_id]["status"] = "processing"
 
         def on_process_progress(current, total, step_name):
+            if _is_job_cancelled(job_id):
+                return
             _active_jobs[job_id]["progress"] = int(current / total * 50) if total else 0
             _active_jobs[job_id]["step"] = step_name
 
         result = process(analysis, job_id, progress_callback=on_process_progress)
+        if _is_job_cancelled(job_id):
+            return
 
         # Step 3: Upload to Telegram
         _active_jobs[job_id]["status"] = "uploading_telegram"
 
         def on_upload_progress(current, total, name):
+            if _is_job_cancelled(job_id):
+                return
             _active_jobs[job_id]["progress"] = 50 + int(current / total * 50) if total else 50
             _active_jobs[job_id]["step"] = f"Uploading {name}"
 
@@ -264,6 +355,8 @@ def _process_job(job_id, file_path):
             )
         finally:
             loop.close()
+        if _is_job_cancelled(job_id):
+            return
 
         # Step 4: Register for serving
         register_job(job_id, analysis, result, upload_result)
@@ -280,6 +373,8 @@ def _process_job(job_id, file_path):
         logger.info("Job %s complete", job_id)
 
     except Exception as e:
+        if _is_job_cancelled(job_id):
+            return
         logger.exception("Job %s failed", job_id)
         _active_jobs[job_id]["status"] = "error"
         _active_jobs[job_id]["error"] = str(e)
@@ -377,12 +472,19 @@ def serve_segment(job_id, segment_key):
 
     def stream_from_telegram():
         import urllib.request
-        with urllib.request.urlopen(file_url) as resp:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                yield chunk
+        try:
+            with urllib.request.urlopen(file_url) as resp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+        except Exception as e:
+            logger.error(
+                "Segment stream failed for job=%s segment=%s: %s",
+                job_id, segment_key, e,
+            )
+            raise
 
     return Response(
         stream_from_telegram(),
@@ -408,6 +510,8 @@ def add_cors(response):
 
 
 if __name__ == "__main__":
+    _start_timeout_watcher()
+    _cleanup_expired_pending_uploads(force=True)
     logger.info("Starting Telegram HLS Streamer on %s:%d", Config.HOST, Config.PORT)
     logger.info("Configured bots: %d", len(Config.BOTS))
     logger.info("Max upload size: %d GB", Config.MAX_UPLOAD_SIZE // (1024**3))

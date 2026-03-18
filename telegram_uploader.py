@@ -10,7 +10,13 @@ import os
 import time
 
 from telegram import Bot
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import (
+    BadRequest,
+    NetworkError,
+    RetryAfter,
+    TimedOut,
+    Unauthorized,
+)
 
 from config import Config
 
@@ -89,6 +95,21 @@ class TelegramUploader:
                 wait = 2 ** attempt
                 logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)
                 await asyncio.sleep(wait)
+            except NetworkError as e:
+                wait = 2 ** attempt
+                logger.warning("Network error for %s: %s, retry in %ds", file_name, e, wait)
+                await asyncio.sleep(wait)
+            except BadRequest as e:
+                logger.error("Bad request for %s (not retrying): %s", file_name, e)
+                raise RuntimeError(f"Telegram rejected upload for {file_name}: {e}") from e
+            except Unauthorized as e:
+                logger.error(
+                    "Unauthorized while uploading %s via bot %d",
+                    file_name, bot_entry["index"],
+                )
+                raise RuntimeError(
+                    f"Bot {bot_entry['index']} is unauthorized for channel {channel_id}"
+                ) from e
             except Exception as e:
                 if attempt < retries - 1:
                     wait = 2 ** attempt

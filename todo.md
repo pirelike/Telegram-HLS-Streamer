@@ -15,10 +15,10 @@
 
 ## P2 — Reliability / Error Handling
 
-- [ ] **`app.py`** — Add error handling to segment stream generator → clients get corrupted partial responses on network failure
-- [ ] **`telegram_uploader.py`** — Handle `BadRequest`, `NetworkError`, `Unauthorized` in retry logic (currently only `RetryAfter` and `TimedOut`)
-- [ ] **`app.py`** — Add job timeout → hung processing jobs stay in `"processing"` forever
-- [ ] **`app.py`** — Clean up orphaned `_pending_uploads` → disk fills over time with no TTL
+- [x] **`app.py`** — Add error handling to segment stream generator → clients get corrupted partial responses on network failure
+- [x] **`telegram_uploader.py`** — Handle `BadRequest`, `NetworkError`, `Unauthorized` in retry logic (currently only `RetryAfter` and `TimedOut`)
+- [x] **`app.py`** — Add job timeout → hung processing jobs stay in `"processing"` forever
+- [x] **`app.py`** — Clean up orphaned `_pending_uploads` → disk fills over time with no TTL
 
 ## P3 — Performance
 

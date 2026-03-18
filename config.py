@@ -28,6 +28,13 @@ class Config:
     UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
     PROCESSING_DIR = os.path.join(os.path.dirname(__file__), "processing")
 
+    # Reliability / cleanup
+    JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "7200"))  # 2h
+    PENDING_UPLOAD_TTL_SECONDS = int(os.getenv("PENDING_UPLOAD_TTL_SECONDS", "86400"))  # 24h
+    PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS = int(
+        os.getenv("PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS", "300")
+    )
+
     # Telegram bots
     BOTS = []
 
