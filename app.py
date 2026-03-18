@@ -227,8 +227,6 @@ def upload_init():
         return jsonify({"error": "filename and total_size required"}), 400
 
     filename = secure_filename(data["filename"]) or "unnamed_upload"
-    if not filename:
-        return jsonify({"error": "Invalid filename"}), 400
     total_size = int(data["total_size"])
     total_chunks = int(data.get("total_chunks", 0))
 
@@ -472,15 +470,12 @@ def _process_job(job_id, file_path):
         # Step 4: Register for serving
         register_job(job_id, analysis, result, upload_result)
 
+        # Cleanup temp files (processing results)
+        cleanup(job_id)
+
         _active_jobs[job_id]["status"] = "complete"
         _active_jobs[job_id]["progress"] = 100
         _active_jobs[job_id]["step"] = "Done"
-
-        # Cleanup temp files
-        cleanup(job_id)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
         logger.info("Job %s complete", job_id)
 
     except Exception as e:
@@ -489,6 +484,15 @@ def _process_job(job_id, file_path):
         logger.exception("Job %s failed", job_id)
         _active_jobs[job_id]["status"] = "error"
         _active_jobs[job_id]["error"] = str(e)
+
+    finally:
+        # Always remove the source upload file — it is no longer needed
+        # regardless of whether the job succeeded or failed.
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                logger.warning("Could not remove upload file: %s", file_path)
 
 
 # ─── Job Status ───

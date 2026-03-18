@@ -45,6 +45,10 @@ class UploadResult:
         self.total_files = 0
 
 
+class UploadIntegrityError(RuntimeError):
+    """Raised when Telegram reports a file size that does not match the local file."""
+
+
 class TelegramUploader:
     def __init__(self):
         self.bots = []
@@ -87,7 +91,9 @@ class TelegramUploader:
                     )
                 file_id = message.document.file_id
                 if message.document.file_size != file_size:
-                    raise RuntimeError(f"Upload corrupted: size mismatch {message.document.file_size} != {file_size}")
+                    raise UploadIntegrityError(
+                        f"Upload corrupted: size mismatch {message.document.file_size} != {file_size}"
+                    )
 
                 logger.debug(
                     "Uploaded %s via bot %d -> file_id=%s",
@@ -106,6 +112,12 @@ class TelegramUploader:
                 raise RuntimeError(
                     f"Bot {bot_entry['index']} is unauthorized for channel {channel_id}"
                 ) from e
+            except UploadIntegrityError:
+                logger.error(
+                    "Size mismatch after uploading %s — not retrying (corrupted transfer)",
+                    file_name,
+                )
+                raise
             except TimedOut:
                 wait = 2 ** attempt
                 logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)

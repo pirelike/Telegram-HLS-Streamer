@@ -83,9 +83,10 @@ def init_db():
     # Migrate: add width/height/bitrate columns to tracks if missing
     cursor = conn.execute("PRAGMA table_info(tracks)")
     existing_cols = {row["name"] for row in cursor.fetchall()}
-    for col, default in [("width", "0"), ("height", "0"), ("bitrate", "''")]:
+    for col, default_val in [("width", 0), ("height", 0), ("bitrate", "")]:
         if col not in existing_cols:
-            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {'INTEGER' if default == '0' else 'TEXT'} DEFAULT {default}")
+            col_type = "INTEGER" if isinstance(default_val, int) else "TEXT"
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {col_type} DEFAULT ?", (default_val,))
     conn.commit()
 
     logger.info("Database initialized at %s", DB_PATH)
@@ -249,8 +250,8 @@ def count_jobs():
 def delete_job(job_id):
     """Delete a job and all its tracks/segments (cascading)."""
     conn = _get_conn()
-    conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
-    conn.commit()
+    with conn:
+        conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
     logger.info("Deleted job %s from database", job_id)
 
 
