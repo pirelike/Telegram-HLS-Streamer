@@ -53,12 +53,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tracks (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id       TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
-            track_type   TEXT NOT NULL,  -- 'audio' or 'subtitle'
+            track_type   TEXT NOT NULL,  -- 'video', 'audio', or 'subtitle'
             track_index  INTEGER NOT NULL,
             codec        TEXT,
             language     TEXT DEFAULT 'und',
             title        TEXT DEFAULT '',
             channels     INTEGER DEFAULT 2,
+            width        INTEGER DEFAULT 0,
+            height       INTEGER DEFAULT 0,
+            bitrate      TEXT DEFAULT '',
             UNIQUE(job_id, track_type, track_index)
         );
 
@@ -76,6 +79,15 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_tracks_job ON tracks(job_id);
     """)
     conn.commit()
+
+    # Migrate: add width/height/bitrate columns to tracks if missing
+    cursor = conn.execute("PRAGMA table_info(tracks)")
+    existing_cols = {row["name"] for row in cursor.fetchall()}
+    for col, default in [("width", "0"), ("height", "0"), ("bitrate", "''")]:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {'INTEGER' if default == '0' else 'TEXT'} DEFAULT {default}")
+    conn.commit()
+
     logger.info("Database initialized at %s", DB_PATH)
 
 
@@ -107,6 +119,16 @@ def save_job(job_id, analysis, processing_result, upload_result):
                 video.height if video else 0,
             ),
         )
+
+        # Save video tracks (ABR tiers)
+        for i, (_, _, width, height, bitrate) in enumerate(processing_result.video_playlists):
+            conn.execute(
+                """INSERT OR REPLACE INTO tracks
+                   (job_id, track_type, track_index, codec, language, title, channels, width, height, bitrate)
+                   VALUES (?, 'video', ?, ?, 'und', ?, 0, ?, ?, ?)""",
+                (job_id, i, video.codec_name if video else "h264",
+                 f"{width}x{height}", width, height, bitrate),
+            )
 
         # Save audio tracks
         for i, (_, _, lang, title, channels) in enumerate(processing_result.audio_playlists):

@@ -49,4 +49,4 @@
 
 ## P7 — New Features
 
-- [ ] **`hls_manager.py` + `video_processor.py`** — Adaptive bitrate streaming (multiple quality tiers in master playlist)
+- [x] **`hls_manager.py` + `video_processor.py`** — Adaptive bitrate streaming (multiple quality tiers in master playlist)

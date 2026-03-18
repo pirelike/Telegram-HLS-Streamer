@@ -46,34 +46,66 @@ def _detect_hw_encoder():
     return None
 
 
-def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder):
-    """Build FFmpeg command for video-only HLS extraction."""
+def _get_abr_tiers(source_height):
+    """Return applicable ABR tiers for the given source resolution.
+
+    Only includes tiers whose height is strictly less than the source.
+    The source resolution is always included as the first (highest quality) tier.
+    """
+    if not Config.ABR_ENABLED or source_height <= 0:
+        return []
+
+    tiers = []
+    for tier in Config.ABR_TIERS:
+        if tier["height"] < source_height:
+            tiers.append(tier)
+    return tiers
+
+
+def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
+                     tier_index=0, target_height=None, target_bitrate=None):
+    """Build FFmpeg command for video-only HLS extraction.
+
+    When target_height/target_bitrate are given, scales the video down
+    to that resolution tier.
+    """
     video = analysis.video_streams[0]
-    segment_pattern = os.path.join(output_dir, "video_%04d.ts")
-    playlist = os.path.join(output_dir, "video.m3u8")
+    tier_dir = os.path.join(output_dir, f"video_{tier_index}")
+    os.makedirs(tier_dir, exist_ok=True)
+    segment_pattern = os.path.join(tier_dir, "video_%04d.ts")
+    playlist = os.path.join(tier_dir, "video.m3u8")
 
     cmd = ["ffmpeg", "-y", "-i", analysis.file_path]
 
     # Map only the first video stream, no audio, no subtitles
     cmd += ["-map", f"0:{video.index}", "-an", "-sn"]
 
+    bitrate = target_bitrate or Config.VIDEO_BITRATE
+
     # Encoding
-    use_copy = Config.ENABLE_COPY_MODE and video.is_copy_compatible
+    use_copy = (Config.ENABLE_COPY_MODE and video.is_copy_compatible
+                and target_height is None)
     if use_copy:
         cmd += ["-c:v", "copy"]
-        logger.info("Video: using copy mode (codec=%s)", video.codec_name)
+        logger.info("Video tier %d: using copy mode (codec=%s)", tier_index, video.codec_name)
     elif hw_encoder:
         enc_name, enc_flags = hw_encoder
-        cmd += enc_flags + ["-c:v", enc_name, "-b:v", Config.VIDEO_BITRATE]
+        cmd += enc_flags + ["-c:v", enc_name, "-b:v", bitrate]
+        if target_height:
+            cmd += ["-vf", f"scale=-2:{target_height}"]
         logger.info(
-            "Video: using hardware encoder %s at bitrate %s",
-            enc_name, Config.VIDEO_BITRATE,
+            "Video tier %d: hardware encoder %s at %s (%s)",
+            tier_index, enc_name, bitrate,
+            f"{target_height}p" if target_height else "original",
         )
     else:
-        cmd += ["-c:v", "libx264", "-preset", "fast", "-b:v", Config.VIDEO_BITRATE]
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-b:v", bitrate]
+        if target_height:
+            cmd += ["-vf", f"scale=-2:{target_height}"]
         logger.info(
-            "Video: using software encoder libx264 at bitrate %s",
-            Config.VIDEO_BITRATE,
+            "Video tier %d: libx264 at %s (%s)",
+            tier_index, bitrate,
+            f"{target_height}p" if target_height else "original",
         )
 
     # HLS output
@@ -85,7 +117,7 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder):
         "-hls_segment_type", "mpegts",
         playlist,
     ]
-    return cmd, playlist
+    return cmd, playlist, tier_dir
 
 
 def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, output_dir: str):
@@ -216,15 +248,22 @@ class ProcessingResult:
     def __init__(self, job_id, output_dir):
         self.job_id = job_id
         self.output_dir = output_dir
-        self.video_playlist = None
+        self.video_playlists = []   # list of (playlist_path, tier_dir, width, height, bitrate)
         self.audio_playlists = []   # list of (playlist_path, audio_dir, language, title, channels)
         self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title)
+
+    @property
+    def video_playlist(self):
+        """Backward-compatible: return the first video playlist path or None."""
+        if self.video_playlists:
+            return self.video_playlists[0][0]
+        return None
 
     def all_segment_dirs(self):
         """Return all directories containing segments to upload."""
         dirs = []
-        if self.video_playlist:
-            dirs.append(self.output_dir)
+        for _, tier_dir, _, _, _ in self.video_playlists:
+            dirs.append(tier_dir)
         for _, audio_dir, _, _, _ in self.audio_playlists:
             dirs.append(audio_dir)
         for _, sub_dir, _, _ in self.subtitle_files:
@@ -248,8 +287,16 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
     result = ProcessingResult(job_id, output_dir)
     hw_encoder = _detect_hw_encoder()
 
+    # Determine ABR tiers
+    abr_tiers = []
+    if analysis.has_video:
+        source_height = analysis.video_streams[0].height
+        source_width = analysis.video_streams[0].width
+        abr_tiers = _get_abr_tiers(source_height)
+
+    # Total steps: original video + ABR tiers + audio + subtitles
     total_steps = (
-        (1 if analysis.has_video else 0)
+        (1 + len(abr_tiers) if analysis.has_video else 0)
         + len(analysis.audio_streams)
         + len(analysis.subtitle_streams)
     )
@@ -276,16 +323,41 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
 
         return cb
 
-    # 1. Video stream
+    # 1. Video streams (original + ABR tiers)
     if analysis.has_video:
-        cmd, playlist = _build_video_cmd(analysis, output_dir, hw_encoder)
-        _run_ffmpeg_with_progress(
-            cmd, f"video extraction for {job_id}",
-            duration_seconds=analysis.duration,
-            step_progress_cb=make_step_progress_cb("Encoding video"),
+        # Tier 0: original resolution
+        cmd, playlist, tier_dir = _build_video_cmd(
+            analysis, output_dir, hw_encoder, tier_index=0,
         )
-        result.video_playlist = playlist
-        report("Video extracted")
+        _run_ffmpeg_with_progress(
+            cmd, f"video tier 0 (original) for {job_id}",
+            duration_seconds=analysis.duration,
+            step_progress_cb=make_step_progress_cb("Encoding video (original)"),
+        )
+        result.video_playlists.append((
+            playlist, tier_dir, source_width, source_height, Config.VIDEO_BITRATE,
+        ))
+        report("Video (original) extracted")
+
+        # Additional ABR tiers (lower resolutions)
+        for ti, tier in enumerate(abr_tiers, start=1):
+            target_h = tier["height"]
+            # Calculate proportional width (even number)
+            target_w = int(source_width * target_h / source_height)
+            target_w = target_w + (target_w % 2)  # ensure even
+            cmd, playlist, tier_dir = _build_video_cmd(
+                analysis, output_dir, hw_encoder,
+                tier_index=ti, target_height=target_h, target_bitrate=tier["bitrate"],
+            )
+            _run_ffmpeg_with_progress(
+                cmd, f"video tier {ti} ({target_h}p) for {job_id}",
+                duration_seconds=analysis.duration,
+                step_progress_cb=make_step_progress_cb(f"Encoding video ({target_h}p)"),
+            )
+            result.video_playlists.append((
+                playlist, tier_dir, target_w, target_h, tier["bitrate"],
+            ))
+            report(f"Video ({target_h}p) extracted")
 
     # 2. Audio streams - each track gets its own HLS stream
     for i, audio in enumerate(analysis.audio_streams):
@@ -321,9 +393,9 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             report(f"Subtitle track {i} skipped")
 
     logger.info(
-        "Processing complete for %s: video=%s, audio=%d tracks, subs=%d tracks",
+        "Processing complete for %s: video=%d tiers, audio=%d tracks, subs=%d tracks",
         job_id,
-        "yes" if result.video_playlist else "no",
+        len(result.video_playlists),
         len(result.audio_playlists),
         len(result.subtitle_files),
     )
