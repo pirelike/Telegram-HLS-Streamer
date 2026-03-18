@@ -16,7 +16,7 @@ telegram_error_mod.RetryAfter = Exception
 telegram_error_mod.NetworkError = Exception
 telegram_error_mod.TimedOut = Exception
 telegram_error_mod.BadRequest = Exception
-telegram_error_mod.Unauthorized = Exception
+telegram_error_mod.Forbidden = Exception
 sys.modules.setdefault("telegram", telegram_mod)
 sys.modules.setdefault("telegram.error", telegram_error_mod)
 

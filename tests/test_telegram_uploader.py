@@ -29,7 +29,7 @@ class StubBadRequest(Exception):
     pass
 
 
-class StubUnauthorized(Exception):
+class StubForbidden(Exception):
     pass
 
 
@@ -38,7 +38,7 @@ telegram_error_mod.RetryAfter = StubRetryAfter
 telegram_error_mod.NetworkError = StubNetworkError
 telegram_error_mod.TimedOut = StubTimedOut
 telegram_error_mod.BadRequest = StubBadRequest
-telegram_error_mod.Unauthorized = StubUnauthorized
+telegram_error_mod.Forbidden = StubForbidden
 sys.modules.setdefault("telegram", telegram_mod)
 sys.modules.setdefault("telegram.error", telegram_error_mod)
 
@@ -140,7 +140,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
             f.write(b"abc")
             path = f.name
         try:
-            self.bot_instances[0].send_document = AsyncMock(side_effect=tu.Unauthorized("nope"))
+            self.bot_instances[0].send_document = AsyncMock(side_effect=tu.Forbidden("nope"))
             with self.assertRaises(RuntimeError):
                 await self.uploader._upload_file(path, self.uploader.bots[0])
         finally:
