@@ -13,10 +13,10 @@ import time
 from telegram import Bot
 from telegram.error import (
     BadRequest,
+    Forbidden,
     NetworkError,
     RetryAfter,
     TimedOut,
-    Unauthorized,
 )
 
 from config import Config
@@ -106,13 +106,13 @@ class TelegramUploader:
             except BadRequest as e:
                 logger.error("Bad request for %s (not retrying): %s", file_name, e)
                 raise RuntimeError(f"Telegram rejected upload for {file_name}: {e}") from e
-            except Unauthorized as e:
+            except Forbidden as e:
                 logger.error(
-                    "Unauthorized while uploading %s via bot %d",
+                    "Forbidden while uploading %s via bot %d",
                     file_name, bot_entry["index"],
                 )
                 raise RuntimeError(
-                    f"Bot {bot_entry['index']} is unauthorized for channel {channel_id}"
+                    f"Bot {bot_entry['index']} is forbidden from channel {channel_id}"
                 ) from e
             except UploadIntegrityError:
                 logger.error(
