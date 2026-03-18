@@ -51,6 +51,8 @@ _last_pending_cleanup = 0.0
 _watcher_started = False
 
 _TERMINAL_JOB_STATES = {"complete", "error"}
+# Protects status transitions so cancel_job cannot overwrite a just-completed job.
+_job_status_lock = Lock()
 
 
 def _get_base_url():
@@ -205,13 +207,14 @@ def cancel_job(job_id):
     if not job:
         return jsonify({"error": "Job not found or already finished"}), 404
 
-    if job.get("status") in _TERMINAL_JOB_STATES:
-        return jsonify({"error": "Cannot cancel a finished job"}), 400
+    with _job_status_lock:
+        if job.get("status") in _TERMINAL_JOB_STATES:
+            return jsonify({"error": "Cannot cancel a finished job"}), 400
 
-    job["status"] = "error"
-    job["cancelled"] = True
-    job["error"] = "Job cancelled by user"
-    job["step"] = "Cancelled"
+        job["status"] = "error"
+        job["cancelled"] = True
+        job["error"] = "Job cancelled by user"
+        job["step"] = "Cancelled"
 
     logger.info("Job %s cancelled by user", job_id)
     return jsonify({"message": "Job cancellation requested"})
@@ -493,12 +496,12 @@ def _process_job(job_id, file_path):
         # Step 4: Register for serving
         register_job(job_id, analysis, result, upload_result)
 
-        # Cleanup temp files (processing results)
-        cleanup(job_id)
-
-        _active_jobs[job_id]["status"] = "complete"
-        _active_jobs[job_id]["progress"] = 100
-        _active_jobs[job_id]["step"] = "Done"
+        with _job_status_lock:
+            # Only mark complete if the user hasn't cancelled in the meantime.
+            if not _is_job_cancelled(job_id):
+                _active_jobs[job_id]["status"] = "complete"
+                _active_jobs[job_id]["progress"] = 100
+                _active_jobs[job_id]["step"] = "Done"
         logger.info("Job %s complete", job_id)
 
     except Exception as e:
@@ -509,8 +512,9 @@ def _process_job(job_id, file_path):
         _active_jobs[job_id]["error"] = str(e)
 
     finally:
-        # Always remove the source upload file — it is no longer needed
-        # regardless of whether the job succeeded or failed.
+        # Always clean up processing artifacts and the source upload file,
+        # regardless of whether the job succeeded, failed, or was cancelled.
+        cleanup(job_id)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -655,7 +659,6 @@ def add_cors(response):
 
 
 if __name__ == "__main__":
-    _start_timeout_watcher()
     _cleanup_expired_pending_uploads(force=True)
     logger.info("Starting Telegram HLS Streamer on %s:%d", Config.HOST, Config.PORT)
     logger.info("Configured bots: %d", len(Config.BOTS))
