@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram HLS Streamer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+        .container { max-width: 900px; margin: 0 auto; padding: 2rem; }
+        h1 { font-size: 1.8rem; margin-bottom: 0.5rem; color: #58a6ff; }
+        .subtitle { color: #8b949e; margin-bottom: 2rem; }
+
+        .upload-area { border: 2px dashed #30363d; border-radius: 12px; padding: 3rem 2rem; text-align: center; cursor: pointer; transition: all 0.2s; margin-bottom: 2rem; }
+        .upload-area:hover, .upload-area.dragover { border-color: #58a6ff; background: rgba(88,166,255,0.05); }
+        .upload-area.disabled { pointer-events: none; opacity: 0.5; }
+        .upload-area input[type="file"] { display: none; }
+        .upload-icon { font-size: 3rem; margin-bottom: 1rem; }
+        .upload-text { font-size: 1.1rem; color: #8b949e; }
+        .upload-text strong { color: #58a6ff; }
+
+        .progress-container { display: none; margin-bottom: 2rem; }
+        .progress-container.active { display: block; }
+        .progress-bar-bg { background: #21262d; border-radius: 8px; height: 8px; overflow: hidden; margin: 0.5rem 0; }
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #238636, #58a6ff); border-radius: 8px; transition: width 0.3s; width: 0%; }
+        .progress-info { display: flex; justify-content: space-between; font-size: 0.85rem; color: #8b949e; }
+        .status-text { font-size: 0.95rem; margin-bottom: 0.5rem; }
+        .speed-text { font-size: 0.8rem; color: #8b949e; margin-top: 0.3rem; }
+
+        .analysis-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; display: none; }
+        .analysis-card.active { display: block; }
+        .analysis-card h3 { font-size: 0.95rem; color: #58a6ff; margin-bottom: 0.8rem; }
+        .stream-badges { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .badge { padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 500; }
+        .badge-video { background: rgba(136,87,255,0.15); color: #b392f0; border: 1px solid rgba(136,87,255,0.3); }
+        .badge-audio { background: rgba(88,166,255,0.15); color: #79c0ff; border: 1px solid rgba(88,166,255,0.3); }
+        .badge-sub { background: rgba(35,134,54,0.15); color: #56d364; border: 1px solid rgba(35,134,54,0.3); }
+
+        .result-card { background: #161b22; border: 1px solid #238636; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; display: none; }
+        .result-card.active { display: block; }
+        .result-card h3 { color: #56d364; margin-bottom: 1rem; }
+        .url-box { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 0.8rem 1rem; font-family: monospace; font-size: 0.85rem; word-break: break-all; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+        .url-box .url { flex: 1; color: #79c0ff; }
+        .copy-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; white-space: nowrap; }
+        .copy-btn:hover { background: #30363d; }
+
+        .jobs-section { margin-top: 2rem; }
+        .jobs-section h2 { font-size: 1.2rem; margin-bottom: 1rem; color: #c9d1d9; }
+        .job-item { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; }
+        .job-item:hover { border-color: #58a6ff; }
+        .job-name { font-weight: 500; }
+        .job-meta { font-size: 0.8rem; color: #8b949e; }
+        .job-link { color: #58a6ff; text-decoration: none; font-size: 0.85rem; }
+        .job-link:hover { text-decoration: underline; }
+
+        .error-msg { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.4); color: #f85149; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; display: none; }
+        .error-msg.active { display: block; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Telegram HLS Streamer</h1>
+        <p class="subtitle">Upload a video to split into multi-audio & multi-subtitle HLS streams on Telegram</p>
+
+        <div class="upload-area" id="uploadArea">
+            <input type="file" id="fileInput" accept="video/*,.mkv,.avi,.mp4,.mov,.webm,.ts">
+            <div class="upload-icon">&#128253;</div>
+            <div class="upload-text">
+                Drop your video here or <strong>click to browse</strong><br>
+                <small>Supports 50GB+ files &bull; MKV, MP4, AVI, MOV, WebM &bull; Resumable upload</small>
+            </div>
+        </div>
+
+        <div class="error-msg" id="errorMsg"></div>
+
+        <div class="analysis-card" id="analysisCard">
+            <h3>Detected Streams</h3>
+            <div class="stream-badges" id="streamBadges"></div>
+        </div>
+
+        <div class="progress-container" id="progressContainer">
+            <div class="status-text" id="statusText">Preparing...</div>
+            <div class="progress-bar-bg">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="progressStep">-</span>
+                <span id="progressPct">0%</span>
+            </div>
+            <div class="speed-text" id="speedText"></div>
+        </div>
+
+        <div class="result-card" id="resultCard">
+            <h3>Stream Ready</h3>
+            <p style="margin-bottom:1rem; color:#8b949e;">Use this M3U8 URL in any HLS player (VLC, mpv, web player):</p>
+            <div class="url-box">
+                <span class="url" id="masterUrl"></span>
+                <button class="copy-btn" onclick="copyUrl()">Copy</button>
+            </div>
+        </div>
+
+        <div class="jobs-section">
+            <h2>Previous Uploads</h2>
+            <div id="jobsList"><p style="color:#8b949e;">Loading...</p></div>
+        </div>
+    </div>
+
+    <script>
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB — matches server Config.UPLOAD_CHUNK_SIZE
+    const MAX_RETRIES = 5;
+
+    const uploadArea = document.getElementById('uploadArea');
+    const fileInput = document.getElementById('fileInput');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+    const statusText = document.getElementById('statusText');
+    const progressStep = document.getElementById('progressStep');
+    const progressPct = document.getElementById('progressPct');
+    const speedText = document.getElementById('speedText');
+    const analysisCard = document.getElementById('analysisCard');
+    const streamBadges = document.getElementById('streamBadges');
+    const resultCard = document.getElementById('resultCard');
+    const masterUrl = document.getElementById('masterUrl');
+    const errorMsg = document.getElementById('errorMsg');
+
+    let currentUpload = null; // track active upload for cancel/resume
+
+    // Drag & drop
+    uploadArea.addEventListener('click', () => fileInput.click());
+    uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+    uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+    uploadArea.addEventListener('drop', e => {
+        e.preventDefault();
+        uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length) startUpload(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => { if (fileInput.files.length) startUpload(fileInput.files[0]); });
+
+    async function startUpload(file) {
+        errorMsg.classList.remove('active');
+        resultCard.classList.remove('active');
+        analysisCard.classList.remove('active');
+        progressContainer.classList.add('active');
+        uploadArea.classList.add('disabled');
+
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        statusText.textContent = `Preparing ${file.name} (${formatBytes(file.size)}, ${totalChunks} chunks)...`;
+        progressBar.style.width = '0%';
+        progressPct.textContent = '0%';
+        speedText.textContent = '';
+
+        try {
+            // Step 1: Init upload session
+            const initResp = await fetch('/api/upload/init', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    filename: file.name,
+                    total_size: file.size,
+                    total_chunks: totalChunks,
+                }),
+            });
+            if (!initResp.ok) {
+                const err = await initResp.json();
+                throw new Error(err.error || 'Init failed');
+            }
+            const {upload_id} = await initResp.json();
+
+            // Step 2: Send chunks with per-chunk retry
+            let uploadedBytes = 0;
+            const startTime = Date.now();
+
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+
+                await sendChunkWithRetry(upload_id, i, chunk);
+
+                uploadedBytes = end;
+                const pct = Math.round(uploadedBytes / file.size * 100);
+                progressBar.style.width = pct + '%';
+                progressPct.textContent = pct + '%';
+                statusText.textContent = `Uploading ${file.name}... (${formatBytes(uploadedBytes)} / ${formatBytes(file.size)})`;
+                progressStep.textContent = `Chunk ${i + 1} / ${totalChunks}`;
+
+                // Speed calculation
+                const elapsed = (Date.now() - startTime) / 1000;
+                if (elapsed > 0) {
+                    const speed = uploadedBytes / elapsed;
+                    const remaining = (file.size - uploadedBytes) / speed;
+                    speedText.textContent = `${formatBytes(speed)}/s — ~${formatTime(remaining)} remaining`;
+                }
+            }
+
+            // Step 3: Finalize
+            statusText.textContent = 'Finalizing upload...';
+            const finalResp = await fetch('/api/upload/finalize', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({upload_id}),
+            });
+            if (!finalResp.ok) {
+                const err = await finalResp.json();
+                throw new Error(err.error || 'Finalize failed');
+            }
+            const {job_id} = await finalResp.json();
+
+            // Step 4: Poll processing status
+            statusText.textContent = 'Processing...';
+            pollStatus(job_id);
+
+        } catch (err) {
+            showError(err.message);
+            uploadArea.classList.remove('disabled');
+        }
+    }
+
+    async function sendChunkWithRetry(uploadId, chunkIndex, chunkBlob) {
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            try {
+                const resp = await fetch('/api/upload/chunk', {
+                    method: 'POST',
+                    headers: {
+                        'X-Upload-Id': uploadId,
+                        'X-Chunk-Index': chunkIndex.toString(),
+                        'Content-Type': 'application/octet-stream',
+                    },
+                    body: chunkBlob,
+                });
+                if (resp.ok) return;
+                const err = await resp.json();
+                throw new Error(err.error || `HTTP ${resp.status}`);
+            } catch (err) {
+                if (attempt < MAX_RETRIES - 1) {
+                    const wait = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s
+                    speedText.textContent = `Chunk ${chunkIndex} failed, retrying in ${wait/1000}s... (${err.message})`;
+                    await new Promise(r => setTimeout(r, wait));
+                } else {
+                    throw new Error(`Chunk ${chunkIndex} failed after ${MAX_RETRIES} retries: ${err.message}`);
+                }
+            }
+        }
+    }
+
+    function pollStatus(jobId) {
+        const interval = setInterval(() => {
+            fetch(`/api/status/${jobId}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.analysis && !analysisCard.classList.contains('active')) {
+                        showAnalysis(data.analysis);
+                    }
+                    const statusMap = {
+                        'analyzing': 'Analyzing video streams...',
+                        'processing': 'Splitting into separate streams...',
+                        'uploading_telegram': 'Uploading segments to Telegram...',
+                        'complete': 'Complete!',
+                        'error': 'Error: ' + (data.error || 'Unknown'),
+                    };
+                    statusText.textContent = statusMap[data.status] || data.status;
+                    if (data.step) progressStep.textContent = data.step;
+                    if (data.progress !== undefined) {
+                        progressBar.style.width = data.progress + '%';
+                        progressPct.textContent = data.progress + '%';
+                    }
+                    speedText.textContent = '';
+
+                    if (data.status === 'complete') {
+                        clearInterval(interval);
+                        showResult(jobId);
+                        uploadArea.classList.remove('disabled');
+                        loadJobs();
+                    } else if (data.status === 'error') {
+                        clearInterval(interval);
+                        showError(data.error || 'Processing failed');
+                        uploadArea.classList.remove('disabled');
+                    }
+                })
+                .catch(() => {});
+        }, 1500);
+    }
+
+    function showAnalysis(analysis) {
+        analysisCard.classList.add('active');
+        streamBadges.innerHTML = '';
+        if (analysis.video_tracks > 0)
+            streamBadges.innerHTML += `<span class="badge badge-video">Video: ${analysis.video_tracks} track(s)</span>`;
+        if (analysis.audio_tracks > 0)
+            streamBadges.innerHTML += `<span class="badge badge-audio">Audio: ${analysis.audio_tracks} track(s)</span>`;
+        if (analysis.subtitle_tracks > 0)
+            streamBadges.innerHTML += `<span class="badge badge-sub">Subtitles: ${analysis.subtitle_tracks} track(s)</span>`;
+    }
+
+    function showResult(jobId) {
+        const url = `${window.location.origin}/hls/${jobId}/master.m3u8`;
+        masterUrl.textContent = url;
+        resultCard.classList.add('active');
+    }
+
+    function showError(msg) {
+        errorMsg.textContent = msg;
+        errorMsg.classList.add('active');
+        progressContainer.classList.remove('active');
+    }
+
+    function copyUrl() {
+        navigator.clipboard.writeText(masterUrl.textContent).then(() => {
+            const btn = document.querySelector('.copy-btn');
+            btn.textContent = 'Copied!';
+            setTimeout(() => btn.textContent = 'Copy', 2000);
+        });
+    }
+
+    function formatBytes(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+        return (bytes / 1073741824).toFixed(2) + ' GB';
+    }
+
+    function formatTime(seconds) {
+        if (seconds < 60) return Math.round(seconds) + 's';
+        if (seconds < 3600) return Math.round(seconds / 60) + 'm ' + Math.round(seconds % 60) + 's';
+        const h = Math.floor(seconds / 3600);
+        const m = Math.round((seconds % 3600) / 60);
+        return h + 'h ' + m + 'm';
+    }
+
+    function loadJobs() {
+        fetch('/api/jobs')
+            .then(r => r.json())
+            .then(jobs => {
+                const container = document.getElementById('jobsList');
+                const ids = Object.keys(jobs);
+                if (ids.length === 0) {
+                    container.innerHTML = '<p style="color:#8b949e;">No uploads yet.</p>';
+                    return;
+                }
+                container.innerHTML = ids.map(id => {
+                    const j = jobs[id];
+                    const meta = `${j.audio_tracks.length} audio, ${j.subtitle_tracks.length} subs`;
+                    return `<div class="job-item">
+                        <div>
+                            <div class="job-name">${j.filename || id}</div>
+                            <div class="job-meta">${meta} &bull; ${j.segment_count} segments</div>
+                        </div>
+                        <a class="job-link" href="/hls/${id}/master.m3u8" target="_blank">M3U8</a>
+                    </div>`;
+                }).join('');
+            })
+            .catch(() => {
+                document.getElementById('jobsList').innerHTML = '<p style="color:#8b949e;">Could not load jobs.</p>';
+            });
+    }
+
+    loadJobs();
+    </script>
+</body>
+</html>

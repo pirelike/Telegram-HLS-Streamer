@@ -1,0 +1,8 @@
+.env
+streamer.db
+uploads/
+processing/
+__pycache__/
+*.pyc
+.venv/
+venv/

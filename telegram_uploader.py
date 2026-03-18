@@ -1,0 +1,191 @@
+"""Multi-bot Telegram uploader with round-robin distribution.
+
+Uploads HLS segments and subtitle files to Telegram channels,
+storing file_ids for later retrieval during streaming.
+"""
+
+import asyncio
+import logging
+import os
+import time
+
+from telegram import Bot
+from telegram.error import RetryAfter, TimedOut
+
+from config import Config
+
+logger = logging.getLogger(__name__)
+
+
+class UploadedSegment:
+    """Represents a segment uploaded to Telegram."""
+
+    def __init__(self, file_id, bot_index, file_name, file_size):
+        self.file_id = file_id
+        self.bot_index = bot_index
+        self.file_name = file_name
+        self.file_size = file_size
+
+
+class UploadResult:
+    """Result of uploading all segments for a job."""
+
+    def __init__(self, job_id):
+        self.job_id = job_id
+        # Maps: "video/segment_0001.ts" -> UploadedSegment
+        self.segments = {}
+        self.total_bytes = 0
+        self.total_files = 0
+
+
+class TelegramUploader:
+    def __init__(self):
+        self.bots = []
+        for i, bot_config in enumerate(Config.BOTS):
+            self.bots.append({
+                "bot": Bot(token=bot_config["token"]),
+                "channel_id": bot_config["channel_id"],
+                "index": i,
+            })
+        self._bot_counter = 0
+
+    def _next_bot(self):
+        """Round-robin bot selection."""
+        if not self.bots:
+            raise RuntimeError("No Telegram bots configured")
+        bot = self.bots[self._bot_counter % len(self.bots)]
+        self._bot_counter += 1
+        return bot
+
+    async def _upload_file(self, file_path, bot_entry, retries=3):
+        """Upload a single file to Telegram with retry logic."""
+        bot = bot_entry["bot"]
+        channel_id = bot_entry["channel_id"]
+        file_name = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+
+        for attempt in range(retries):
+            try:
+                with open(file_path, "rb") as f:
+                    message = await bot.send_document(
+                        chat_id=channel_id,
+                        document=f,
+                        filename=file_name,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=30,
+                    )
+                file_id = message.document.file_id
+                logger.debug(
+                    "Uploaded %s via bot %d -> file_id=%s",
+                    file_name, bot_entry["index"], file_id[:20],
+                )
+                return UploadedSegment(file_id, bot_entry["index"], file_name, file_size)
+
+            except RetryAfter as e:
+                logger.warning("Rate limited, waiting %d seconds", e.retry_after)
+                await asyncio.sleep(e.retry_after)
+            except TimedOut:
+                wait = 2 ** attempt
+                logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)
+                await asyncio.sleep(wait)
+            except Exception as e:
+                if attempt < retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning("Upload error for %s: %s, retry in %ds", file_name, e, wait)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
+        raise RuntimeError(f"Failed to upload {file_path} after {retries} attempts")
+
+    async def upload_directory(self, directory, path_prefix, progress_callback=None):
+        """Upload all .ts and .vtt files from a directory.
+
+        Returns dict mapping "prefix/filename" -> UploadedSegment
+        """
+        segments = {}
+        files = sorted([
+            f for f in os.listdir(directory)
+            if f.endswith((".ts", ".vtt"))
+        ])
+
+        for i, filename in enumerate(files):
+            file_path = os.path.join(directory, filename)
+            bot_entry = self._next_bot()
+            segment = await self._upload_file(file_path, bot_entry)
+            key = f"{path_prefix}/{filename}"
+            segments[key] = segment
+
+            if progress_callback:
+                progress_callback(i + 1, len(files), key)
+
+        return segments
+
+    async def upload_job(self, processing_result, progress_callback=None):
+        """Upload all segments from a processing result.
+
+        Handles video segments, audio track segments, and subtitle files.
+        """
+        result = UploadResult(processing_result.job_id)
+        total_files = 0
+        uploaded_files = 0
+
+        # Count total files
+        if processing_result.video_playlist:
+            total_files += len([
+                f for f in os.listdir(processing_result.output_dir)
+                if f.endswith(".ts")
+            ])
+        for _, audio_dir, _, _, _ in processing_result.audio_playlists:
+            total_files += len([
+                f for f in os.listdir(audio_dir)
+                if f.endswith(".ts")
+            ])
+        for vtt_path, _, _, _ in processing_result.subtitle_files:
+            total_files += 1
+
+        def on_segment(current, total, name):
+            nonlocal uploaded_files
+            uploaded_files += 1
+            if progress_callback:
+                progress_callback(uploaded_files, total_files, name)
+
+        # Upload video segments
+        if processing_result.video_playlist:
+            video_segments = await self.upload_directory(
+                processing_result.output_dir, "video", on_segment,
+            )
+            result.segments.update(video_segments)
+
+        # Upload audio track segments
+        for i, (_, audio_dir, lang, title, _) in enumerate(processing_result.audio_playlists):
+            audio_segments = await self.upload_directory(
+                audio_dir, f"audio_{i}", on_segment,
+            )
+            result.segments.update(audio_segments)
+
+        # Upload subtitle files
+        for i, (vtt_path, sub_dir, lang, title) in enumerate(processing_result.subtitle_files):
+            bot_entry = self._next_bot()
+            segment = await self._upload_file(vtt_path, bot_entry)
+            key = f"sub_{i}/subtitles.vtt"
+            result.segments[key] = segment
+            uploaded_files += 1
+            if progress_callback:
+                progress_callback(uploaded_files, total_files, key)
+
+        result.total_files = len(result.segments)
+        result.total_bytes = sum(s.file_size for s in result.segments.values())
+
+        logger.info(
+            "Upload complete for %s: %d files, %d bytes",
+            result.job_id, result.total_files, result.total_bytes,
+        )
+        return result
+
+    async def get_file_url(self, file_id, bot_index):
+        """Get a temporary download URL for a file from Telegram."""
+        bot = self.bots[bot_index % len(self.bots)]["bot"]
+        file = await bot.get_file(file_id)
+        return file.file_path
