@@ -41,6 +41,7 @@ def list_jobs(limit=50, offset=0):
             "job_id": job_id,
             "filename": j["filename"],
             "duration": j["duration"],
+            "file_size": j["file_size"],
             "audio_count": j["audio_count"],
             "subtitle_count": j["subtitle_count"],
             "segment_count": j["segment_count"],

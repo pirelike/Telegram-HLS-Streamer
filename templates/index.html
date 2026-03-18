@@ -67,6 +67,7 @@
         .job-actions { display: flex; align-items: center; gap: 0.6rem; }
         .delete-btn { background: none; border: 1px solid rgba(248,81,73,0.4); color: #f85149; padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
         .delete-btn:hover { background: rgba(248,81,73,0.1); }
+        .delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .error-msg { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.4); color: #f85149; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; display: none; }
         .error-msg.active { display: block; }
@@ -530,34 +531,59 @@
         return div.innerHTML;
     }
 
+    function formatDuration(seconds) {
+        if (!seconds || seconds <= 0) return '';
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.round(seconds % 60);
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+    }
+
     function renderJobItem(id, j) {
         const audioCount = Array.isArray(j.audio_tracks) ? j.audio_tracks.length : (j.audio_count || 0);
         const subCount = Array.isArray(j.subtitle_tracks) ? j.subtitle_tracks.length : (j.subtitle_count || 0);
-        const meta = `${audioCount} audio, ${subCount} subs`;
+        const parts = [`${audioCount} audio, ${subCount} subs`, `${j.segment_count} segments`];
+        if (j.duration && j.duration > 0) parts.push(formatDuration(j.duration));
+        if (j.file_size && j.file_size > 0) parts.push(formatBytes(j.file_size));
+        const meta = parts.join(' &bull; ');
         const safeName = escapeHtml(j.filename || id);
         const safeId = escapeHtml(id);
         return `<div class="job-item" id="job-${safeId}">
             <div>
                 <div class="job-name">${safeName}</div>
-                <div class="job-meta">${meta} &bull; ${j.segment_count} segments</div>
+                <div class="job-meta">${meta}</div>
             </div>
             <div class="job-actions">
                 <a class="job-link" href="/hls/${safeId}/master.m3u8" target="_blank">M3U8</a>
-                <button class="delete-btn" onclick="deleteJob('${safeId}')">Delete</button>
+                <button class="delete-btn" id="delete-${safeId}" onclick="deleteJob('${safeId}')">Delete</button>
             </div>
         </div>`;
     }
 
     function deleteJob(jobId) {
         if (!confirm('Delete this job? This cannot be undone.')) return;
+        const btn = document.getElementById(`delete-${jobId}`);
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Deleting...';
+        }
         fetch(`/api/jobs/${jobId}`, { method: 'DELETE' })
             .then(r => r.json())
             .then(data => {
-                if (data.error) { alert(data.error); return; }
+                if (data.error) {
+                    alert(data.error);
+                    if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+                    return;
+                }
                 const el = document.getElementById(`job-${jobId}`);
                 if (el) el.remove();
             })
-            .catch(() => alert('Delete failed'));
+            .catch(() => {
+                alert('Delete failed');
+                if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+            });
     }
 
     // ── Resume banner on page load ────────────────────────────────────────────
