@@ -2,51 +2,39 @@
 
 ## P0 — Breaks Core Functionality
 
-- [x] `app.py`: Job cancellation check misidentifies timeout errors as cancellation — `_is_job_cancelled` matches "timed out" string instead of using an explicit cancellation flag
-- [x] `app.py`: Chunk upload can corrupt files — writes at calculated offset without verifying file size, creating sparse file gaps on out-of-order chunks
-- [x] `hls_manager.py`: Media playlist generation missing stream_index validation for audio streams — can return None for valid audio tracks
+- [ ] `video_processor.py`: VAAPI hardware encoding with ABR scaling uses wrong filter chain — `scale` instead of `scale_vaapi` with required `hwupload`/`hwdownload` filters, causing FFmpeg failure when VAAPI + resolution scaling are both active
+- [ ] `app.py`: Upload finalize allows 1% file size tolerance (`actual_size < expected_size * 0.99`) — for a 100GB file, up to 1GB of data could be missing and still pass validation; should verify exact size or check `received_chunks == total_chunks`
 
 ## P1 — Security / Data Integrity
 
-- [x] `app.py`: Filename sanitization only uses `os.path.basename()` — insufficient against path traversal attacks
-- [x] `app.py`: Source video file deleted before verifying all Telegram segment uploads succeeded — unrecoverable on partial failure
-- [x] `telegram_uploader.py`: No integrity verification (checksum) of uploaded segments — corruption during transmission goes undetected
-- [x] `database.py`: Partial segment saves possible if commit crashes mid-transaction — can leave orphaned segments with inconsistent state
+- [ ] `templates/index.html`: XSS vulnerability in `renderJobItem` — server filename is interpolated directly into `innerHTML` (`${j.filename || id}`) without HTML escaping; `secure_filename` strips most characters but defense-in-depth requires escaping at render time
+- [ ] `app.py`: `total_size` and `total_chunks` in upload init are not safely validated — `int(data["total_size"])` raises unhandled `ValueError` on non-numeric input, returning a raw 500 to the client instead of a 400
+- [ ] `app.py`: `register_job` failure after Telegram upload completes leaves segments orphaned — segments are on Telegram with no DB record and the source file is deleted in the `finally` block, making recovery impossible
 
 ## P2 — Reliability / Error Handling
 
-- [x] `app.py`: Event loop leaked on exception — `asyncio.new_event_loop()` not cleaned up if `run_until_complete()` fails (repeated in 3 places: upload + 2 segment proxies)
-- [x] `app.py`: Race condition in job timeout checker — modifies `_active_jobs` dict concurrently with processing thread
-- [x] `video_processor.py`: FFmpeg timeout kills process abruptly and truncates stderr to 500 chars — loses error context for debugging
-- [x] `video_processor.py`: Subtitle extraction failure silently skipped — user sees no indication a subtitle track was lost
-- [x] `database.py`: `get_segment()` returns None silently — no logging for segment retrieval failures, makes debugging proxy 404s difficult
+- [ ] `app.py`: `_active_jobs` dict grows unboundedly — completed and errored jobs are never removed from the in-memory dict, causing slow memory leak over long-running server instances
+- [ ] `app.py`: `_pending_uploads` iterated without a lock in `_cleanup_expired_pending_uploads` — concurrent upload chunk requests can modify the dict during iteration, risking `RuntimeError: dictionary changed size during iteration`
+- [ ] `app.py`: New `TelegramUploader` instance created on every segment proxy request (line 744) — each instantiation creates fresh `Bot` objects, wasting resources and connections; should use a shared singleton
+- [ ] `database.py`: Thread-local database connections are never explicitly closed — when worker threads terminate, SQLite connections may not be properly cleaned up
 
 ## P3 — Performance
 
-- [x] `telegram_uploader.py`: Directory listing done twice per segment type — once for counting, once for uploading
-- [x] `hls_manager.py`: `list_jobs` pagination queries entire result set before applying LIMIT/OFFSET
-- [x] `app.py`: O(n) linear scan for duplicate filename on each upload init — bottleneck with many concurrent uploads
+- [ ] `video_processor.py`: `_detect_hw_encoder()` spawns `ffmpeg -encoders` subprocess on every job — hardware capabilities don't change at runtime; result should be cached after first probe
+- [ ] `hls_manager.py`: `list_jobs` makes 2N+1 database queries — calls `db.get_job_tracks()` twice per job (audio + subtitle tracks) even though `db.list_jobs()` already returns `audio_count` and `subtitle_count` via efficient subqueries; should use the counts directly or batch-fetch tracks
 
 ## P4 — Security Hardening
 
-- [x] `config.py`: Bot token format not validated beyond checking for `"your_"` prefix — malformed tokens only fail at runtime
-- [x] `app.py`: CORS_ALLOWED_ORIGINS splitting on empty string produces malformed origin list
-- [x] `telegram_uploader.py`: No validation of file_id format before sending to Telegram API — corrupted DB entries cause unexpected errors
+- [ ] `app.py`: CORS `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` are sent even when the origin is not allowed — these headers should only be present alongside `Access-Control-Allow-Origin`
+- [ ] `app.py`: No rate limiting on upload init or chunk endpoints — a malicious client can exhaust disk space by creating unlimited pending uploads
 
 ## P5 — Maintainability
 
-- [x] `app.py`: Event loop creation pattern duplicated 3 times — extract to helper function
-- [x] `hls_manager.py`: Bitrate parsing logic duplicated — should cache computed bandwidths
+- [ ] `telegram_uploader.py`: `TelegramUploader` is instantiated in two separate places (`_process_job` for upload and `serve_segment` for download) with no shared state — extracting a module-level singleton would simplify connection management and reduce Bot instantiation overhead
 
 ## P6 — UX Improvements
 
-- [x] `app.py`: Timeout error message doesn't indicate which pipeline step timed out (analyzing, encoding, or uploading)
-- [x] `templates/index.html`: No feedback when job list is empty vs. still loading — should show "No uploads yet"
-- [x] `templates/index.html`: Resume UI shows chunk number but not how long the upload has been pending
+- [ ] `templates/index.html`: Job list doesn't show duration or file size — `renderJobItem` only displays audio/subtitle/segment counts despite the API returning duration and file_size metadata
+- [ ] `templates/index.html`: No visual feedback when delete request is in-flight — user can click delete multiple times; button should show loading state
 
 ## P7 — New Features
-
-- [x] Add explicit job cancellation API endpoint — currently only timeout stops a running job
-- [x] Add per-segment upload progress indication — upload_current/upload_total in job state, shown in UI
-- [x] Add retention policy / cleanup for old completed jobs — JOB_RETENTION_DAYS config + hourly background purge + DELETE /api/jobs/<job_id> endpoint + UI delete button
-- [x] Add batch/queue support for multiple concurrent video uploads — MAX_CONCURRENT_JOBS worker pool, queue position shown in UI
