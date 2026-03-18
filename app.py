@@ -176,14 +176,17 @@ def _start_timeout_watcher():
                 if status in _TERMINAL_JOB_STATES:
                     continue
                 if _job_timed_out(job):
-                    job["status"] = "error"
-                    job["timed_out"] = True
-                    step = job.get("step", "processing")
-                    job["error"] = (
-                        f"Job timed out after {Config.JOB_TIMEOUT_SECONDS} seconds "
-                        f"at step: {step}"
-                    )
-                    job["step"] = "Timed out"
+                    with _job_status_lock:
+                        if job.get("status") in _TERMINAL_JOB_STATES:
+                            continue
+                        job["status"] = "error"
+                        job["timed_out"] = True
+                        step = job.get("step", "processing")
+                        job["error"] = (
+                            f"Job timed out after {Config.JOB_TIMEOUT_SECONDS} seconds "
+                            f"at step: {step}"
+                        )
+                        job["step"] = "Timed out"
                     logger.error("Job %s timed out at %s", job_id, step)
 
     Thread(target=watch, daemon=True).start()
@@ -508,8 +511,10 @@ def _process_job(job_id, file_path):
         if _is_job_cancelled(job_id):
             return
         logger.exception("Job %s failed", job_id)
-        _active_jobs[job_id]["status"] = "error"
-        _active_jobs[job_id]["error"] = str(e)
+        with _job_status_lock:
+            if not _is_job_cancelled(job_id):
+                _active_jobs[job_id]["status"] = "error"
+                _active_jobs[job_id]["error"] = str(e)
 
     finally:
         # Always clean up processing artifacts and the source upload file,

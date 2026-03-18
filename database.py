@@ -86,7 +86,10 @@ def init_db():
     for col, default_val in [("width", 0), ("height", 0), ("bitrate", "")]:
         if col not in existing_cols:
             col_type = "INTEGER" if isinstance(default_val, int) else "TEXT"
-            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {col_type} DEFAULT ?", (default_val,))
+            # DDL statements don't support parameter binding in SQLite,
+            # so we format the default value directly (safe: values are hardcoded above).
+            default_literal = str(default_val) if isinstance(default_val, int) else f"'{default_val}'"
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {col_type} DEFAULT {default_literal}")
     conn.commit()
 
     logger.info("Database initialized at %s", DB_PATH)
