@@ -63,11 +63,17 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder):
         logger.info("Video: using copy mode (codec=%s)", video.codec_name)
     elif hw_encoder:
         enc_name, enc_flags = hw_encoder
-        cmd += enc_flags + ["-c:v", enc_name, "-b:v", "4M"]
-        logger.info("Video: using hardware encoder %s", enc_name)
+        cmd += enc_flags + ["-c:v", enc_name, "-b:v", Config.VIDEO_BITRATE]
+        logger.info(
+            "Video: using hardware encoder %s at bitrate %s",
+            enc_name, Config.VIDEO_BITRATE,
+        )
     else:
-        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "22"]
-        logger.info("Video: using software encoder libx264")
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-b:v", Config.VIDEO_BITRATE]
+        logger.info(
+            "Video: using software encoder libx264 at bitrate %s",
+            Config.VIDEO_BITRATE,
+        )
 
     # HLS output
     cmd += [
