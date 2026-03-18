@@ -46,7 +46,7 @@
 
 ## P7 — New Features
 
-- [ ] Add explicit job cancellation API endpoint — currently only timeout stops a running job
+- [x] Add explicit job cancellation API endpoint — currently only timeout stops a running job
 - [ ] Add per-segment upload progress indication — currently only total progress is shown
 - [ ] Add retention policy / cleanup for old completed jobs — database grows unbounded
 - [ ] Add batch/queue support for multiple concurrent video uploads

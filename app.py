@@ -191,7 +191,30 @@ def _is_job_cancelled(job_id):
     job = _active_jobs.get(job_id)
     if not job:
         return True
-    return bool(job.get("timed_out"))
+    return bool(job.get("timed_out") or job.get("cancelled"))
+
+
+@app.route("/api/cancel/<job_id>", methods=["POST"])
+def cancel_job(job_id):
+    """Cancel a running job."""
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
+
+    job = _active_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found or already finished"}), 404
+
+    if job.get("status") in _TERMINAL_JOB_STATES:
+        return jsonify({"error": "Cannot cancel a finished job"}), 400
+
+    job["status"] = "error"
+    job["cancelled"] = True
+    job["error"] = "Job cancelled by user"
+    job["step"] = "Cancelled"
+
+    logger.info("Job %s cancelled by user", job_id)
+    return jsonify({"message": "Job cancellation requested"})
 
 
 _start_timeout_watcher()

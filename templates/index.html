@@ -147,6 +147,7 @@
     const resumeBannerText = document.getElementById('resumeBannerText');
 
     let isCancelled = false;
+    let currentJobId = null;
 
     // ── Pagination state ──────────────────────────────────────────────────────
     let jobsPage = 1;
@@ -199,6 +200,10 @@
     function cancelUpload() {
         isCancelled = true;
         clearPendingUpload();
+        if (currentJobId) {
+            fetch(`/api/cancel/${currentJobId}`, { method: 'POST' }).catch(() => {});
+            currentJobId = null;
+        }
     }
 
     // ── Main upload flow ──────────────────────────────────────────────────────
@@ -224,6 +229,7 @@
         progressBar.style.width = '0%';
         progressPct.textContent = '0%';
         speedText.textContent = '';
+        currentJobId = null;
 
         // Check for a resumable upload matching this file
         let uploadId = null;
@@ -319,6 +325,7 @@
                 throw new Error(err.error || 'Finalize failed');
             }
             const {job_id} = await finalResp.json();
+            currentJobId = job_id;
 
             // Upload complete — clear resume state
             clearPendingUpload();
@@ -386,12 +393,14 @@
 
                     if (data.status === 'complete') {
                         clearInterval(interval);
+                        currentJobId = null;
                         showResult(jobId);
                         uploadArea.classList.remove('disabled');
                         jobsPage = 1;
                         loadJobs();
                     } else if (data.status === 'error') {
                         clearInterval(interval);
+                        currentJobId = null;
                         showError(data.error || 'Processing failed');
                         uploadArea.classList.remove('disabled');
                     }
