@@ -47,6 +47,6 @@
 ## P7 — New Features
 
 - [x] Add explicit job cancellation API endpoint — currently only timeout stops a running job
-- [ ] Add per-segment upload progress indication — currently only total progress is shown
-- [ ] Add retention policy / cleanup for old completed jobs — database grows unbounded
-- [ ] Add batch/queue support for multiple concurrent video uploads
+- [x] Add per-segment upload progress indication — upload_current/upload_total in job state, shown in UI
+- [x] Add retention policy / cleanup for old completed jobs — JOB_RETENTION_DAYS config + hourly background purge + DELETE /api/jobs/<job_id> endpoint + UI delete button
+- [x] Add batch/queue support for multiple concurrent video uploads — MAX_CONCURRENT_JOBS worker pool, queue position shown in UI

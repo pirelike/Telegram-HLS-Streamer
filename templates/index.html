@@ -64,6 +64,9 @@
         .load-more-btn { display: none; width: 100%; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 0.7rem; border-radius: 8px; cursor: pointer; font-size: 0.9rem; margin-top: 0.5rem; }
         .load-more-btn:hover { border-color: #58a6ff; color: #58a6ff; }
         .load-more-btn.visible { display: block; }
+        .job-actions { display: flex; align-items: center; gap: 0.6rem; }
+        .delete-btn { background: none; border: 1px solid rgba(248,81,73,0.4); color: #f85149; padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .delete-btn:hover { background: rgba(248,81,73,0.1); }
 
         .error-msg { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.4); color: #f85149; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; display: none; }
         .error-msg.active { display: block; }
@@ -376,14 +379,31 @@
                     if (data.analysis && !analysisCard.classList.contains('active')) {
                         showAnalysis(data.analysis);
                     }
-                    const statusMap = {
-                        'analyzing': 'Analyzing video streams...',
-                        'processing': 'Splitting into separate streams...',
-                        'uploading_telegram': 'Uploading segments to Telegram...',
-                        'complete': 'Complete!',
-                        'error': 'Error: ' + (data.error || 'Unknown'),
-                    };
-                    statusText.textContent = statusMap[data.status] || data.status;
+
+                    let statusLabel;
+                    if (data.status === 'queued') {
+                        const pos = data.queue_position;
+                        statusLabel = pos != null
+                            ? `Queued for processing... (position ${pos} in queue)`
+                            : 'Queued for processing...';
+                    } else if (data.status === 'analyzing') {
+                        statusLabel = 'Analyzing video streams...';
+                    } else if (data.status === 'processing') {
+                        statusLabel = 'Splitting into separate streams...';
+                    } else if (data.status === 'uploading_telegram') {
+                        const cur = data.upload_current, tot = data.upload_total;
+                        statusLabel = (cur != null && tot != null)
+                            ? `Uploading segments to Telegram... (${cur} / ${tot})`
+                            : 'Uploading segments to Telegram...';
+                    } else if (data.status === 'complete') {
+                        statusLabel = 'Complete!';
+                    } else if (data.status === 'error') {
+                        statusLabel = 'Error: ' + (data.error || 'Unknown');
+                    } else {
+                        statusLabel = data.status;
+                    }
+
+                    statusText.textContent = statusLabel;
                     if (data.step) progressStep.textContent = data.step;
                     if (data.progress !== undefined) {
                         progressBar.style.width = data.progress + '%';
@@ -505,14 +525,31 @@
     }
 
     function renderJobItem(id, j) {
-        const meta = `${j.audio_tracks.length} audio, ${j.subtitle_tracks.length} subs`;
-        return `<div class="job-item">
+        const audioCount = Array.isArray(j.audio_tracks) ? j.audio_tracks.length : (j.audio_count || 0);
+        const subCount = Array.isArray(j.subtitle_tracks) ? j.subtitle_tracks.length : (j.subtitle_count || 0);
+        const meta = `${audioCount} audio, ${subCount} subs`;
+        return `<div class="job-item" id="job-${id}">
             <div>
                 <div class="job-name">${j.filename || id}</div>
                 <div class="job-meta">${meta} &bull; ${j.segment_count} segments</div>
             </div>
-            <a class="job-link" href="/hls/${id}/master.m3u8" target="_blank">M3U8</a>
+            <div class="job-actions">
+                <a class="job-link" href="/hls/${id}/master.m3u8" target="_blank">M3U8</a>
+                <button class="delete-btn" onclick="deleteJob('${id}')">Delete</button>
+            </div>
         </div>`;
+    }
+
+    function deleteJob(jobId) {
+        if (!confirm('Delete this job? This cannot be undone.')) return;
+        fetch(`/api/jobs/${jobId}`, { method: 'DELETE' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { alert(data.error); return; }
+                const el = document.getElementById(`job-${jobId}`);
+                if (el) el.remove();
+            })
+            .catch(() => alert('Delete failed'));
     }
 
     // ── Resume banner on page load ────────────────────────────────────────────

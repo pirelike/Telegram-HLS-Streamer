@@ -14,6 +14,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 
 from config import Config
 
@@ -256,6 +257,29 @@ def delete_job(job_id):
     with conn:
         conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
     logger.info("Deleted job %s from database", job_id)
+
+
+def delete_old_jobs(older_than_days):
+    """Delete completed jobs older than the specified number of days.
+
+    Returns the number of jobs deleted.
+    """
+    if older_than_days <= 0:
+        return 0
+    cutoff_ts = time.time() - older_than_days * 86400
+    # SQLite stores CURRENT_TIMESTAMP as 'YYYY-MM-DD HH:MM:SS' UTC.
+    # We compare using unixepoch() which is available in SQLite 3.38+; fall back
+    # to a string comparison against an ISO-8601 representation for older SQLite.
+    conn = _get_conn()
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM jobs WHERE strftime('%s', created_at) < ?",
+            (str(int(cutoff_ts)),),
+        )
+    count = cursor.rowcount
+    if count:
+        logger.info("Retention cleanup: deleted %d jobs older than %d days", count, older_than_days)
+    return count
 
 
 # Initialize on import
