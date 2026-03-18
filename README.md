@@ -51,6 +51,7 @@ ENABLE_COPY_MODE=true
 # Hardware Acceleration (auto-detected)
 ENABLE_HARDWARE_ACCELERATION=true
 PREFERRED_ENCODER=vaapi  # vaapi, nvenc, qsv
+VIDEO_BITRATE=4M         # target video bitrate when encoding
 
 # Bot Tokens
 TELEGRAM_BOT_TOKEN_1=your_bot_1_token
@@ -61,6 +62,9 @@ TELEGRAM_BOT_TOKEN_2=your_bot_2_token
 TELEGRAM_CHANNEL_ID_1=-100xxxxxxxxxx
 TELEGRAM_CHANNEL_ID_2=-100xxxxxxxxxx
 # ... corresponding channels
+
+# Upload performance
+UPLOAD_PARALLELISM=8     # concurrent uploads cap across bots
 ```
 
 ### Copy Mode Logic

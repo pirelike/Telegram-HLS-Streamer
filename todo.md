@@ -22,8 +22,8 @@
 
 ## P3 — Performance
 
-- [ ] **`telegram_uploader.py`** — Parallelize uploads across bots → currently sequential despite 8 available bots (~8x speedup possible)
-- [ ] **`video_processor.py`** — Make video bitrate configurable → hardcoded `4M` is wrong quality for most videos
+- [x] **`telegram_uploader.py`** — Parallelize uploads across bots → currently sequential despite 8 available bots (~8x speedup possible)
+- [x] **`video_processor.py`** — Make video bitrate configurable → hardcoded `4M` is wrong quality for most videos
 
 ## P4 — Security Hardening
 

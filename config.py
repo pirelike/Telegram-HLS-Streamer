@@ -20,6 +20,7 @@ class Config:
     # Hardware acceleration
     ENABLE_HW_ACCEL = os.getenv("ENABLE_HARDWARE_ACCELERATION", "true").lower() == "true"
     PREFERRED_ENCODER = os.getenv("PREFERRED_ENCODER", "vaapi")
+    VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "4M")
 
     # HLS
     HLS_SEGMENT_DURATION = int(os.getenv("HLS_SEGMENT_DURATION", "4"))
@@ -37,6 +38,7 @@ class Config:
 
     # Telegram bots
     BOTS = []
+    UPLOAD_PARALLELISM = int(os.getenv("UPLOAD_PARALLELISM", "8"))
 
     @classmethod
     def load_bots(cls):

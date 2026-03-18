@@ -54,6 +54,7 @@ class TelegramUploader:
                 "index": i,
             })
         self._bot_counter = 0
+        self._bot_locks = [asyncio.Lock() for _ in self.bots]
 
     def _next_bot(self):
         """Round-robin bot selection."""
@@ -120,28 +121,48 @@ class TelegramUploader:
 
         raise RuntimeError(f"Failed to upload {file_path} after {retries} attempts")
 
-    async def upload_directory(self, directory, path_prefix, progress_callback=None):
-        """Upload all .ts and .vtt files from a directory.
+    async def _upload_file_with_bot_lock(self, file_path, bot_entry):
+        """Upload file while ensuring one in-flight upload per bot."""
+        bot_index = bot_entry["index"]
+        async with self._bot_locks[bot_index]:
+            return await self._upload_file(file_path, bot_entry)
 
-        Returns dict mapping "prefix/filename" -> UploadedSegment
+    async def upload_files(self, files, progress_callback=None):
+        """Upload provided files in parallel with per-bot serialization.
+
+        Args:
+            files: list of (key, file_path) tuples
+            progress_callback: callback(current, total, key)
         """
-        segments = {}
-        files = sorted([
-            f for f in os.listdir(directory)
-            if f.endswith((".ts", ".vtt"))
-        ])
+        if not files:
+            return {}
 
-        for i, filename in enumerate(files):
-            file_path = os.path.join(directory, filename)
+        max_parallelism = min(
+            len(self.bots),
+            max(1, Config.UPLOAD_PARALLELISM),
+            len(files),
+        )
+        semaphore = asyncio.Semaphore(max_parallelism)
+        uploaded = {}
+        total = len(files)
+        completed = 0
+
+        async def worker(key, file_path):
+            nonlocal completed
             bot_entry = self._next_bot()
-            segment = await self._upload_file(file_path, bot_entry)
-            key = f"{path_prefix}/{filename}"
-            segments[key] = segment
-
+            async with semaphore:
+                segment = await self._upload_file_with_bot_lock(file_path, bot_entry)
+            completed += 1
             if progress_callback:
-                progress_callback(i + 1, len(files), key)
+                progress_callback(completed, total, key)
+            return key, segment
 
-        return segments
+        tasks = [asyncio.create_task(worker(key, path)) for key, path in files]
+        for task in asyncio.as_completed(tasks):
+            key, segment = await task
+            uploaded[key] = segment
+
+        return uploaded
 
     async def upload_job(self, processing_result, progress_callback=None):
         """Upload all segments from a processing result.
@@ -174,27 +195,31 @@ class TelegramUploader:
 
         # Upload video segments
         if processing_result.video_playlist:
-            video_segments = await self.upload_directory(
-                processing_result.output_dir, "video", on_segment,
-            )
+            video_files = [
+                (f"video/{filename}", os.path.join(processing_result.output_dir, filename))
+                for filename in sorted(os.listdir(processing_result.output_dir))
+                if filename.endswith(".ts")
+            ]
+            video_segments = await self.upload_files(video_files, on_segment)
             result.segments.update(video_segments)
 
         # Upload audio track segments
         for i, (_, audio_dir, lang, title, _) in enumerate(processing_result.audio_playlists):
-            audio_segments = await self.upload_directory(
-                audio_dir, f"audio_{i}", on_segment,
-            )
+            audio_files = [
+                (f"audio_{i}/{filename}", os.path.join(audio_dir, filename))
+                for filename in sorted(os.listdir(audio_dir))
+                if filename.endswith(".ts")
+            ]
+            audio_segments = await self.upload_files(audio_files, on_segment)
             result.segments.update(audio_segments)
 
         # Upload subtitle files
-        for i, (vtt_path, sub_dir, lang, title) in enumerate(processing_result.subtitle_files):
-            bot_entry = self._next_bot()
-            segment = await self._upload_file(vtt_path, bot_entry)
-            key = f"sub_{i}/subtitles.vtt"
-            result.segments[key] = segment
-            uploaded_files += 1
-            if progress_callback:
-                progress_callback(uploaded_files, total_files, key)
+        subtitle_files = [
+            (f"sub_{i}/subtitles.vtt", vtt_path)
+            for i, (vtt_path, _, _, _) in enumerate(processing_result.subtitle_files)
+        ]
+        subtitle_segments = await self.upload_files(subtitle_files, on_segment)
+        result.segments.update(subtitle_segments)
 
         result.total_files = len(result.segments)
         result.total_bytes = sum(s.file_size for s in result.segments.values())
