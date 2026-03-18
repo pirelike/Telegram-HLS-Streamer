@@ -160,7 +160,7 @@ def job_status(job_id):
         return jsonify(_active_jobs[job_id])
     job = get_job(job_id)
     if job:
-        return jsonify({"status": "complete", "progress": 100, **job.to_dict()})
+        return jsonify({"status": "complete", "progress": 100, **job})
     return jsonify({"error": "Job not found"}), 404
 
 

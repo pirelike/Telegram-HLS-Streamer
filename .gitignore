@@ -1,4 +1,5 @@
 .env
+streamer.db
 uploads/
 processing/
 __pycache__/
