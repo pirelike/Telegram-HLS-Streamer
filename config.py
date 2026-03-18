@@ -72,6 +72,12 @@ class Config:
         if origin.strip()
     ]
 
+    # Rate limiting for upload endpoints (per IP)
+    UPLOAD_RATE_LIMIT_WINDOW = _int_env("UPLOAD_RATE_LIMIT_WINDOW", 60)  # seconds
+    UPLOAD_RATE_LIMIT_MAX_REQUESTS = _int_env("UPLOAD_RATE_LIMIT_MAX_REQUESTS", 100)
+    # Max concurrent pending uploads per IP (0 = unlimited)
+    MAX_PENDING_UPLOADS_PER_IP = _int_env("MAX_PENDING_UPLOADS_PER_IP", 5)
+
     # Optional auth for upload endpoints
     UPLOAD_API_KEY = os.getenv("UPLOAD_API_KEY", "").strip()
     UPLOAD_BASIC_USER = os.getenv("UPLOAD_BASIC_USER", "").strip()

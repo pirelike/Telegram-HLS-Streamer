@@ -25,8 +25,8 @@
 
 ## P4 — Security Hardening
 
-- [ ] `app.py`: CORS `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` are sent even when the origin is not allowed — these headers should only be present alongside `Access-Control-Allow-Origin`
-- [ ] `app.py`: No rate limiting on upload init or chunk endpoints — a malicious client can exhaust disk space by creating unlimited pending uploads
+- [x] `app.py`: CORS `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` are sent even when the origin is not allowed — these headers should only be present alongside `Access-Control-Allow-Origin`
+- [x] `app.py`: No rate limiting on upload init or chunk endpoints — a malicious client can exhaust disk space by creating unlimited pending uploads
 
 ## P5 — Maintainability
 
