@@ -10,6 +10,7 @@ Web server that handles:
 
 import asyncio
 import base64
+import collections
 import logging
 import os
 import queue
@@ -52,6 +53,48 @@ _pending_uploads_lock = Lock()  # protects _pending_uploads, _pending_filenames,
 _upload_locks = {}
 _last_pending_cleanup = 0.0
 _watcher_started = False
+
+# ─── Upload Rate Limiting ───
+# Per-IP sliding window: maps IP -> deque of request timestamps
+_rate_limit_hits = collections.defaultdict(collections.deque)
+_rate_limit_lock = Lock()
+# Per-IP pending upload count (incremented on init, decremented on finalize/expiry)
+_pending_uploads_per_ip = collections.Counter()
+
+
+def _get_client_ip():
+    """Return the client IP, respecting X-Forwarded-For when behind a proxy."""
+    if Config.BEHIND_PROXY:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _check_rate_limit():
+    """Return a 429 response tuple if the client IP exceeds the rate limit, else None."""
+    window = Config.UPLOAD_RATE_LIMIT_WINDOW
+    max_requests = Config.UPLOAD_RATE_LIMIT_MAX_REQUESTS
+    if max_requests <= 0:
+        return None  # rate limiting disabled
+
+    ip = _get_client_ip()
+    now = time.time()
+    cutoff = now - window
+
+    with _rate_limit_lock:
+        timestamps = _rate_limit_hits[ip]
+        # Evict timestamps outside the window
+        while timestamps and timestamps[0] < cutoff:
+            timestamps.popleft()
+        if len(timestamps) >= max_requests:
+            return jsonify({
+                "error": "Rate limit exceeded. Try again later.",
+            }), 429
+        timestamps.append(now)
+
+    return None
+
 
 _TERMINAL_JOB_STATES = {"complete", "error"}
 # How long to keep finished jobs in _active_jobs before eviction (seconds).
@@ -158,6 +201,9 @@ def _cleanup_expired_pending_uploads(force=False):
                 continue
             _pending_filenames.pop(info.get("filename"), None)
             _upload_locks.pop(upload_id, None)
+            ip = info.get("client_ip", "unknown")
+            if _pending_uploads_per_ip[ip] > 0:
+                _pending_uploads_per_ip[ip] -= 1
             path = info.get("path")
             if path:
                 paths_to_remove.append((upload_id, info.get("filename"), path))
@@ -367,7 +413,20 @@ def upload_init():
     unauthorized = _require_upload_auth()
     if unauthorized:
         return unauthorized
+    rate_limited = _check_rate_limit()
+    if rate_limited:
+        return rate_limited
     _cleanup_expired_pending_uploads()
+
+    # Enforce per-IP pending upload limit
+    if Config.MAX_PENDING_UPLOADS_PER_IP > 0:
+        ip = _get_client_ip()
+        with _pending_uploads_lock:
+            if _pending_uploads_per_ip[ip] >= Config.MAX_PENDING_UPLOADS_PER_IP:
+                return jsonify({
+                    "error": "Too many pending uploads. Finalize or wait for existing uploads to expire.",
+                }), 429
+
     data = request.get_json()
     if not data or "filename" not in data or "total_size" not in data:
         return jsonify({"error": "filename and total_size required"}), 400
@@ -411,6 +470,7 @@ def upload_init():
         logger.error("Failed to create upload file %s: %s", upload_path, e)
         return jsonify({"error": "Failed to create upload file on server"}), 500
 
+    ip = _get_client_ip()
     with _pending_uploads_lock:
         _pending_uploads[upload_id] = {
             "path": upload_path,
@@ -422,9 +482,11 @@ def upload_init():
             "received_chunk_indices": set(),
             "created_ts": time.time(),
             "last_activity_ts": time.time(),
+            "client_ip": ip,
         }
         _pending_filenames[filename] = upload_id
         _upload_locks[upload_id] = Lock()
+        _pending_uploads_per_ip[ip] += 1
 
     logger.info(
         "Upload initialized: %s, file=%s, size=%d bytes (%d chunks)",
@@ -449,6 +511,9 @@ def upload_chunk():
     unauthorized = _require_upload_auth()
     if unauthorized:
         return unauthorized
+    rate_limited = _check_rate_limit()
+    if rate_limited:
+        return rate_limited
     _cleanup_expired_pending_uploads()
     upload_id = request.headers.get("X-Upload-Id")
     chunk_index = request.headers.get("X-Chunk-Index")
@@ -543,6 +608,9 @@ def upload_finalize():
         upload = _pending_uploads.pop(upload_id)
         _pending_filenames.pop(upload["filename"], None)
         _upload_locks.pop(upload_id, None)
+        ip = upload.get("client_ip", "unknown")
+        if _pending_uploads_per_ip[ip] > 0:
+            _pending_uploads_per_ip[ip] -= 1
     file_path = upload["path"]
     filename = upload["filename"]
 
@@ -830,10 +898,10 @@ def add_cors(response):
         if _is_origin_allowed(origin):
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = (
-            "Content-Type, Authorization, X-API-Key, X-Upload-Id, X-Chunk-Index"
-        )
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization, X-API-Key, X-Upload-Id, X-Chunk-Index"
+            )
     return response
 
 
