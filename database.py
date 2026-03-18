@@ -101,67 +101,64 @@ def save_job(job_id, analysis, processing_result, upload_result):
     conn = _get_conn()
 
     try:
-        conn.execute("BEGIN")
+        with conn:
+            video = analysis.video_streams[0] if analysis.has_video else None
 
-        video = analysis.video_streams[0] if analysis.has_video else None
-
-        conn.execute(
-            """INSERT OR REPLACE INTO jobs
-               (job_id, filename, duration, file_size, video_codec, video_width, video_height)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                job_id,
-                os.path.basename(analysis.file_path),
-                analysis.duration,
-                analysis.file_size,
-                video.codec_name if video else None,
-                video.width if video else 0,
-                video.height if video else 0,
-            ),
-        )
-
-        # Save video tracks (ABR tiers)
-        for i, (_, _, width, height, bitrate) in enumerate(processing_result.video_playlists):
             conn.execute(
-                """INSERT OR REPLACE INTO tracks
-                   (job_id, track_type, track_index, codec, language, title, channels, width, height, bitrate)
-                   VALUES (?, 'video', ?, ?, 'und', ?, 0, ?, ?, ?)""",
-                (job_id, i, video.codec_name if video else "h264",
-                 f"{width}x{height}", width, height, bitrate),
+                """INSERT OR REPLACE INTO jobs
+                   (job_id, filename, duration, file_size, video_codec, video_width, video_height)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    job_id,
+                    os.path.basename(analysis.file_path),
+                    analysis.duration,
+                    analysis.file_size,
+                    video.codec_name if video else None,
+                    video.width if video else 0,
+                    video.height if video else 0,
+                ),
             )
 
-        # Save audio tracks
-        for i, (_, _, lang, title, channels) in enumerate(processing_result.audio_playlists):
-            audio = analysis.audio_streams[i] if i < len(analysis.audio_streams) else None
-            conn.execute(
-                """INSERT OR REPLACE INTO tracks
-                   (job_id, track_type, track_index, codec, language, title, channels)
-                   VALUES (?, 'audio', ?, ?, ?, ?, ?)""",
-                (job_id, i, audio.codec_name if audio else "aac", lang, title, channels),
-            )
+            # Save video tracks (ABR tiers)
+            for i, (_, _, width, height, bitrate) in enumerate(processing_result.video_playlists):
+                conn.execute(
+                    """INSERT OR REPLACE INTO tracks
+                       (job_id, track_type, track_index, codec, language, title, channels, width, height, bitrate)
+                       VALUES (?, 'video', ?, ?, 'und', ?, 0, ?, ?, ?)""",
+                    (job_id, i, video.codec_name if video else "h264",
+                     f"{width}x{height}", width, height, bitrate),
+                )
 
-        # Save subtitle tracks
-        for i, (_, _, lang, title) in enumerate(processing_result.subtitle_files):
-            sub = analysis.subtitle_streams[i] if i < len(analysis.subtitle_streams) else None
-            conn.execute(
-                """INSERT OR REPLACE INTO tracks
-                   (job_id, track_type, track_index, codec, language, title, channels)
-                   VALUES (?, 'subtitle', ?, ?, ?, ?, 0)""",
-                (job_id, i, sub.codec_name if sub else "webvtt", lang, title),
-            )
+            # Save audio tracks
+            for i, (_, _, lang, title, channels) in enumerate(processing_result.audio_playlists):
+                audio = analysis.audio_streams[i] if i < len(analysis.audio_streams) else None
+                conn.execute(
+                    """INSERT OR REPLACE INTO tracks
+                       (job_id, track_type, track_index, codec, language, title, channels)
+                       VALUES (?, 'audio', ?, ?, ?, ?, ?)""",
+                    (job_id, i, audio.codec_name if audio else "aac", lang, title, channels),
+                )
 
-        # Save all segment mappings (the critical Telegram file_id references)
-        for key, seg in upload_result.segments.items():
-            conn.execute(
-                """INSERT OR REPLACE INTO segments
-                   (job_id, segment_key, file_id, bot_index, file_size)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (job_id, key, seg.file_id, seg.bot_index, seg.file_size),
-            )
+            # Save subtitle tracks
+            for i, (_, _, lang, title) in enumerate(processing_result.subtitle_files):
+                sub = analysis.subtitle_streams[i] if i < len(analysis.subtitle_streams) else None
+                conn.execute(
+                    """INSERT OR REPLACE INTO tracks
+                       (job_id, track_type, track_index, codec, language, title, channels)
+                       VALUES (?, 'subtitle', ?, ?, ?, ?, 0)""",
+                    (job_id, i, sub.codec_name if sub else "webvtt", lang, title),
+                )
 
-        conn.commit()
+            # Save all segment mappings (the critical Telegram file_id references)
+            for key, seg in upload_result.segments.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO segments
+                       (job_id, segment_key, file_id, bot_index, file_size)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (job_id, key, seg.file_id, seg.bot_index, seg.file_size),
+                )
+
     except Exception:
-        conn.rollback()
         logger.exception("Failed to save job %s, rolled back transaction", job_id)
         raise
 

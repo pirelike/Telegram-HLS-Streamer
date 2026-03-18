@@ -96,7 +96,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
             path = f.name
 
         try:
-            message = Mock(document=Mock(file_id="file123"))
+            message = Mock(document=Mock(file_id="file123", file_size=3))
             self.bot_instances[0].send_document = AsyncMock(return_value=message)
             result = await self.uploader._upload_file(path, self.uploader.bots[0])
             self.assertEqual(result.file_id, "file123")
