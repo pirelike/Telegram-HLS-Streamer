@@ -77,16 +77,16 @@ class TestVideoProcessor(unittest.TestCase):
     def test_build_video_cmd_variants(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                cmd, playlist, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
+                cmd, playlist = vp._build_video_cmd(self.analysis, tmpdir, None)
             self.assertIn("copy", cmd)
             self.assertTrue(playlist.endswith("video.m3u8"))
 
             with patch.object(vp.Config, "ENABLE_COPY_MODE", False), patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                hw_cmd, _, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]))
+                hw_cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]))
             self.assertIn("h264_vaapi", hw_cmd)
 
             with patch.object(vp.Config, "ENABLE_COPY_MODE", False), patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                sw_cmd, _, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
+                sw_cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
             self.assertIn("libx264", sw_cmd)
 
     def test_build_audio_cmd_and_extract_subtitle(self):

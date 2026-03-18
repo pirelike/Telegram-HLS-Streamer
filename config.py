@@ -21,6 +21,7 @@ class Config:
     ENABLE_HW_ACCEL = os.getenv("ENABLE_HARDWARE_ACCELERATION", "true").lower() == "true"
     PREFERRED_ENCODER = os.getenv("PREFERRED_ENCODER", "vaapi")
     VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "4M")
+    AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "128k")
 
     # HLS
     HLS_SEGMENT_DURATION = int(os.getenv("HLS_SEGMENT_DURATION", "4"))
