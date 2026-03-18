@@ -20,8 +20,8 @@
 
 ## P3 — Performance
 
-- [ ] `video_processor.py`: `_detect_hw_encoder()` spawns `ffmpeg -encoders` subprocess on every job — hardware capabilities don't change at runtime; result should be cached after first probe
-- [ ] `hls_manager.py`: `list_jobs` makes 2N+1 database queries — calls `db.get_job_tracks()` twice per job (audio + subtitle tracks) even though `db.list_jobs()` already returns `audio_count` and `subtitle_count` via efficient subqueries; should use the counts directly or batch-fetch tracks
+- [x] `video_processor.py`: `_detect_hw_encoder()` spawns `ffmpeg -encoders` subprocess on every job — hardware capabilities don't change at runtime; result should be cached after first probe
+- [x] `hls_manager.py`: `list_jobs` makes 2N+1 database queries — calls `db.get_job_tracks()` twice per job (audio + subtitle tracks) even though `db.list_jobs()` already returns `audio_count` and `subtitle_count` via efficient subqueries; should use the counts directly or batch-fetch tracks
 
 ## P4 — Security Hardening
 

@@ -50,6 +50,9 @@ class TestConfig(unittest.TestCase):
 
 class TestVideoProcessor(unittest.TestCase):
     def setUp(self):
+        # Reset hardware encoder cache between tests
+        vp._hw_encoder_probed = False
+        vp._hw_encoder_cache = None
         self.analysis = SimpleNamespace(
             file_path="/tmp/in.mp4",
             has_video=True,

@@ -18,9 +18,21 @@ from stream_analyzer import MediaAnalysis
 logger = logging.getLogger(__name__)
 
 
+_hw_encoder_cache = None
+_hw_encoder_probed = False
+
+
 def _detect_hw_encoder():
-    """Detect available hardware encoder."""
+    """Detect available hardware encoder. Result is cached after first probe."""
+    global _hw_encoder_cache, _hw_encoder_probed
+
+    if _hw_encoder_probed:
+        return _hw_encoder_cache
+
+    _hw_encoder_probed = True
+
     if not Config.ENABLE_HW_ACCEL:
+        _hw_encoder_cache = None
         return None
 
     encoders = {
@@ -39,10 +51,12 @@ def _detect_hw_encoder():
             )
             if enc_name in result.stdout:
                 logger.info("Using hardware encoder: %s", enc_name)
-                return encoders[preferred]
+                _hw_encoder_cache = encoders[preferred]
+                return _hw_encoder_cache
         except Exception:
             pass
 
+    _hw_encoder_cache = None
     return None
 
 
