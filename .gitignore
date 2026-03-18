@@ -1,0 +1,7 @@
+.env
+uploads/
+processing/
+__pycache__/
+*.pyc
+.venv/
+venv/

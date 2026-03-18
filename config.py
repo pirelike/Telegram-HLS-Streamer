@@ -1,0 +1,46 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Config:
+    # Server
+    HOST = os.getenv("LOCAL_HOST", "0.0.0.0")
+    PORT = int(os.getenv("LOCAL_PORT", "5050"))
+    FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
+    BEHIND_PROXY = os.getenv("BEHIND_PROXY", "true").lower() == "true"
+
+    # File handling
+    TELEGRAM_MAX_FILE_SIZE = int(os.getenv("TELEGRAM_MAX_FILE_SIZE", "20971520"))
+    MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "21474836480"))
+    ENABLE_COPY_MODE = os.getenv("ENABLE_COPY_MODE", "true").lower() == "true"
+
+    # Hardware acceleration
+    ENABLE_HW_ACCEL = os.getenv("ENABLE_HARDWARE_ACCELERATION", "true").lower() == "true"
+    PREFERRED_ENCODER = os.getenv("PREFERRED_ENCODER", "vaapi")
+
+    # HLS
+    HLS_SEGMENT_DURATION = int(os.getenv("HLS_SEGMENT_DURATION", "4"))
+
+    # Directories
+    UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+    PROCESSING_DIR = os.path.join(os.path.dirname(__file__), "processing")
+
+    # Telegram bots
+    BOTS = []
+
+    @classmethod
+    def load_bots(cls):
+        cls.BOTS = []
+        for i in range(1, 9):
+            token = os.getenv(f"TELEGRAM_BOT_TOKEN_{i}")
+            channel = os.getenv(f"TELEGRAM_CHANNEL_ID_{i}")
+            if token and channel and not token.startswith("your_"):
+                cls.BOTS.append({"token": token, "channel_id": int(channel)})
+        return cls.BOTS
+
+
+Config.load_bots()
+os.makedirs(Config.UPLOAD_DIR, exist_ok=True)
+os.makedirs(Config.PROCESSING_DIR, exist_ok=True)
