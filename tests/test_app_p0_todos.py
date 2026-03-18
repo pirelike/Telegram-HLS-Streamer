@@ -57,6 +57,16 @@ class TestP0TodoFixes(unittest.TestCase):
         app_module._active_jobs["job1"]["timed_out"] = True
         self.assertTrue(app_module._is_job_cancelled("job1"))
 
+    def test_upload_chunk_rejects_negative_chunk_index(self):
+        upload_id = self._init_upload()
+        resp = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "-1"},
+            data=b"AAAA",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("must be >= 0", resp.get_json()["error"])
+
     def test_upload_chunk_rejects_out_of_order_gap(self):
         upload_id = self._init_upload()
 
@@ -108,6 +118,59 @@ class TestP0TodoFixes(unittest.TestCase):
         retry_data = retry.get_json()
         self.assertEqual(retry_data["received_chunks"], 1)
         self.assertTrue(retry_data["is_retry"])
+
+    def test_upload_chunk_rejects_overlap_non_retry(self):
+        upload_id = self._init_upload(total_size=8, total_chunks=2)
+        first = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"AAAA",
+        )
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "1"},
+            data=b"BBBB",
+        )
+        self.assertEqual(second.status_code, 200)
+
+        app_module._pending_uploads[upload_id]["received_chunk_indices"].discard(0)
+        overlap = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"AAAA",
+        )
+        self.assertEqual(overlap.status_code, 409)
+        self.assertIn("overlaps", overlap.get_json()["error"])
+
+    def test_upload_chunk_rejects_boundary_violations(self):
+        upload_id = self._init_upload(total_size=8, total_chunks=2)
+
+        out_of_bounds = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "2"},
+            data=b"AAAA",
+        )
+        self.assertEqual(out_of_bounds.status_code, 400)
+        self.assertIn("exceeds file size", out_of_bounds.get_json()["error"])
+
+        too_large = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "1"},
+            data=b"BBBBB",
+        )
+        self.assertEqual(too_large.status_code, 400)
+        self.assertIn("exceeds declared total size", too_large.get_json()["error"])
+
+    def test_upload_chunk_rejects_non_final_partial_chunk(self):
+        upload_id = self._init_upload(total_size=12, total_chunks=3)
+        resp = self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"AA",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid chunk size", resp.get_json()["error"])
 
 
 if __name__ == "__main__":

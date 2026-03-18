@@ -153,11 +153,12 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as root:
             out_dir = os.path.join(root, "out")
+            video_dir = os.path.join(out_dir, "video_0")
             audio_dir = os.path.join(root, "audio_0")
-            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(video_dir, exist_ok=True)
             os.makedirs(audio_dir, exist_ok=True)
 
-            for path in [os.path.join(out_dir, "video_0001.ts"), os.path.join(audio_dir, "audio_0001.ts")]:
+            for path in [os.path.join(video_dir, "video_0001.ts"), os.path.join(audio_dir, "audio_0001.ts")]:
                 with open(path, "wb") as f:
                     f.write(b"abc")
 
@@ -168,7 +169,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
             proc = Mock(
                 job_id="job",
                 output_dir=out_dir,
-                video_playlist=os.path.join(out_dir, "video.m3u8"),
+                video_playlists=[(os.path.join(video_dir, "video.m3u8"), video_dir, 1280, 720, "2500k")],
                 audio_playlists=[("a.m3u8", audio_dir, "eng", "English", 2)],
                 subtitle_files=[(vtt, os.path.dirname(vtt), "eng", "English")],
             )
