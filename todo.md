@@ -2,8 +2,8 @@
 
 ## P0 — Breaks Core Functionality
 
-- [ ] `video_processor.py`: VAAPI hardware encoding with ABR scaling uses wrong filter chain — `scale` instead of `scale_vaapi` with required `hwupload`/`hwdownload` filters, causing FFmpeg failure when VAAPI + resolution scaling are both active
-- [ ] `app.py`: Upload finalize allows 1% file size tolerance (`actual_size < expected_size * 0.99`) — for a 100GB file, up to 1GB of data could be missing and still pass validation; should verify exact size or check `received_chunks == total_chunks`
+- [x] `video_processor.py`: VAAPI hardware encoding with ABR scaling uses wrong filter chain — `scale` instead of `scale_vaapi` with required `hwupload`/`hwdownload` filters, causing FFmpeg failure when VAAPI + resolution scaling are both active
+- [x] `app.py`: Upload finalize allows 1% file size tolerance (`actual_size < expected_size * 0.99`) — for a 100GB file, up to 1GB of data could be missing and still pass validation; should verify exact size or check `received_chunks == total_chunks`
 
 ## P1 — Security / Data Integrity
 
