@@ -156,6 +156,7 @@ def _start_timeout_watcher():
                     continue
                 if _job_timed_out(job):
                     job["status"] = "error"
+                    job["timed_out"] = True
                     job["error"] = (
                         f"Job timed out after {Config.JOB_TIMEOUT_SECONDS} seconds "
                         "while processing."
@@ -170,7 +171,7 @@ def _is_job_cancelled(job_id):
     job = _active_jobs.get(job_id)
     if not job:
         return True
-    return job.get("status") == "error" and "timed out" in str(job.get("error", "")).lower()
+    return bool(job.get("cancelled") or job.get("timed_out"))
 
 
 _start_timeout_watcher()
@@ -241,6 +242,7 @@ def upload_init():
         "total_chunks": total_chunks,
         "received_bytes": 0,
         "received_chunks": 0,
+        "received_chunk_indices": set(),
         "created_ts": time.time(),
         "last_activity_ts": time.time(),
     }
@@ -279,7 +281,12 @@ def upload_chunk():
         return jsonify({"error": "Unknown upload_id. Call /api/upload/init first"}), 404
 
     upload = _pending_uploads[upload_id]
-    chunk_index = int(chunk_index)
+    try:
+        chunk_index = int(chunk_index)
+    except ValueError:
+        return jsonify({"error": "X-Chunk-Index must be an integer"}), 400
+    if chunk_index < 0:
+        return jsonify({"error": "X-Chunk-Index must be >= 0"}), 400
 
     # Read raw chunk from request body — streams directly, no buffering
     chunk_data = request.get_data()
@@ -288,20 +295,46 @@ def upload_chunk():
     if chunk_len == 0:
         return jsonify({"error": "Empty chunk"}), 400
 
-    # Write chunk at correct offset (allows out-of-order/retry)
+    total_size = upload["total_size"]
     offset = chunk_index * Config.UPLOAD_CHUNK_SIZE
+    if offset >= total_size:
+        return jsonify({"error": "Chunk index exceeds file size"}), 400
+    if offset + chunk_len > total_size:
+        return jsonify({"error": "Chunk exceeds declared total size"}), 400
+
+    is_retry = chunk_index in upload["received_chunk_indices"]
+    if (
+        not is_retry
+        and chunk_len != Config.UPLOAD_CHUNK_SIZE
+        and offset + chunk_len != total_size
+    ):
+        return jsonify({"error": "Invalid chunk size for non-final chunk"}), 400
+
+    current_size = os.path.getsize(upload["path"])
+    if offset > current_size:
+        return jsonify({
+            "error": "Out-of-order chunk would create a file gap",
+            "expected_offset": current_size,
+        }), 409
+    if offset < current_size and not is_retry:
+        return jsonify({"error": "Chunk overlaps existing data"}), 409
+
+    # Write chunk at validated offset (supports in-order + retry)
     with open(upload["path"], "r+b") as f:
         f.seek(offset)
         f.write(chunk_data)
 
-    upload["received_bytes"] += chunk_len
-    upload["received_chunks"] += 1
+    if not is_retry:
+        upload["received_chunk_indices"].add(chunk_index)
+        upload["received_bytes"] += chunk_len
+        upload["received_chunks"] += 1
     upload["last_activity_ts"] = time.time()
 
     return jsonify({
         "chunk_index": chunk_index,
         "received_bytes": upload["received_bytes"],
         "received_chunks": upload["received_chunks"],
+        "is_retry": is_retry,
     })
 
 

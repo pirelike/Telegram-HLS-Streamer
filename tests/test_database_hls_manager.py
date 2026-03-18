@@ -130,6 +130,8 @@ class TestDatabaseAndHLS(unittest.TestCase):
         self.assertIn("sub_0/subtitles.vtt", sub_playlist)
 
         self.assertIsNone(hls_manager.generate_media_playlist("job5", "audio", 99))
+        self.assertIsNone(hls_manager.generate_media_playlist("job5", "audio", "not-an-int"))
+        self.assertIsNone(hls_manager.generate_media_playlist("job5", "audio", -1))
         self.assertIsNone(hls_manager.generate_media_playlist("missing", "video"))
         self.assertIsNone(hls_manager.generate_media_playlist("job5", "badtype"))
 
