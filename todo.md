@@ -34,6 +34,10 @@
 ## P5 — Maintainability
 
 - [x] **`requirements.txt`** — Pin dependency upper bounds → unguarded `>=` risks silent breakage on major releases
+- [x] **`database.py`** — Remove unused `import json` → dead import causes noise in dependency analysis
+- [x] **`stream_analyzer.py`** — Add `from __future__ import annotations` → bare `list[X]` annotations fail on Python 3.8/3.9
+- [x] **`telegram_uploader.py`** — Defer `asyncio.Lock()` creation to inside event loop → locks created in `__init__` before a loop exists fail on Python 3.8/3.9
+- [x] **`CLAUDE.md`** — Fix incorrect env var names in Configuration section → outdated names (`HOST`, `PORT`, `BOT_TOKEN_1`, etc.) don't match actual env vars used by `config.py`
 
 ## P6 — UX Improvements
 

@@ -84,7 +84,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 ### `config.py`
 - All settings loaded from environment variables (via `python-dotenv`)
 - Key settings: `MAX_UPLOAD_SIZE` (100 GB), `CHUNK_SIZE` (10 MB), `TELEGRAM_SEGMENT_SIZE` (20 MB), `HLS_SEGMENT_DURATION` (4 s)
-- Dynamically reads up to 8 bot tokens (`BOT_TOKEN_1`…`BOT_TOKEN_8`) and channel IDs
+- Dynamically reads up to 8 bot tokens (`TELEGRAM_BOT_TOKEN_1`…`TELEGRAM_BOT_TOKEN_8`) and channel IDs (`TELEGRAM_CHANNEL_ID_1`…`TELEGRAM_CHANNEL_ID_8`)
 - Creates `uploads/` and `processing/` directories on import
 
 ### `database.py`
@@ -133,24 +133,27 @@ Copy `.env.example` to `.env` and populate:
 
 ```env
 # Server
-HOST=0.0.0.0
-PORT=8080
-USE_HTTPS=false       # set true for SSL (requires cert/key paths)
+LOCAL_HOST=0.0.0.0
+LOCAL_PORT=5050
+FORCE_HTTPS=false
+BEHIND_PROXY=true
 
 # Telegram bots (1 required, up to 8 supported)
-BOT_TOKEN_1=...
-CHANNEL_ID_1=...
-BOT_TOKEN_2=...       # optional
-CHANNEL_ID_2=...
+TELEGRAM_BOT_TOKEN_1=...
+TELEGRAM_CHANNEL_ID_1=-100...
+TELEGRAM_BOT_TOKEN_2=...       # optional
+TELEGRAM_CHANNEL_ID_2=-100...
 
 # Limits (defaults shown)
 MAX_UPLOAD_SIZE=107374182400   # 100 GB
-CHUNK_SIZE=10485760            # 10 MB
-TELEGRAM_SEGMENT_SIZE=20971520 # 20 MB
+UPLOAD_CHUNK_SIZE=10485760     # 10 MB
+TELEGRAM_MAX_FILE_SIZE=20971520 # 20 MB per segment
 
 # Encoding
 HLS_SEGMENT_DURATION=4
-HW_ACCEL=auto         # auto | vaapi | nvenc | qsv | none
+ENABLE_HARDWARE_ACCELERATION=true
+PREFERRED_ENCODER=vaapi        # vaapi | nvenc | qsv
+VIDEO_BITRATE=4M
 ```
 
 ---
@@ -176,7 +179,7 @@ cp .env.example .env   # then fill in bot tokens and channel IDs
 python app.py
 ```
 
-Starts Flask on `HOST:PORT` (default `0.0.0.0:8080`). Access UI at `http://localhost:8080`.
+Starts Flask on `LOCAL_HOST:LOCAL_PORT` (default `0.0.0.0:5050`). Access UI at `http://localhost:5050`.
 
 ### No Test Suite
 
