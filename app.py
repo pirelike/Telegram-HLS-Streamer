@@ -1,7 +1,7 @@
 """Telegram HLS Streamer - Main Application.
 
 Web server that handles:
-  - File upload with progress tracking
+  - Chunked resumable file uploads (supports 50GB+ files)
   - Video processing (split into video/audio/subtitle streams)
   - Telegram upload via multi-bot round-robin
   - HLS playlist serving (master + media playlists)
@@ -9,15 +9,14 @@ Web server that handles:
 """
 
 import asyncio
+import hashlib
 import logging
 import os
-import re
 import uuid
 from threading import Thread
 
-import aiohttp
 from flask import (
-    Flask, jsonify, render_template, request, Response, send_from_directory,
+    Flask, jsonify, render_template, request, Response,
 )
 
 from config import Config
@@ -36,10 +35,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE
+# Per-chunk limit only — the full file is assembled from many chunks
+app.config["MAX_CONTENT_LENGTH"] = Config.UPLOAD_CHUNK_SIZE * 2
 
 # Track active jobs: job_id -> {status, progress, ...}
 _active_jobs = {}
+
+# Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
+_pending_uploads = {}
 
 
 def _get_base_url():
@@ -60,37 +63,157 @@ def index():
     return render_template("index.html")
 
 
-# ─── Upload & Processing ───
+# ─── Chunked Upload API ───
+#
+# Flow:
+#   1. POST /api/upload/init       → returns upload_id
+#   2. POST /api/upload/chunk      → send each 10MB chunk (with retry)
+#   3. POST /api/upload/finalize   → triggers processing pipeline
+#
+# If the connection drops mid-upload, the client resumes from the last
+# successful chunk. Only the failed 10MB chunk needs to be re-sent,
+# not the entire 50GB+ file.
 
-@app.route("/api/upload", methods=["POST"])
-def upload():
-    """Handle video file upload and kick off processing pipeline."""
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+@app.route("/api/upload/init", methods=["POST"])
+def upload_init():
+    """Initialize a chunked upload session."""
+    data = request.get_json()
+    if not data or "filename" not in data or "total_size" not in data:
+        return jsonify({"error": "filename and total_size required"}), 400
 
-    file = request.files["file"]
-    if not file.filename:
-        return jsonify({"error": "No filename"}), 400
+    filename = data["filename"]
+    total_size = int(data["total_size"])
+    total_chunks = int(data.get("total_chunks", 0))
 
-    job_id = uuid.uuid4().hex[:12]
-    upload_path = os.path.join(Config.UPLOAD_DIR, f"{job_id}_{file.filename}")
+    if total_size > Config.MAX_UPLOAD_SIZE:
+        return jsonify({
+            "error": f"File too large. Max {Config.MAX_UPLOAD_SIZE // (1024**3)}GB"
+        }), 413
 
-    _active_jobs[job_id] = {
-        "status": "uploading",
-        "filename": file.filename,
-        "progress": 0,
-        "step": "Saving upload...",
+    upload_id = uuid.uuid4().hex[:16]
+    upload_path = os.path.join(Config.UPLOAD_DIR, f"{upload_id}_{filename}")
+
+    # Create empty file
+    with open(upload_path, "wb") as f:
+        pass
+
+    _pending_uploads[upload_id] = {
+        "path": upload_path,
+        "filename": filename,
+        "total_size": total_size,
+        "total_chunks": total_chunks,
+        "received_bytes": 0,
+        "received_chunks": 0,
     }
 
-    file.save(upload_path)
-    _active_jobs[job_id]["status"] = "queued"
+    logger.info(
+        "Upload initialized: %s, file=%s, size=%d bytes (%d chunks)",
+        upload_id, filename, total_size, total_chunks,
+    )
 
-    # Process in background thread
-    thread = Thread(target=_process_job, args=(job_id, upload_path), daemon=True)
+    return jsonify({
+        "upload_id": upload_id,
+        "chunk_size": Config.UPLOAD_CHUNK_SIZE,
+    })
+
+
+@app.route("/api/upload/chunk", methods=["POST"])
+def upload_chunk():
+    """Receive a single chunk of an upload.
+
+    Headers:
+      X-Upload-Id: the upload session id
+      X-Chunk-Index: 0-based chunk number
+    Body: raw binary chunk data
+    """
+    upload_id = request.headers.get("X-Upload-Id")
+    chunk_index = request.headers.get("X-Chunk-Index")
+
+    if not upload_id or chunk_index is None:
+        return jsonify({"error": "X-Upload-Id and X-Chunk-Index headers required"}), 400
+
+    if upload_id not in _pending_uploads:
+        return jsonify({"error": "Unknown upload_id. Call /api/upload/init first"}), 404
+
+    upload = _pending_uploads[upload_id]
+    chunk_index = int(chunk_index)
+
+    # Read raw chunk from request body — streams directly, no buffering
+    chunk_data = request.get_data()
+    chunk_len = len(chunk_data)
+
+    if chunk_len == 0:
+        return jsonify({"error": "Empty chunk"}), 400
+
+    # Write chunk at correct offset (allows out-of-order/retry)
+    offset = chunk_index * Config.UPLOAD_CHUNK_SIZE
+    with open(upload["path"], "r+b") as f:
+        f.seek(offset)
+        f.write(chunk_data)
+
+    upload["received_bytes"] += chunk_len
+    upload["received_chunks"] += 1
+
+    return jsonify({
+        "chunk_index": chunk_index,
+        "received_bytes": upload["received_bytes"],
+        "received_chunks": upload["received_chunks"],
+    })
+
+
+@app.route("/api/upload/finalize", methods=["POST"])
+def upload_finalize():
+    """Finalize a chunked upload and start processing."""
+    data = request.get_json()
+    upload_id = data.get("upload_id") if data else None
+
+    if not upload_id or upload_id not in _pending_uploads:
+        return jsonify({"error": "Unknown upload_id"}), 404
+
+    upload = _pending_uploads.pop(upload_id)
+    file_path = upload["path"]
+    filename = upload["filename"]
+
+    # Verify file size
+    actual_size = os.path.getsize(file_path)
+    expected_size = upload["total_size"]
+    if actual_size < expected_size * 0.99:  # allow 1% tolerance for rounding
+        return jsonify({
+            "error": f"Incomplete upload: got {actual_size} bytes, expected {expected_size}",
+        }), 400
+
+    # Create job and start processing
+    job_id = uuid.uuid4().hex[:12]
+    _active_jobs[job_id] = {
+        "status": "queued",
+        "filename": filename,
+        "file_size": actual_size,
+        "progress": 0,
+        "step": "Queued for processing...",
+    }
+
+    thread = Thread(target=_process_job, args=(job_id, file_path), daemon=True)
     thread.start()
 
+    logger.info("Upload finalized: %s -> job %s (%d bytes)", upload_id, job_id, actual_size)
     return jsonify({"job_id": job_id, "status": "queued"})
 
+
+@app.route("/api/upload/status/<upload_id>")
+def upload_status(upload_id):
+    """Check how many chunks have been received for a pending upload."""
+    if upload_id not in _pending_uploads:
+        return jsonify({"error": "Unknown upload_id"}), 404
+    upload = _pending_uploads[upload_id]
+    return jsonify({
+        "received_bytes": upload["received_bytes"],
+        "received_chunks": upload["received_chunks"],
+        "total_chunks": upload["total_chunks"],
+        "total_size": upload["total_size"],
+    })
+
+
+# ─── Processing Pipeline ───
 
 def _process_job(job_id, file_path):
     """Full pipeline: analyze -> process -> upload -> register."""
@@ -147,7 +270,6 @@ def _process_job(job_id, file_path):
         logger.exception("Job %s failed", job_id)
         _active_jobs[job_id]["status"] = "error"
         _active_jobs[job_id]["error"] = str(e)
-        # Cleanup on error
         if os.path.exists(file_path):
             os.remove(file_path)
 
@@ -213,10 +335,7 @@ def subtitle_playlist(job_id, index):
 
 @app.route("/segment/<job_id>/<path:segment_key>")
 def serve_segment(job_id, segment_key):
-    """Proxy a segment from Telegram.
-
-    Downloads the file from Telegram's servers and streams it to the client.
-    """
+    """Proxy a segment from Telegram."""
     info = get_segment_info(job_id, segment_key)
     if not info:
         return jsonify({"error": "Segment not found"}), 404
@@ -224,7 +343,6 @@ def serve_segment(job_id, segment_key):
     file_id = info["file_id"]
     bot_index = info["bot_index"]
 
-    # Get download URL from Telegram
     uploader = TelegramUploader()
     loop = asyncio.new_event_loop()
     try:
@@ -237,7 +355,6 @@ def serve_segment(job_id, segment_key):
     if not file_url:
         return jsonify({"error": "Could not get file URL"}), 500
 
-    # Determine content type
     if segment_key.endswith(".vtt"):
         content_type = "text/vtt"
     elif segment_key.endswith(".ts"):
@@ -245,7 +362,6 @@ def serve_segment(job_id, segment_key):
     else:
         content_type = "application/octet-stream"
 
-    # Stream from Telegram
     def stream_from_telegram():
         import urllib.request
         with urllib.request.urlopen(file_url) as resp:
@@ -269,14 +385,18 @@ def serve_segment(job_id, segment_key):
 
 @app.after_request
 def add_cors(response):
-    if request.path.startswith(("/hls/", "/segment/")):
+    if request.path.startswith(("/hls/", "/segment/", "/api/")):
         response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Content-Type, X-Upload-Id, X-Chunk-Index"
+        )
     return response
 
 
 if __name__ == "__main__":
     logger.info("Starting Telegram HLS Streamer on %s:%d", Config.HOST, Config.PORT)
     logger.info("Configured bots: %d", len(Config.BOTS))
+    logger.info("Max upload size: %d GB", Config.MAX_UPLOAD_SIZE // (1024**3))
+    logger.info("Chunk size: %d MB", Config.UPLOAD_CHUNK_SIZE // (1024**2))
     app.run(host=Config.HOST, port=Config.PORT, debug=False, threaded=True)

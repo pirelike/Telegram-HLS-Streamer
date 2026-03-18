@@ -13,7 +13,8 @@ class Config:
 
     # File handling
     TELEGRAM_MAX_FILE_SIZE = int(os.getenv("TELEGRAM_MAX_FILE_SIZE", "20971520"))
-    MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "21474836480"))
+    MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "107374182400"))  # 100GB
+    UPLOAD_CHUNK_SIZE = int(os.getenv("UPLOAD_CHUNK_SIZE", "10485760"))  # 10MB per chunk
     ENABLE_COPY_MODE = os.getenv("ENABLE_COPY_MODE", "true").lower() == "true"
 
     # Hardware acceleration
