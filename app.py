@@ -53,6 +53,8 @@ _last_pending_cleanup = 0.0
 _watcher_started = False
 
 _TERMINAL_JOB_STATES = {"complete", "error"}
+# How long to keep finished jobs in _active_jobs before eviction (seconds).
+_ACTIVE_JOB_RETENTION = 300  # 5 minutes
 # Protects status transitions so cancel_job cannot overwrite a just-completed job.
 _job_status_lock = Lock()
 
@@ -196,7 +198,20 @@ def _start_timeout_watcher():
                             f"at step: {step}"
                         )
                         job["step"] = "Timed out"
+                        job["finished_ts"] = time.time()
                     logger.error("Job %s timed out at %s", job_id, step)
+
+            # Evict finished jobs from _active_jobs to prevent unbounded memory growth.
+            # Jobs that reached a terminal state more than _ACTIVE_JOB_RETENTION ago
+            # are removed; they remain queryable from the database.
+            now = time.time()
+            evict_ids = [
+                jid for jid, j in list(_active_jobs.items())
+                if j.get("status") in _TERMINAL_JOB_STATES
+                and now - j.get("finished_ts", now) > _ACTIVE_JOB_RETENTION
+            ]
+            for jid in evict_ids:
+                _active_jobs.pop(jid, None)
 
     Thread(target=watch, daemon=True).start()
 
@@ -284,6 +299,7 @@ def cancel_job(job_id):
         job["cancelled"] = True
         job["error"] = "Job cancelled by user"
         job["step"] = "Cancelled"
+        job["finished_ts"] = time.time()
 
     logger.info("Job %s cancelled by user", job_id)
     return jsonify({"message": "Job cancellation requested"})
@@ -509,7 +525,7 @@ def upload_finalize():
     # Verify file size
     actual_size = os.path.getsize(file_path)
     expected_size = upload["total_size"]
-    if actual_size < expected_size * 0.99:  # allow 1% tolerance for rounding
+    if actual_size != expected_size:
         return jsonify({
             "error": f"Incomplete upload: got {actual_size} bytes, expected {expected_size}",
         }), 400
@@ -607,10 +623,14 @@ def _process_job(job_id, file_path):
 
         with _job_status_lock:
             # Only mark complete if the user hasn't cancelled in the meantime.
-            if not _is_job_cancelled(job_id):
-                _active_jobs[job_id]["status"] = "complete"
-                _active_jobs[job_id]["progress"] = 100
-                _active_jobs[job_id]["step"] = "Done"
+            # NOTE: We inline the check here instead of calling _is_job_cancelled()
+            # because we already hold _job_status_lock (which is not reentrant).
+            job = _active_jobs.get(job_id)
+            if job and not job.get("timed_out") and not job.get("cancelled"):
+                job["status"] = "complete"
+                job["progress"] = 100
+                job["step"] = "Done"
+                job["finished_ts"] = time.time()
         logger.info("Job %s complete", job_id)
 
     except Exception as e:
@@ -618,9 +638,13 @@ def _process_job(job_id, file_path):
             return
         logger.exception("Job %s failed", job_id)
         with _job_status_lock:
-            if not _is_job_cancelled(job_id):
-                _active_jobs[job_id]["status"] = "error"
-                _active_jobs[job_id]["error"] = str(e)
+            # Inline cancellation check — cannot call _is_job_cancelled() here
+            # because we already hold _job_status_lock (not reentrant).
+            job = _active_jobs.get(job_id)
+            if job and not job.get("timed_out") and not job.get("cancelled"):
+                job["status"] = "error"
+                job["error"] = str(e)
+                job["finished_ts"] = time.time()
 
     finally:
         # Always clean up processing artifacts and the source upload file,
