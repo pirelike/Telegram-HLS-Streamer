@@ -41,6 +41,7 @@ class TestDatabaseAndHLS(unittest.TestCase):
             subtitle_streams=[SimpleNamespace(codec_name="srt")],
         )
         processing = SimpleNamespace(
+            video_playlists=[("video.m3u8", "/tmp/video", 1280, 720, "2500k")],
             audio_playlists=[("a.m3u8", "/tmp/a", "eng", "English", 2)],
             subtitle_files=[("s.vtt", "/tmp/s", "eng", "English")],
         )
@@ -67,7 +68,8 @@ class TestDatabaseAndHLS(unittest.TestCase):
         self.assertEqual(job["filename"], "sample.mp4")
 
         tracks = database.get_job_tracks("job1")
-        self.assertEqual(len(tracks), 2)
+        self.assertEqual(len(tracks), 3)
+        self.assertEqual(len(database.get_job_tracks("job1", "video")), 1)
         self.assertEqual(len(database.get_job_tracks("job1", "audio")), 1)
 
         seg = database.get_segment("job1", "video/video_0001.ts")
@@ -112,7 +114,7 @@ class TestDatabaseAndHLS(unittest.TestCase):
         self.assertIn("#EXTM3U", playlist)
         self.assertIn('TYPE=AUDIO', playlist)
         self.assertIn('TYPE=SUBTITLES', playlist)
-        self.assertIn('/hls/job4/video.m3u8', playlist)
+        self.assertIn('/hls/job4/video_0.m3u8', playlist)
 
         self.assertIsNone(hls_manager.generate_master_playlist("missing", "https://cdn.example"))
 
@@ -132,6 +134,9 @@ class TestDatabaseAndHLS(unittest.TestCase):
         self.assertIsNone(hls_manager.generate_media_playlist("job5", "audio", 99))
         self.assertIsNone(hls_manager.generate_media_playlist("job5", "audio", "not-an-int"))
         self.assertIsNone(hls_manager.generate_media_playlist("job5", "audio", -1))
+        self.assertIsNone(hls_manager.generate_media_playlist("job5", "video", "not-an-int"))
+        self.assertIsNone(hls_manager.generate_media_playlist("job5", "video", -1))
+        self.assertIsNone(hls_manager.generate_media_playlist("job5", "video", 99))
         self.assertIsNone(hls_manager.generate_media_playlist("missing", "video"))
         self.assertIsNone(hls_manager.generate_media_playlist("job5", "badtype"))
 

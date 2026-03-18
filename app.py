@@ -14,7 +14,7 @@ import logging
 import os
 import time
 import uuid
-from threading import Thread
+from threading import Lock, Thread
 
 from flask import (
     Flask, jsonify, render_template, request, Response,
@@ -44,6 +44,7 @@ _active_jobs = {}
 
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
+_upload_locks = {}
 _last_pending_cleanup = 0.0
 _watcher_started = False
 
@@ -123,6 +124,7 @@ def _cleanup_expired_pending_uploads(force=False):
         info = _pending_uploads.pop(upload_id, None)
         if not info:
             continue
+        _upload_locks.pop(upload_id, None)
         path = info.get("path")
         if path and os.path.exists(path):
             try:
@@ -171,7 +173,7 @@ def _is_job_cancelled(job_id):
     job = _active_jobs.get(job_id)
     if not job:
         return True
-    return bool(job.get("cancelled") or job.get("timed_out"))
+    return bool(job.get("timed_out"))
 
 
 _start_timeout_watcher()
@@ -246,6 +248,7 @@ def upload_init():
         "created_ts": time.time(),
         "last_activity_ts": time.time(),
     }
+    _upload_locks[upload_id] = Lock()
 
     logger.info(
         "Upload initialized: %s, file=%s, size=%d bytes (%d chunks)",
@@ -302,33 +305,35 @@ def upload_chunk():
     if offset + chunk_len > total_size:
         return jsonify({"error": "Chunk exceeds declared total size"}), 400
 
-    is_retry = chunk_index in upload["received_chunk_indices"]
-    if (
-        not is_retry
-        and chunk_len != Config.UPLOAD_CHUNK_SIZE
-        and offset + chunk_len != total_size
-    ):
-        return jsonify({"error": "Invalid chunk size for non-final chunk"}), 400
+    upload_lock = _upload_locks.setdefault(upload_id, Lock())
+    with upload_lock:
+        is_retry = chunk_index in upload["received_chunk_indices"]
+        if (
+            not is_retry
+            and chunk_len != Config.UPLOAD_CHUNK_SIZE
+            and offset + chunk_len != total_size
+        ):
+            return jsonify({"error": "Invalid chunk size for non-final chunk"}), 400
 
-    current_size = os.path.getsize(upload["path"])
-    if offset > current_size:
-        return jsonify({
-            "error": "Out-of-order chunk would create a file gap",
-            "expected_offset": current_size,
-        }), 409
-    if offset < current_size and not is_retry:
-        return jsonify({"error": "Chunk overlaps existing data"}), 409
+        current_size = os.path.getsize(upload["path"])
+        if offset > current_size:
+            return jsonify({
+                "error": "Out-of-order chunk would create a file gap",
+                "expected_offset": current_size,
+            }), 409
+        if offset < current_size and not is_retry:
+            return jsonify({"error": "Chunk overlaps existing data"}), 409
 
-    # Write chunk at validated offset (supports in-order + retry)
-    with open(upload["path"], "r+b") as f:
-        f.seek(offset)
-        f.write(chunk_data)
+        # Write chunk at validated offset (supports in-order + retry)
+        with open(upload["path"], "r+b") as f:
+            f.seek(offset)
+            f.write(chunk_data)
 
-    if not is_retry:
-        upload["received_chunk_indices"].add(chunk_index)
-        upload["received_bytes"] += chunk_len
-        upload["received_chunks"] += 1
-    upload["last_activity_ts"] = time.time()
+        if not is_retry:
+            upload["received_chunk_indices"].add(chunk_index)
+            upload["received_bytes"] += chunk_len
+            upload["received_chunks"] += 1
+        upload["last_activity_ts"] = time.time()
 
     return jsonify({
         "chunk_index": chunk_index,
@@ -352,6 +357,7 @@ def upload_finalize():
         return jsonify({"error": "Unknown upload_id"}), 404
 
     upload = _pending_uploads.pop(upload_id)
+    _upload_locks.pop(upload_id, None)
     file_path = upload["path"]
     filename = upload["filename"]
 
