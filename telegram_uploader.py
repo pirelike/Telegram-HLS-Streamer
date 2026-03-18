@@ -64,12 +64,14 @@ class TelegramUploader:
         self._bot_locks: list | None = None
 
     def _next_bot(self):
-        """Round-robin bot selection."""
+        """Round-robin bot selection (counter is atomic enough for asyncio single-thread,
+        but we use modular arithmetic to stay safe even with concurrent coroutines)."""
         if not self.bots:
             raise RuntimeError("No Telegram bots configured")
-        bot = self.bots[self._bot_counter % len(self.bots)]
-        self._bot_counter += 1
-        return bot
+        # Grab-and-increment; safe under asyncio (single-threaded event loop)
+        idx = self._bot_counter
+        self._bot_counter = (idx + 1) % len(self.bots)
+        return self.bots[idx % len(self.bots)]
 
     async def _upload_file(self, file_path, bot_entry, retries=3):
         """Upload a single file to Telegram with retry logic."""
@@ -271,7 +273,7 @@ class TelegramUploader:
         file = await bot.get_file(file_id)
         return file.file_path
 
-    async def get_file_bytes(self, file_id, bot_index):
+    async def get_file_bytes(self, file_id, bot_index, retries=3):
         """Download bytes for a file using the same bot that uploaded it."""
         # Telegram file_id validation (no whitespace/newlines)
         if not file_id or not re.match(r"^[a-zA-Z0-9_-]{50,255}$", str(file_id)):
@@ -283,5 +285,15 @@ class TelegramUploader:
                 f"The segment was uploaded by a bot that is no longer available."
             )
         bot = self.bots[bot_index]["bot"]
-        file = await bot.get_file(file_id)
-        return await file.download_as_bytearray()
+        for attempt in range(retries):
+            try:
+                file = await bot.get_file(file_id)
+                return await file.download_as_bytearray()
+            except (TimedOut, NetworkError) as e:
+                if attempt < retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning("Download retry %d for file_id=%s: %s", attempt + 1, file_id[:20], e)
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error("Download failed after %d attempts for file_id=%s", retries, file_id[:20])
+                    raise

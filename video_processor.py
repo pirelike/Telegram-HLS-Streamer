@@ -212,11 +212,15 @@ def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_prog
         text=True,
     )
 
+    # Cap stderr to last 200 lines to prevent unbounded memory growth
+    _STDERR_MAX_LINES = 200
     stderr_chunks = []
 
     def _read_stderr():
         for line in proc.stderr:
             stderr_chunks.append(line)
+            if len(stderr_chunks) > _STDERR_MAX_LINES:
+                stderr_chunks.pop(0)
 
     stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
     stderr_thread.start()

@@ -193,10 +193,11 @@ def _start_timeout_watcher():
 
 
 def _is_job_cancelled(job_id):
-    job = _active_jobs.get(job_id)
-    if not job:
-        return True
-    return bool(job.get("timed_out") or job.get("cancelled"))
+    with _job_status_lock:
+        job = _active_jobs.get(job_id)
+        if not job:
+            return True
+        return bool(job.get("timed_out") or job.get("cancelled"))
 
 
 @app.route("/api/cancel/<job_id>", methods=["POST"])
@@ -281,6 +282,9 @@ def upload_init():
         os.close(fd)
     except FileExistsError:
         return jsonify({"error": "Upload file already exists"}), 409
+    except OSError as e:
+        logger.error("Failed to create upload file %s: %s", upload_path, e)
+        return jsonify({"error": "Failed to create upload file on server"}), 500
 
     _pending_uploads[upload_id] = {
         "path": upload_path,
@@ -361,7 +365,10 @@ def upload_chunk():
         ):
             return jsonify({"error": "Invalid chunk size for non-final chunk"}), 400
 
-        current_size = os.path.getsize(upload["path"])
+        try:
+            current_size = os.path.getsize(upload["path"])
+        except OSError:
+            return jsonify({"error": "Upload file missing or inaccessible"}), 500
         if offset > current_size:
             return jsonify({
                 "error": "Out-of-order chunk would create a file gap",
@@ -371,9 +378,13 @@ def upload_chunk():
             return jsonify({"error": "Chunk overlaps existing data"}), 409
 
         # Write chunk at validated offset (supports in-order + retry)
-        with open(upload["path"], "r+b") as f:
-            f.seek(offset)
-            f.write(chunk_data)
+        try:
+            with open(upload["path"], "r+b") as f:
+                f.seek(offset)
+                f.write(chunk_data)
+        except OSError as e:
+            logger.error("Failed to write chunk %d for upload %s: %s", chunk_index, upload_id, e)
+            return jsonify({"error": f"Failed to write chunk: {e}"}), 500
 
         if not is_retry:
             upload["received_chunk_indices"].add(chunk_index)
@@ -460,34 +471,40 @@ def _process_job(job_id, file_path):
         if _is_job_cancelled(job_id):
             return
         # Step 1: Analyze
-        _active_jobs[job_id]["status"] = "analyzing"
-        _active_jobs[job_id]["step"] = "Analyzing streams..."
+        with _job_status_lock:
+            _active_jobs[job_id]["status"] = "analyzing"
+            _active_jobs[job_id]["step"] = "Analyzing streams..."
         analysis = analyze(file_path)
 
-        _active_jobs[job_id]["analysis"] = analysis.summary()
+        with _job_status_lock:
+            _active_jobs[job_id]["analysis"] = analysis.summary()
         logger.info("Job %s analysis: %s", job_id, analysis.summary())
 
         # Step 2: Process (split into separate streams)
-        _active_jobs[job_id]["status"] = "processing"
+        with _job_status_lock:
+            _active_jobs[job_id]["status"] = "processing"
 
         def on_process_progress(current, total, step_name):
             if _is_job_cancelled(job_id):
                 return
-            _active_jobs[job_id]["progress"] = int(current / total * 50) if total else 0
-            _active_jobs[job_id]["step"] = step_name
+            with _job_status_lock:
+                _active_jobs[job_id]["progress"] = int(current / total * 50) if total else 0
+                _active_jobs[job_id]["step"] = step_name
 
         result = process(analysis, job_id, progress_callback=on_process_progress)
         if _is_job_cancelled(job_id):
             return
 
         # Step 3: Upload to Telegram
-        _active_jobs[job_id]["status"] = "uploading_telegram"
+        with _job_status_lock:
+            _active_jobs[job_id]["status"] = "uploading_telegram"
 
         def on_upload_progress(current, total, name):
             if _is_job_cancelled(job_id):
                 return
-            _active_jobs[job_id]["progress"] = 50 + int(current / total * 50) if total else 50
-            _active_jobs[job_id]["step"] = f"Uploading {name}"
+            with _job_status_lock:
+                _active_jobs[job_id]["progress"] = 50 + int(current / total * 50) if total else 50
+                _active_jobs[job_id]["step"] = f"Uploading {name}"
 
         uploader = TelegramUploader()
         upload_result = _run_async(
@@ -532,7 +549,9 @@ def _process_job(job_id, file_path):
 @app.route("/api/status/<job_id>")
 def job_status(job_id):
     if job_id in _active_jobs:
-        return jsonify(_active_jobs[job_id])
+        with _job_status_lock:
+            snapshot = dict(_active_jobs[job_id])
+        return jsonify(snapshot)
     job = get_job(job_id)
     if job:
         return jsonify({"status": "complete", "progress": 100, **job})

@@ -1,21 +1,36 @@
+import logging
 import os
 import re
 from dotenv import load_dotenv
 
 load_dotenv()
 
+_logger = logging.getLogger(__name__)
+
+
+def _int_env(name, default):
+    """Read an integer from an environment variable with a safe fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _logger.warning("Invalid integer for %s=%r, using default %d", name, raw, default)
+        return default
+
 
 class Config:
     # Server
     HOST = os.getenv("LOCAL_HOST", "0.0.0.0")
-    PORT = int(os.getenv("LOCAL_PORT", "5050"))
+    PORT = _int_env("LOCAL_PORT", 5050)
     FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
     BEHIND_PROXY = os.getenv("BEHIND_PROXY", "true").lower() == "true"
 
     # File handling
-    TELEGRAM_MAX_FILE_SIZE = int(os.getenv("TELEGRAM_MAX_FILE_SIZE", "20971520"))
-    MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "107374182400"))  # 100GB
-    UPLOAD_CHUNK_SIZE = int(os.getenv("UPLOAD_CHUNK_SIZE", "10485760"))  # 10MB per chunk
+    TELEGRAM_MAX_FILE_SIZE = _int_env("TELEGRAM_MAX_FILE_SIZE", 20971520)
+    MAX_UPLOAD_SIZE = _int_env("MAX_UPLOAD_SIZE", 107374182400)  # 100GB
+    UPLOAD_CHUNK_SIZE = _int_env("UPLOAD_CHUNK_SIZE", 10485760)  # 10MB per chunk
     ENABLE_COPY_MODE = os.getenv("ENABLE_COPY_MODE", "true").lower() == "true"
 
     # Hardware acceleration
@@ -25,7 +40,7 @@ class Config:
     AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "128k")
 
     # HLS
-    HLS_SEGMENT_DURATION = int(os.getenv("HLS_SEGMENT_DURATION", "4"))
+    HLS_SEGMENT_DURATION = _int_env("HLS_SEGMENT_DURATION", 4)
 
     # Adaptive Bitrate Streaming
     ABR_ENABLED = os.getenv("ABR_ENABLED", "true").lower() == "true"
@@ -41,10 +56,10 @@ class Config:
     PROCESSING_DIR = os.path.join(os.path.dirname(__file__), "processing")
 
     # Reliability / cleanup
-    JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "7200"))  # 2h
-    PENDING_UPLOAD_TTL_SECONDS = int(os.getenv("PENDING_UPLOAD_TTL_SECONDS", "86400"))  # 24h
-    PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS = int(
-        os.getenv("PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS", "300")
+    JOB_TIMEOUT_SECONDS = _int_env("JOB_TIMEOUT_SECONDS", 7200)  # 2h
+    PENDING_UPLOAD_TTL_SECONDS = _int_env("PENDING_UPLOAD_TTL_SECONDS", 86400)  # 24h
+    PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS = _int_env(
+        "PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS", 300
     )
     CORS_ALLOWED_ORIGINS = [
         origin.strip()
@@ -59,7 +74,7 @@ class Config:
 
     # Telegram bots
     BOTS = []
-    UPLOAD_PARALLELISM = int(os.getenv("UPLOAD_PARALLELISM", "8"))
+    UPLOAD_PARALLELISM = _int_env("UPLOAD_PARALLELISM", 8)
 
     @classmethod
     def load_bots(cls):
