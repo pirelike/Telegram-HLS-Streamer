@@ -197,8 +197,13 @@ def get_segments_for_prefix(job_id, prefix):
     return [r["segment_key"] for r in rows]
 
 
-def list_jobs():
-    """List all jobs with their track counts."""
+def list_jobs(limit=50, offset=0):
+    """List jobs with their track counts, newest first.
+
+    Args:
+        limit: Maximum number of jobs to return.
+        offset: Number of jobs to skip (for pagination).
+    """
     conn = _get_conn()
     rows = conn.execute("""
         SELECT j.*,
@@ -210,8 +215,16 @@ def list_jobs():
         LEFT JOIN segments s ON s.job_id = j.job_id
         GROUP BY j.job_id
         ORDER BY j.created_at DESC
-    """).fetchall()
+        LIMIT ? OFFSET ?
+    """, (limit, offset)).fetchall()
     return [dict(r) for r in rows]
+
+
+def count_jobs():
+    """Return the total number of completed jobs."""
+    conn = _get_conn()
+    row = conn.execute("SELECT COUNT(*) AS cnt FROM jobs").fetchone()
+    return row["cnt"]
 
 
 def delete_job(job_id):

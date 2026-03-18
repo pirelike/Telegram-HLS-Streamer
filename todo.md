@@ -41,11 +41,11 @@
 
 ## P6 — UX Improvements
 
-- [ ] **`index.html`** — Add upload resume on page reload → progress lost if browser closes mid-upload
-- [ ] **`index.html`** — Add pause/cancel button during upload
-- [ ] **`index.html`** — Add client-side file format validation before upload begins
-- [ ] **`video_processor.py`** — Add within-step FFmpeg progress percentage → currently only step-level progress
-- [ ] **`index.html`** — Add pagination to job list → fetching all jobs at once won't scale
+- [x] **`index.html`** — Add upload resume on page reload → progress lost if browser closes mid-upload
+- [x] **`index.html`** — Add pause/cancel button during upload
+- [x] **`index.html`** — Add client-side file format validation before upload begins
+- [x] **`video_processor.py`** — Add within-step FFmpeg progress percentage → currently only step-level progress
+- [x] **`index.html`** — Add pagination to job list → fetching all jobs at once won't scale
 
 ## P7 — New Features
 

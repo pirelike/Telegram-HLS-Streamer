@@ -19,6 +19,12 @@
         .upload-text { font-size: 1.1rem; color: #8b949e; }
         .upload-text strong { color: #58a6ff; }
 
+        .resume-banner { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.3); border-radius: 8px; padding: 0.9rem 1.2rem; margin-bottom: 1rem; display: none; font-size: 0.9rem; color: #79c0ff; }
+        .resume-banner.active { display: flex; align-items: center; gap: 0.8rem; justify-content: space-between; }
+        .resume-banner-text { flex: 1; }
+        .resume-dismiss { background: none; border: 1px solid rgba(88,166,255,0.4); color: #79c0ff; padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; white-space: nowrap; }
+        .resume-dismiss:hover { background: rgba(88,166,255,0.1); }
+
         .progress-container { display: none; margin-bottom: 2rem; }
         .progress-container.active { display: block; }
         .progress-bar-bg { background: #21262d; border-radius: 8px; height: 8px; overflow: hidden; margin: 0.5rem 0; }
@@ -26,6 +32,8 @@
         .progress-info { display: flex; justify-content: space-between; font-size: 0.85rem; color: #8b949e; }
         .status-text { font-size: 0.95rem; margin-bottom: 0.5rem; }
         .speed-text { font-size: 0.8rem; color: #8b949e; margin-top: 0.3rem; }
+        .cancel-btn { margin-top: 0.8rem; background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.4); color: #f85149; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+        .cancel-btn:hover { background: rgba(248,81,73,0.2); }
 
         .analysis-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; display: none; }
         .analysis-card.active { display: block; }
@@ -53,6 +61,10 @@
         .job-link { color: #58a6ff; text-decoration: none; font-size: 0.85rem; }
         .job-link:hover { text-decoration: underline; }
 
+        .load-more-btn { display: none; width: 100%; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 0.7rem; border-radius: 8px; cursor: pointer; font-size: 0.9rem; margin-top: 0.5rem; }
+        .load-more-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+        .load-more-btn.visible { display: block; }
+
         .error-msg { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.4); color: #f85149; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; display: none; }
         .error-msg.active { display: block; }
     </style>
@@ -60,10 +72,15 @@
 <body>
     <div class="container">
         <h1>Telegram HLS Streamer</h1>
-        <p class="subtitle">Upload a video to split into multi-audio & multi-subtitle HLS streams on Telegram</p>
+        <p class="subtitle">Upload a video to split into multi-audio &amp; multi-subtitle HLS streams on Telegram</p>
+
+        <div class="resume-banner" id="resumeBanner">
+            <span class="resume-banner-text" id="resumeBannerText"></span>
+            <button class="resume-dismiss" onclick="dismissResume()">Dismiss</button>
+        </div>
 
         <div class="upload-area" id="uploadArea">
-            <input type="file" id="fileInput" accept="video/*,.mkv,.avi,.mp4,.mov,.webm,.ts">
+            <input type="file" id="fileInput" accept="video/*,.mkv,.avi,.mp4,.mov,.webm,.ts,.m4v,.flv">
             <div class="upload-icon">&#128253;</div>
             <div class="upload-text">
                 Drop your video here or <strong>click to browse</strong><br>
@@ -88,6 +105,7 @@
                 <span id="progressPct">0%</span>
             </div>
             <div class="speed-text" id="speedText"></div>
+            <button class="cancel-btn" id="cancelBtn" onclick="cancelUpload()">Cancel Upload</button>
         </div>
 
         <div class="result-card" id="resultCard">
@@ -102,12 +120,15 @@
         <div class="jobs-section">
             <h2>Previous Uploads</h2>
             <div id="jobsList"><p style="color:#8b949e;">Loading...</p></div>
+            <button class="load-more-btn" id="loadMoreBtn" onclick="loadMoreJobs()">Load more</button>
         </div>
     </div>
 
     <script>
     const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB — matches server Config.UPLOAD_CHUNK_SIZE
     const MAX_RETRIES = 5;
+    const ALLOWED_EXTENSIONS = new Set(['mp4', 'mkv', 'avi', 'mov', 'webm', 'ts', 'm4v', 'flv']);
+    const PENDING_UPLOAD_KEY = 'hls_pending_upload';
 
     const uploadArea = document.getElementById('uploadArea');
     const fileInput = document.getElementById('fileInput');
@@ -122,10 +143,16 @@
     const resultCard = document.getElementById('resultCard');
     const masterUrl = document.getElementById('masterUrl');
     const errorMsg = document.getElementById('errorMsg');
+    const resumeBanner = document.getElementById('resumeBanner');
+    const resumeBannerText = document.getElementById('resumeBannerText');
 
-    let currentUpload = null; // track active upload for cancel/resume
+    let isCancelled = false;
 
-    // Drag & drop
+    // ── Pagination state ──────────────────────────────────────────────────────
+    let jobsPage = 1;
+    const JOBS_PER_PAGE = 20;
+
+    // ── Drag & drop / file select ─────────────────────────────────────────────
     uploadArea.addEventListener('click', () => fileInput.click());
     uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('dragover'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
@@ -136,48 +163,129 @@
     });
     fileInput.addEventListener('change', () => { if (fileInput.files.length) startUpload(fileInput.files[0]); });
 
+    // ── Format validation ─────────────────────────────────────────────────────
+    function isValidVideoFormat(file) {
+        // Accept any video/* MIME type
+        if (file.type && file.type.startsWith('video/')) return true;
+        // Fall back to extension check (covers cases where browser doesn't set MIME)
+        const ext = file.name.split('.').pop().toLowerCase();
+        return ALLOWED_EXTENSIONS.has(ext);
+    }
+
+    // ── localStorage helpers for resume ──────────────────────────────────────
+    function savePendingUpload(uploadId, filename, fileSize, totalChunks, nextChunk) {
+        localStorage.setItem(PENDING_UPLOAD_KEY, JSON.stringify(
+            {uploadId, filename, fileSize, totalChunks, nextChunk}
+        ));
+    }
+
+    function getPendingUpload() {
+        try {
+            const raw = localStorage.getItem(PENDING_UPLOAD_KEY);
+            return raw ? JSON.parse(raw) : null;
+        } catch { return null; }
+    }
+
+    function clearPendingUpload() {
+        localStorage.removeItem(PENDING_UPLOAD_KEY);
+    }
+
+    function dismissResume() {
+        clearPendingUpload();
+        resumeBanner.classList.remove('active');
+    }
+
+    // ── Cancel upload ─────────────────────────────────────────────────────────
+    function cancelUpload() {
+        isCancelled = true;
+        clearPendingUpload();
+    }
+
+    // ── Main upload flow ──────────────────────────────────────────────────────
     async function startUpload(file) {
+        // Client-side format validation
+        if (!isValidVideoFormat(file)) {
+            showError(
+                `Unsupported file format: "${file.name}". ` +
+                'Supported formats: MP4, MKV, AVI, MOV, WebM, TS, M4V, FLV.'
+            );
+            return;
+        }
+
+        isCancelled = false;
         errorMsg.classList.remove('active');
         resultCard.classList.remove('active');
         analysisCard.classList.remove('active');
+        resumeBanner.classList.remove('active');
         progressContainer.classList.add('active');
         uploadArea.classList.add('disabled');
 
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-        statusText.textContent = `Preparing ${file.name} (${formatBytes(file.size)}, ${totalChunks} chunks)...`;
         progressBar.style.width = '0%';
         progressPct.textContent = '0%';
         speedText.textContent = '';
 
-        try {
-            // Step 1: Init upload session
-            const initResp = await fetch('/api/upload/init', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    filename: file.name,
-                    total_size: file.size,
-                    total_chunks: totalChunks,
-                }),
-            });
-            if (!initResp.ok) {
-                const err = await initResp.json();
-                throw new Error(err.error || 'Init failed');
+        // Check for a resumable upload matching this file
+        let uploadId = null;
+        let resumeFrom = 0;
+        const pending = getPendingUpload();
+        if (pending && pending.filename === file.name && pending.fileSize === file.size) {
+            try {
+                const statusResp = await fetch(`/api/upload/status/${pending.uploadId}`);
+                if (statusResp.ok) {
+                    const s = await statusResp.json();
+                    resumeFrom = s.received_chunks || 0;
+                    uploadId = pending.uploadId;
+                    statusText.textContent = `Resuming "${file.name}" from chunk ${resumeFrom} / ${s.total_chunks}...`;
+                } else {
+                    clearPendingUpload();
+                }
+            } catch {
+                clearPendingUpload();
             }
-            const {upload_id} = await initResp.json();
+        }
+
+        try {
+            // Step 1: Init (skip if resuming an existing session)
+            if (!uploadId) {
+                statusText.textContent = `Preparing ${file.name} (${formatBytes(file.size)}, ${totalChunks} chunks)...`;
+                const initResp = await fetch('/api/upload/init', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        filename: file.name,
+                        total_size: file.size,
+                        total_chunks: totalChunks,
+                    }),
+                });
+                if (!initResp.ok) {
+                    const err = await initResp.json();
+                    throw new Error(err.error || 'Init failed');
+                }
+                const data = await initResp.json();
+                uploadId = data.upload_id;
+            }
 
             // Step 2: Send chunks with per-chunk retry
-            let uploadedBytes = 0;
+            let uploadedBytes = resumeFrom * CHUNK_SIZE;
             const startTime = Date.now();
 
-            for (let i = 0; i < totalChunks; i++) {
+            for (let i = resumeFrom; i < totalChunks; i++) {
+                if (isCancelled) {
+                    showError('Upload cancelled.');
+                    uploadArea.classList.remove('disabled');
+                    return;
+                }
+
                 const start = i * CHUNK_SIZE;
                 const end = Math.min(start + CHUNK_SIZE, file.size);
                 const chunk = file.slice(start, end);
 
-                await sendChunkWithRetry(upload_id, i, chunk);
+                await sendChunkWithRetry(uploadId, i, chunk);
 
                 uploadedBytes = end;
+                savePendingUpload(uploadId, file.name, file.size, totalChunks, i + 1);
+
                 const pct = Math.round(uploadedBytes / file.size * 100);
                 progressBar.style.width = pct + '%';
                 progressPct.textContent = pct + '%';
@@ -187,10 +295,16 @@
                 // Speed calculation
                 const elapsed = (Date.now() - startTime) / 1000;
                 if (elapsed > 0) {
-                    const speed = uploadedBytes / elapsed;
+                    const speed = (uploadedBytes - resumeFrom * CHUNK_SIZE) / elapsed;
                     const remaining = (file.size - uploadedBytes) / speed;
                     speedText.textContent = `${formatBytes(speed)}/s — ~${formatTime(remaining)} remaining`;
                 }
+            }
+
+            if (isCancelled) {
+                showError('Upload cancelled.');
+                uploadArea.classList.remove('disabled');
+                return;
             }
 
             // Step 3: Finalize
@@ -198,13 +312,16 @@
             const finalResp = await fetch('/api/upload/finalize', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({upload_id}),
+                body: JSON.stringify({upload_id: uploadId}),
             });
             if (!finalResp.ok) {
                 const err = await finalResp.json();
                 throw new Error(err.error || 'Finalize failed');
             }
             const {job_id} = await finalResp.json();
+
+            // Upload complete — clear resume state
+            clearPendingUpload();
 
             // Step 4: Poll processing status
             statusText.textContent = 'Processing...';
@@ -218,6 +335,7 @@
 
     async function sendChunkWithRetry(uploadId, chunkIndex, chunkBlob) {
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            if (isCancelled) return;
             try {
                 const resp = await fetch('/api/upload/chunk', {
                     method: 'POST',
@@ -270,6 +388,7 @@
                         clearInterval(interval);
                         showResult(jobId);
                         uploadArea.classList.remove('disabled');
+                        jobsPage = 1;
                         loadJobs();
                     } else if (data.status === 'error') {
                         clearInterval(interval);
@@ -327,32 +446,76 @@
         return h + 'h ' + m + 'm';
     }
 
+    // ── Job list with pagination ───────────────────────────────────────────────
     function loadJobs() {
-        fetch('/api/jobs')
+        fetch(`/api/jobs?page=1&limit=${JOBS_PER_PAGE}`)
             .then(r => r.json())
-            .then(jobs => {
+            .then(data => {
+                jobsPage = 1;
                 const container = document.getElementById('jobsList');
+                const jobs = data.jobs || {};
                 const ids = Object.keys(jobs);
                 if (ids.length === 0) {
                     container.innerHTML = '<p style="color:#8b949e;">No uploads yet.</p>';
+                    document.getElementById('loadMoreBtn').classList.remove('visible');
                     return;
                 }
-                container.innerHTML = ids.map(id => {
-                    const j = jobs[id];
-                    const meta = `${j.audio_tracks.length} audio, ${j.subtitle_tracks.length} subs`;
-                    return `<div class="job-item">
-                        <div>
-                            <div class="job-name">${j.filename || id}</div>
-                            <div class="job-meta">${meta} &bull; ${j.segment_count} segments</div>
-                        </div>
-                        <a class="job-link" href="/hls/${id}/master.m3u8" target="_blank">M3U8</a>
-                    </div>`;
-                }).join('');
+                container.innerHTML = ids.map(id => renderJobItem(id, jobs[id])).join('');
+                const loadMoreBtn = document.getElementById('loadMoreBtn');
+                if (data.has_more) {
+                    loadMoreBtn.classList.add('visible');
+                } else {
+                    loadMoreBtn.classList.remove('visible');
+                }
             })
             .catch(() => {
                 document.getElementById('jobsList').innerHTML = '<p style="color:#8b949e;">Could not load jobs.</p>';
             });
     }
+
+    function loadMoreJobs() {
+        jobsPage += 1;
+        fetch(`/api/jobs?page=${jobsPage}&limit=${JOBS_PER_PAGE}`)
+            .then(r => r.json())
+            .then(data => {
+                const jobs = data.jobs || {};
+                const ids = Object.keys(jobs);
+                if (ids.length === 0) return;
+                const container = document.getElementById('jobsList');
+                container.insertAdjacentHTML('beforeend', ids.map(id => renderJobItem(id, jobs[id])).join(''));
+                const loadMoreBtn = document.getElementById('loadMoreBtn');
+                if (data.has_more) {
+                    loadMoreBtn.classList.add('visible');
+                } else {
+                    loadMoreBtn.classList.remove('visible');
+                }
+            })
+            .catch(() => {});
+    }
+
+    function renderJobItem(id, j) {
+        const meta = `${j.audio_tracks.length} audio, ${j.subtitle_tracks.length} subs`;
+        return `<div class="job-item">
+            <div>
+                <div class="job-name">${j.filename || id}</div>
+                <div class="job-meta">${meta} &bull; ${j.segment_count} segments</div>
+            </div>
+            <a class="job-link" href="/hls/${id}/master.m3u8" target="_blank">M3U8</a>
+        </div>`;
+    }
+
+    // ── Resume banner on page load ────────────────────────────────────────────
+    (function checkResume() {
+        const pending = getPendingUpload();
+        if (!pending) return;
+        const pct = pending.totalChunks > 0
+            ? Math.round(pending.nextChunk / pending.totalChunks * 100)
+            : 0;
+        resumeBannerText.textContent =
+            `Incomplete upload: "${pending.filename}" (${pending.nextChunk}/${pending.totalChunks} chunks, ~${pct}%). ` +
+            'Re-select the same file to resume.';
+        resumeBanner.classList.add('active');
+    })();
 
     loadJobs();
     </script>

@@ -26,7 +26,7 @@ from video_processor import process, cleanup
 from telegram_uploader import TelegramUploader
 from hls_manager import (
     register_job, generate_master_playlist, generate_media_playlist,
-    get_segment_info, list_jobs, get_job,
+    get_segment_info, list_jobs, get_job, count_jobs,
 )
 
 logging.basicConfig(
@@ -453,8 +453,28 @@ def job_status(job_id):
 
 @app.route("/api/jobs")
 def jobs_list():
-    """List all completed jobs."""
-    return jsonify(list_jobs())
+    """List completed jobs with pagination.
+
+    Query params:
+      page  – 1-based page number (default 1)
+      limit – jobs per page, 1–50 (default 20)
+    """
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        limit = min(50, max(1, int(request.args.get("limit", 20))))
+    except ValueError:
+        page, limit = 1, 20
+
+    offset = (page - 1) * limit
+    total = count_jobs()
+    jobs = list_jobs(limit=limit, offset=offset)
+    return jsonify({
+        "jobs": jobs,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "has_more": offset + limit < total,
+    })
 
 
 # ─── HLS Serving ───
