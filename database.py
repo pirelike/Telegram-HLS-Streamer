@@ -145,13 +145,16 @@ def save_job(job_id, analysis, processing_result, upload_result):
                 )
 
             # Save subtitle tracks
+            # NOTE: processing_result.subtitle_files only contains successfully
+            # extracted (text-based) subtitles, so its indices don't correspond
+            # to analysis.subtitle_streams. We use "webvtt" as the codec since
+            # all extracted subtitles are converted to WebVTT.
             for i, (_, _, lang, title) in enumerate(processing_result.subtitle_files):
-                sub = analysis.subtitle_streams[i] if i < len(analysis.subtitle_streams) else None
                 conn.execute(
                     """INSERT OR REPLACE INTO tracks
                        (job_id, track_type, track_index, codec, language, title, channels)
-                       VALUES (?, 'subtitle', ?, ?, ?, ?, 0)""",
-                    (job_id, i, sub.codec_name if sub else "webvtt", lang, title),
+                       VALUES (?, 'subtitle', ?, 'webvtt', ?, ?, 0)""",
+                    (job_id, i, lang, title),
                 )
 
             # Save all segment mappings (the critical Telegram file_id references)
