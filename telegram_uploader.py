@@ -91,17 +91,6 @@ class TelegramUploader:
                 )
                 return UploadedSegment(file_id, bot_entry["index"], file_name, file_size)
 
-            except RetryAfter as e:
-                logger.warning("Rate limited, waiting %d seconds", e.retry_after)
-                await asyncio.sleep(e.retry_after)
-            except TimedOut:
-                wait = 2 ** attempt
-                logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)
-                await asyncio.sleep(wait)
-            except NetworkError as e:
-                wait = 2 ** attempt
-                logger.warning("Network error for %s: %s, retry in %ds", file_name, e, wait)
-                await asyncio.sleep(wait)
             except BadRequest as e:
                 logger.error("Bad request for %s (not retrying): %s", file_name, e)
                 raise RuntimeError(f"Telegram rejected upload for {file_name}: {e}") from e
@@ -113,6 +102,18 @@ class TelegramUploader:
                 raise RuntimeError(
                     f"Bot {bot_entry['index']} is unauthorized for channel {channel_id}"
                 ) from e
+            except TimedOut:
+                wait = 2 ** attempt
+                logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)
+                await asyncio.sleep(wait)
+            except NetworkError as e:
+                wait = 2 ** attempt
+                logger.warning("Network error for %s: %s, retry in %ds", file_name, e, wait)
+                await asyncio.sleep(wait)
+            except RetryAfter as e:
+                retry_after = getattr(e, "retry_after", 1)
+                logger.warning("Rate limited, waiting %d seconds", retry_after)
+                await asyncio.sleep(retry_after)
             except Exception as e:
                 if attempt < retries - 1:
                     wait = 2 ** attempt
@@ -125,6 +126,8 @@ class TelegramUploader:
 
     async def _upload_file_with_bot_lock(self, file_path, bot_entry):
         """Upload file while ensuring one in-flight upload per bot."""
+        if self._bot_locks is None:
+            self._bot_locks = [asyncio.Lock() for _ in self.bots]
         bot_index = bot_entry["index"]
         async with self._bot_locks[bot_index]:
             return await self._upload_file(file_path, bot_entry)
@@ -180,9 +183,9 @@ class TelegramUploader:
         uploaded_files = 0
 
         # Count total files
-        if processing_result.video_playlist:
+        for _, tier_dir, _, _, _ in processing_result.video_playlists:
             total_files += len([
-                f for f in os.listdir(processing_result.output_dir)
+                f for f in os.listdir(tier_dir)
                 if f.endswith(".ts")
             ])
         for _, audio_dir, _, _, _ in processing_result.audio_playlists:
@@ -199,11 +202,11 @@ class TelegramUploader:
             if progress_callback:
                 progress_callback(uploaded_files, total_files, name)
 
-        # Upload video segments
-        if processing_result.video_playlist:
+        # Upload video segments (each ABR tier separately)
+        for i, (_, tier_dir, _, _, _) in enumerate(processing_result.video_playlists):
             video_files = [
-                (f"video/{filename}", os.path.join(processing_result.output_dir, filename))
-                for filename in sorted(os.listdir(processing_result.output_dir))
+                (f"video_{i}/{filename}", os.path.join(tier_dir, filename))
+                for filename in sorted(os.listdir(tier_dir))
                 if filename.endswith(".ts")
             ]
             video_segments = await self.upload_files(video_files, on_segment)
