@@ -11,6 +11,7 @@ import re
 import time
 
 from telegram import Bot
+from telegram.request import HTTPXRequest
 from telegram.error import (
     BadRequest,
     Forbidden,
@@ -54,7 +55,11 @@ class TelegramUploader:
         self.bots = []
         for i, bot_config in enumerate(Config.BOTS):
             self.bots.append({
-                "bot": Bot(token=bot_config["token"]),
+                "bot": Bot(
+                    token=bot_config["token"],
+                    request=HTTPXRequest(connection_pool_size=16),
+                    get_updates_request=HTTPXRequest(connection_pool_size=4),
+                ),
                 "channel_id": bot_config["channel_id"],
                 "index": i,
             })
