@@ -394,28 +394,44 @@ Segments are tied to the uploading bot. If you remove or rotate bots, old `bot_i
 
 ## Development
 
-Run tests:
+### Running tests
+
+The project has a test suite (~2,300 lines) covering core modules:
 
 ```bash
+pip install pytest
 pytest
 ```
 
-Useful files while developing:
-- `tests/test_telegram_uploader.py`
-- `tests/test_database_hls_manager.py`
-- `tests/test_stream_analyzer.py`
-- `tests/test_config_video_processor.py`
-- `tests/test_app_p0_todos.py`
+Test files:
+- `tests/test_app_p0_todos.py` — upload flow, finalization, job lifecycle
+- `tests/test_database_hls_manager.py` — SQLite persistence, playlist generation
+- `tests/test_telegram_uploader.py` — multi-bot upload, retry/backoff logic
+- `tests/test_stream_analyzer.py` — FFprobe parsing, stream detection
+- `tests/test_config_video_processor.py` — configuration loading, FFmpeg command building
+
+### Manual verification
+
+For end-to-end validation, upload a sample video through the web UI and verify HLS playback. Automated integration tests for the full pipeline (upload -> process -> Telegram upload -> playback) are not yet implemented.
+
+### Roadmap
+
+See `todo.md` for the prioritized list of known issues, planned improvements, and feature ideas.
 
 ---
 
 ## Limitations
 
-- No distributed queue/worker architecture yet (single-process job manager).
-- In-memory active job state is not durable across process restarts.
-- Segment proxy fetches bytes from Telegram per request (no built-in CDN layer).
+- Single-process architecture — no distributed queue/worker support; job state is in-memory and not durable across restarts.
+- Segment proxy fetches bytes from Telegram per request with no server-side caching; concurrent viewers will hit Telegram rate limits.
+- Each segment proxy request creates and tears down a new asyncio event loop.
+- Segments are fully buffered in memory before serving (~20MB RAM per concurrent segment fetch).
+- `TELEGRAM_MAX_FILE_SIZE` is declared but not enforced — oversized HLS segments can fail at upload time.
+- HLS playlist `#EXTINF` durations use the configured target rather than actual FFmpeg segment durations.
 - ABR tiers are static config; no per-title complexity optimization.
-- Existing `TELEGRAM_MAX_FILE_SIZE` is not currently enforced as a strict hard cap during upload.
+- No authentication on HLS playback endpoints — anyone with a `job_id` can stream.
+- SQLite is the sole database; horizontal scaling would require migration to PostgreSQL/MySQL.
+- No disk space pre-flight checks before upload assembly or FFmpeg processing.
 
 ---
 

@@ -21,6 +21,8 @@ video_processor.py        # FFmpeg HLS conversion pipeline
 templates/index.html      # Frontend web UI (vanilla JS, no framework)
 requirements.txt          # Python dependencies
 .env.example              # Environment variable template
+todo.md                   # Prioritized backlog of issues and features
+tests/                    # pytest test suite (~2,300 lines)
 .gitignore
 README.md
 ```
@@ -191,9 +193,21 @@ python app.py
 
 Starts Flask on `LOCAL_HOST:LOCAL_PORT` (default `0.0.0.0:5050`). Access UI at `http://localhost:5050`.
 
-### No Test Suite
+### Testing
 
-There is currently no automated test suite. When making changes, manually verify the full pipeline by uploading a sample video and confirming HLS playback.
+```bash
+pip install pytest
+pytest
+```
+
+Test files in `tests/`:
+- `test_app_p0_todos.py` — upload flow, finalization, job lifecycle
+- `test_database_hls_manager.py` — SQLite persistence, playlist generation
+- `test_telegram_uploader.py` — multi-bot upload, retry/backoff
+- `test_stream_analyzer.py` — FFprobe parsing, stream detection
+- `test_config_video_processor.py` — configuration, FFmpeg command building
+
+For end-to-end validation, upload a sample video through the web UI and verify HLS playback.
 
 ---
 
@@ -246,3 +260,35 @@ Update `.env` values `TELEGRAM_SEGMENT_SIZE` and `HLS_SEGMENT_DURATION`. No code
 
 ### Adding a New Bot
 Add `BOT_TOKEN_N` and `CHANNEL_ID_N` to `.env` (N = 1–8). `config.py` loads them automatically.
+
+---
+
+## Known Architectural Issues
+
+These are documented in `todo.md` with priorities. Key points for contributors:
+
+### Sync/Async Tension
+Flask is synchronous but Telegram operations are async. Currently `_run_async()` in `app.py` creates a **new event loop per call**. This is expensive — every segment proxy request spins up and tears down a loop. A persistent background event loop or migration to Quart would fix this.
+
+### No Segment Caching
+The segment proxy (`/segment/`) fetches from Telegram on every request with no server-side cache. This is the single biggest performance bottleneck under concurrent viewers.
+
+### TELEGRAM_MAX_FILE_SIZE Not Enforced
+`config.py` declares 20MB but `video_processor.py` never checks segment sizes. High-bitrate 4K segments can exceed this and fail at upload time.
+
+### Segment Durations Are Approximate
+`#EXTINF` values in generated playlists use `Config.HLS_SEGMENT_DURATION` (target) rather than actual FFmpeg output durations. This causes minor seek inaccuracy on long videos.
+
+### Database Is Critical Infrastructure
+`streamer.db` maps `segment_key → file_id`. Losing it means losing access to ALL uploaded content on Telegram. There is currently no backup mechanism.
+
+---
+
+## Roadmap
+
+See `todo.md` for the full prioritized backlog. Key items for next season:
+1. Enforce `TELEGRAM_MAX_FILE_SIZE` during processing (P0)
+2. Add segment proxy LRU cache (P1)
+3. Persistent async event loop (P1)
+4. Health check endpoint (P5)
+5. Thumbnail generation (P6)
