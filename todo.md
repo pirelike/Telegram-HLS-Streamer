@@ -2,8 +2,30 @@
 
 ## P0 — Critical Bugs
 
-- [ ] `config.py:31` / `video_processor.py`: `TELEGRAM_MAX_FILE_SIZE` is declared (20MB) but **never enforced** — FFmpeg `-hls_time 4` controls segment duration, not size; a 4K high-bitrate segment can exceed 20MB and cause Telegram upload failure, killing the entire job
-  - Fix: add `-hls_segment_size` to FFmpeg commands as a hard cap, or validate segment sizes before upload and re-segment oversized ones
+- [ ] `config.py:31` / `video_processor.py`: **Rewrite encoding pipeline — CBR + size-based segmentation**
+  - **Problem:** `TELEGRAM_MAX_FILE_SIZE` (20MB) is never enforced; VBR segments can exceed 20MB and kill uploads; copy mode can't guarantee segment sizes
+  - **Plan:**
+    1. **Ditch copy mode and VBR entirely** — all video tiers are re-encoded at constant bitrate (CBR) for predictable, consistent segment sizes
+    2. **Tier 0 ("near-lossless")** is no longer a stream copy — it's a high-quality CBR re-encode at the source resolution:
+       - 4K → 60 Mbps CBR (~2.4s per 18MB segment)
+       - 1080p → 30 Mbps CBR (~4.8s per 18MB segment)
+       - 720p → 15 Mbps CBR (~9.6s per 18MB segment)
+       - 480p → 5 Mbps CBR (~28.8s per 18MB segment)
+    3. **Same-resolution lower-bitrate tiers** — for each source resolution, include both "Original (1080p)" at high CBR *and* a separate "1080p" at lower CBR, giving users explicit bitrate control (e.g. a 1080p source produces: Original 1080p @ 30M, 1080p @ 10M, 720p @ 5M, 480p @ 2M, 360p @ 1.2M)
+    4. **Lower ABR tiers encode from tier 0's output**, not from the original source — this means FFmpeg only decodes the original once; lower tiers re-encode from the already-decoded high-quality tier 0
+    5. **Size-based segmentation** — use `-hls_segment_size 18874368` (18MB) with `-force_key_frames "expr:gte(t,n_forced*1)"` (keyframe every 1s) on all tiers
+    6. **CBR makes segment sizes predictable** — with constant bitrate, each segment at a given tier will have roughly the same duration and size, eliminating VBR variance
+  - **Config changes:**
+    - Remove `ENABLE_COPY_MODE` — always re-encode
+    - Update `ABR_TIERS` to include same-resolution lower-bitrate tiers: `[{1080: 10M}, {720: 5M}, {480: 2M}, {360: 1.2M}]` — these are the re-encode tiers *below* tier 0; tier 0 bitrate set by resolution auto-detect (4K→60M, 1080p→30M, 720p→15M, 480p→5M)
+    - Change `_get_abr_tiers` filter from `<` to `<=` source height so same-resolution tiers are included
+    - Add `SEGMENT_MAX_SIZE = 18874368` (18MB) to replace `HLS_SEGMENT_DURATION` as the primary segmentation control
+  - **FFmpeg flags per tier:**
+    - `-c:v libx264 -b:v {bitrate} -minrate {bitrate} -maxrate {bitrate} -bufsize {bitrate}` (true CBR)
+    - `-hls_segment_size 18874368`
+    - `-force_key_frames "expr:gte(t,n_forced*1)"`
+  - **HLS naming:** tier 0 labeled "Original (1080p)" / "Original (4K)"; same-resolution lower tier labeled "1080p" / "4K"; lower-resolution tiers labeled "720p", "480p", etc. — `_video_tier_name` in `hls_manager.py` already handles this since `is_original` is only true for tier 0
+  - **Encoding chain:** source → tier 0 (high CBR) → tier 1, 2, 3… (lower CBR, encoded from tier 0 output)
 
 ## P1 — Performance (High Impact)
 
