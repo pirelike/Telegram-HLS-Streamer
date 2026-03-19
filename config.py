@@ -31,7 +31,7 @@ class Config:
     TELEGRAM_MAX_FILE_SIZE = _int_env("TELEGRAM_MAX_FILE_SIZE", 20971520)
     MAX_UPLOAD_SIZE = _int_env("MAX_UPLOAD_SIZE", 107374182400)  # 100GB
     UPLOAD_CHUNK_SIZE = _int_env("UPLOAD_CHUNK_SIZE", 10485760)  # 10MB per chunk
-    ENABLE_COPY_MODE = os.getenv("ENABLE_COPY_MODE", "true").lower() == "true"
+    SEGMENT_MAX_SIZE = _int_env("SEGMENT_MAX_SIZE", 18874368)  # 18MB — safe margin under 20MB Telegram limit
 
     # Hardware acceleration
     ENABLE_HW_ACCEL = os.getenv("ENABLE_HARDWARE_ACCELERATION", "true").lower() == "true"
@@ -50,6 +50,15 @@ class Config:
         {"height": 480, "bitrate": "2M"},
         {"height": 360, "bitrate": "1200k"},
     ]
+
+    # Tier 0 CBR bitrates by source resolution (near-lossless quality)
+    TIER0_BITRATES = {
+        2160: "60M",   # 4K
+        1080: "30M",   # 1080p
+        720: "15M",    # 720p
+        480: "5M",     # 480p
+    }
+    TIER0_BITRATE_DEFAULT = "15M"  # fallback for unlisted resolutions
 
     # Directories
     UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")

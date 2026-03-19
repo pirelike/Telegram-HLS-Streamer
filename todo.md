@@ -2,7 +2,7 @@
 
 ## P0 — Critical Bugs
 
-- [ ] `config.py:31` / `video_processor.py`: **Rewrite encoding pipeline — CBR + size-based segmentation**
+- [x] `config.py:31` / `video_processor.py`: **Rewrite encoding pipeline — CBR + size-based segmentation**
   - **Problem:** `TELEGRAM_MAX_FILE_SIZE` (20MB) is never enforced; VBR segments can exceed 20MB and kill uploads; copy mode can't guarantee segment sizes
   - **Plan:**
     1. **Ditch copy mode and VBR entirely** — all video tiers are re-encoded at constant bitrate (CBR) for predictable, consistent segment sizes
