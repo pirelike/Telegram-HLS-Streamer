@@ -601,23 +601,25 @@ class TestP0TodoFixes(unittest.TestCase):
 
     def test_serve_segment_ts_content_type(self):
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
-             patch.object(app_module._telegram_uploader, "get_file_bytes",
-                          return_value=b"fakedata") as mock_get:
-            with patch("app._run_async", return_value=b"fakedata"):
-                resp = self.client.get("/segment/job1/video/seg.ts")
+             patch.object(app_module._segment_cache, "get", return_value=b"fakedata"):
+            resp = self.client.get("/segment/job1/video/seg.ts")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("video/mp2t", resp.content_type)
 
     def test_serve_segment_vtt_content_type(self):
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
-             patch("app._run_async", return_value=b"WEBVTT"):
+             patch.object(app_module._segment_cache, "get", return_value=b"WEBVTT"):
             resp = self.client.get("/segment/job1/sub_0/subs.vtt")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("vtt", resp.content_type)
 
     def test_serve_segment_download_failure(self):
+        def _close_coro(coro):
+            coro.close()
+            return None
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
-             patch("app._run_async", return_value=None):
+             patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch("app._run_async", side_effect=_close_coro):
             resp = self.client.get("/segment/job1/video/seg.ts")
         self.assertEqual(resp.status_code, 500)
 
