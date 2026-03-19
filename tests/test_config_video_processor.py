@@ -150,6 +150,33 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         self.assertIsNone(result)
         mock_run.assert_not_called()
 
+    # ─── _get_tier0_bitrate ───
+
+    def test_get_tier0_bitrate_1080p(self):
+        result = vp._get_tier0_bitrate(1080)
+        self.assertEqual(result, "30M")
+
+    def test_get_tier0_bitrate_4k(self):
+        result = vp._get_tier0_bitrate(2160)
+        self.assertEqual(result, "60M")
+
+    def test_get_tier0_bitrate_720p(self):
+        result = vp._get_tier0_bitrate(720)
+        self.assertEqual(result, "15M")
+
+    def test_get_tier0_bitrate_480p(self):
+        result = vp._get_tier0_bitrate(480)
+        self.assertEqual(result, "5M")
+
+    def test_get_tier0_bitrate_unlisted_uses_closest_lower(self):
+        # 900p is between 720 and 1080 — should pick 720's bitrate (15M)
+        result = vp._get_tier0_bitrate(900)
+        self.assertEqual(result, "15M")
+
+    def test_get_tier0_bitrate_below_all_uses_default(self):
+        result = vp._get_tier0_bitrate(240)
+        self.assertEqual(result, vp.Config.TIER0_BITRATE_DEFAULT)
+
     # ─── _get_abr_tiers ───
 
     def test_get_abr_tiers_disabled(self):
@@ -162,113 +189,140 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             tiers = vp._get_abr_tiers(0)
         self.assertEqual(tiers, [])
 
-    def test_get_abr_tiers_excludes_source_and_higher(self):
-        # Source is 720p — only tiers strictly below 720 should be included
+    def test_get_abr_tiers_includes_same_resolution(self):
+        # Source is 1080p — should include the 1080p tier (same-res lower bitrate)
+        with patch.object(vp.Config, "ABR_ENABLED", True):
+            tiers = vp._get_abr_tiers(1080)
+        heights = [t["height"] for t in tiers]
+        self.assertIn(1080, heights)
+        self.assertNotIn(2160, heights)
+
+    def test_get_abr_tiers_720p_includes_720_and_lower(self):
         with patch.object(vp.Config, "ABR_ENABLED", True):
             tiers = vp._get_abr_tiers(720)
         heights = [t["height"] for t in tiers]
-        self.assertNotIn(720, heights)
+        self.assertIn(720, heights)
+        self.assertIn(480, heights)
+        self.assertIn(360, heights)
         self.assertNotIn(1080, heights)
-        for h in heights:
-            self.assertLess(h, 720)
 
-    def test_get_abr_tiers_4k_includes_all_lower(self):
+    def test_get_abr_tiers_4k_includes_all(self):
         with patch.object(vp.Config, "ABR_ENABLED", True):
             tiers = vp._get_abr_tiers(2160)
         heights = [t["height"] for t in tiers]
-        # All four standard tiers should be included
         for expected_h in [1080, 720, 480, 360]:
             self.assertIn(expected_h, heights)
 
-    def test_get_abr_tiers_360p_no_lower_tiers(self):
+    def test_get_abr_tiers_360p_includes_360(self):
         with patch.object(vp.Config, "ABR_ENABLED", True):
             tiers = vp._get_abr_tiers(360)
+        heights = [t["height"] for t in tiers]
+        self.assertIn(360, heights)
+
+    def test_get_abr_tiers_below_all_returns_empty(self):
+        with patch.object(vp.Config, "ABR_ENABLED", True):
+            tiers = vp._get_abr_tiers(240)
         self.assertEqual(tiers, [])
 
     # ─── _build_video_cmd ───
 
-    def test_build_video_cmd_copy_mode(self):
+    def test_build_video_cmd_always_encodes_cbr(self):
+        # Tier 0 should always re-encode with CBR, never copy
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                cmd, playlist = vp._build_video_cmd(self.analysis, tmpdir, None)
-        self.assertIn("copy", cmd)
+            cmd, playlist = vp._build_video_cmd(self.analysis, tmpdir, None,
+                                                 target_bitrate="15M")
+        cmd_str = " ".join(cmd)
+        self.assertNotIn("copy", cmd_str)
+        self.assertIn("libx264", cmd_str)
+        self.assertIn("-minrate", cmd_str)
+        self.assertIn("-maxrate", cmd_str)
+        self.assertIn("-bufsize", cmd_str)
         self.assertTrue(playlist.endswith("video.m3u8"))
 
-    def test_build_video_cmd_software_encode(self):
+    def test_build_video_cmd_software_encode_cbr(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", False), \
-                 patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, None)
-        self.assertIn("libx264", cmd)
+            cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, None,
+                                          target_bitrate="2M")
+        cmd_str = " ".join(cmd)
+        self.assertIn("libx264", cmd_str)
+        # Verify true CBR: -b:v, -minrate, -maxrate, -bufsize all set to same value
+        self.assertIn("-b:v 2M", cmd_str)
+        self.assertIn("-minrate 2M", cmd_str)
+        self.assertIn("-maxrate 2M", cmd_str)
+        self.assertIn("-bufsize 2M", cmd_str)
 
-    def test_build_video_cmd_hardware_encode(self):
+    def test_build_video_cmd_hardware_encode_cbr(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", False), \
-                 patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]))
-        self.assertIn("h264_vaapi", cmd)
+            cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]),
+                                          target_bitrate="2M")
+        cmd_str = " ".join(cmd)
+        self.assertIn("h264_vaapi", cmd_str)
+        self.assertIn("-minrate 2M", cmd_str)
 
     def test_build_video_cmd_abr_tier_adds_scale(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", False), \
-                 patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                cmd, _ = vp._build_video_cmd(
-                    self.analysis, tmpdir, None,
-                    tier_index=1, target_height=480, target_bitrate="2M",
-                )
+            cmd, _ = vp._build_video_cmd(
+                self.analysis, tmpdir, None,
+                tier_index=1, target_height=480, target_bitrate="2M",
+            )
         self.assertIn("scale=-2:480", " ".join(cmd))
 
-    def test_build_video_cmd_copy_mode_disabled_for_abr_tier(self):
-        # Even with ENABLE_COPY_MODE=True, a tier with target_height must re-encode
+    def test_build_video_cmd_uses_size_based_segmentation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", True), \
-                 patch.object(vp.Config, "VIDEO_BITRATE", "2M"):
-                cmd, _ = vp._build_video_cmd(
-                    self.analysis, tmpdir, None,
-                    tier_index=1, target_height=480, target_bitrate="2M",
-                )
-        self.assertNotIn("copy", cmd)
+            cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, None,
+                                          target_bitrate="5M")
+        cmd_str = " ".join(cmd)
+        self.assertIn("-hls_segment_size", cmd_str)
+        self.assertNotIn("-hls_time", cmd_str)
+
+    def test_build_video_cmd_has_forced_keyframes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, None,
+                                          target_bitrate="5M")
+        cmd_str = " ".join(cmd)
+        self.assertIn("-force_key_frames", cmd_str)
+
+    def test_build_video_cmd_input_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd, _ = vp._build_video_cmd(
+                self.analysis, tmpdir, None,
+                tier_index=1, target_height=480, target_bitrate="2M",
+                input_override="/tmp/tier0/video.m3u8",
+            )
+        # Input should be the override, not analysis.file_path
+        idx = cmd.index("-i")
+        self.assertEqual(cmd[idx + 1], "/tmp/tier0/video.m3u8")
 
     def test_build_video_cmd_creates_tier_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                vp._build_video_cmd(self.analysis, tmpdir, None, tier_index=2)
+            vp._build_video_cmd(self.analysis, tmpdir, None, tier_index=2,
+                                target_bitrate="5M")
             tier_dir = os.path.join(tmpdir, "video_2")
             self.assertTrue(os.path.isdir(tier_dir))
 
     # ─── _build_audio_cmd ───
 
-    def test_build_audio_cmd_copy_mode(self):
+    def test_build_audio_cmd_always_encodes_aac(self):
         audio = SimpleNamespace(index=1, is_copy_compatible=True, language="eng",
                                 codec_name="aac", channels=2)
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                cmd, playlist, audio_dir = vp._build_audio_cmd(self.analysis, audio, 0, tmpdir)
-            self.assertIn("copy", cmd)
+            cmd, playlist, audio_dir = vp._build_audio_cmd(self.analysis, audio, 0, tmpdir)
+            self.assertIn("aac", cmd)
+            self.assertNotIn("copy", cmd)
             self.assertTrue(os.path.isdir(audio_dir))
 
-    def test_build_audio_cmd_aac_encode(self):
+    def test_build_audio_cmd_non_compatible_codec(self):
         audio = SimpleNamespace(index=1, is_copy_compatible=False, language="eng",
                                 codec_name="opus", channels=2)
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                cmd, _, _ = vp._build_audio_cmd(self.analysis, audio, 0, tmpdir)
-            self.assertIn("aac", cmd)
-
-    def test_build_audio_cmd_copy_mode_disabled_forces_encode(self):
-        audio = SimpleNamespace(index=1, is_copy_compatible=True, language="eng",
-                                codec_name="aac", channels=2)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", False):
-                cmd, _, _ = vp._build_audio_cmd(self.analysis, audio, 1, tmpdir)
+            cmd, _, _ = vp._build_audio_cmd(self.analysis, audio, 0, tmpdir)
             self.assertIn("aac", cmd)
 
     def test_build_audio_cmd_creates_audio_dir(self):
         audio = SimpleNamespace(index=1, is_copy_compatible=True, language="eng",
                                 codec_name="aac", channels=2)
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(vp.Config, "ENABLE_COPY_MODE", True):
-                _, _, audio_dir = vp._build_audio_cmd(self.analysis, audio, 3, tmpdir)
+            _, _, audio_dir = vp._build_audio_cmd(self.analysis, audio, 3, tmpdir)
             self.assertTrue(os.path.isdir(audio_dir))
             self.assertTrue(audio_dir.endswith("audio_3"))
 
@@ -376,6 +430,55 @@ class TestVideoProcessorHelpers(unittest.TestCase):
                 self.assertEqual(len(result.audio_playlists), 1)
                 self.assertEqual(len(result.subtitle_files), 1)
                 self.assertGreater(len(progress), 0)
+
+    @patch("video_processor._run_ffmpeg_with_progress")
+    @patch("video_processor._run_ffmpeg")
+    @patch("video_processor._detect_hw_encoder", return_value=None)
+    def test_process_tier0_uses_cbr_bitrate(self, _detect, _run, _run_with_progress):
+        """Verify tier 0 uses resolution-based CBR bitrate, not default VIDEO_BITRATE."""
+        with tempfile.TemporaryDirectory() as proc_dir:
+            with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
+                analysis = SimpleNamespace(
+                    file_path="/tmp/in.mp4",
+                    has_video=True,
+                    duration=10.0,
+                    video_streams=[SimpleNamespace(index=0, codec_name="h264",
+                                                   is_copy_compatible=True, width=1920, height=1080)],
+                    audio_streams=[],
+                    subtitle_streams=[],
+                )
+                result = vp.process(analysis, "jobt0cbr")
+                # Tier 0 should use 30M for 1080p source
+                self.assertEqual(result.video_playlists[0][4], "30M")
+
+    @patch("video_processor._run_ffmpeg_with_progress")
+    @patch("video_processor._run_ffmpeg")
+    @patch("video_processor._detect_hw_encoder", return_value=None)
+    def test_process_lower_tiers_use_tier0_as_input(self, _detect, _run, _run_with_progress):
+        """Verify ABR tiers encode from tier 0's playlist output."""
+        with tempfile.TemporaryDirectory() as proc_dir:
+            with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
+                analysis = SimpleNamespace(
+                    file_path="/tmp/in.mp4",
+                    has_video=True,
+                    duration=10.0,
+                    video_streams=[SimpleNamespace(index=0, codec_name="h264",
+                                                   is_copy_compatible=True, width=1920, height=1080)],
+                    audio_streams=[],
+                    subtitle_streams=[],
+                )
+                vp.process(analysis, "jobt0input")
+                # Check that lower tier FFmpeg calls used tier 0 playlist as input
+                calls = _run_with_progress.call_args_list
+                # First call is tier 0, uses original file
+                tier0_cmd = calls[0][0][0]
+                self.assertIn("/tmp/in.mp4", tier0_cmd)
+                # Subsequent calls should use tier 0 playlist
+                if len(calls) > 1:
+                    tier1_cmd = calls[1][0][0]
+                    # Input should be the tier 0 playlist, not the original
+                    input_idx = tier1_cmd.index("-i")
+                    self.assertTrue(tier1_cmd[input_idx + 1].endswith("video.m3u8"))
 
     @patch("video_processor._run_ffmpeg_with_progress")
     @patch("video_processor._run_ffmpeg")

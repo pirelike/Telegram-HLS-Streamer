@@ -60,28 +60,46 @@ def _detect_hw_encoder():
     return None
 
 
+def _get_tier0_bitrate(source_height):
+    """Return the CBR bitrate for tier 0 based on source resolution.
+
+    Picks the highest configured threshold that doesn't exceed the source height.
+    Falls back to TIER0_BITRATE_DEFAULT for unlisted resolutions.
+    """
+    best = None
+    for threshold in sorted(Config.TIER0_BITRATES.keys()):
+        if threshold <= source_height:
+            best = Config.TIER0_BITRATES[threshold]
+    return best or Config.TIER0_BITRATE_DEFAULT
+
+
 def _get_abr_tiers(source_height):
     """Return applicable ABR tiers for the given source resolution.
 
-    Only includes tiers whose height is strictly less than the source.
-    The source resolution is always included as the first (highest quality) tier.
+    Includes tiers whose height is less than or equal to the source height,
+    so same-resolution lower-bitrate tiers are produced alongside tier 0.
     """
     if not Config.ABR_ENABLED or source_height <= 0:
         return []
 
     tiers = []
     for tier in Config.ABR_TIERS:
-        if tier["height"] < source_height:
+        if tier["height"] <= source_height:
             tiers.append(tier)
     return tiers
 
 
 def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
-                     tier_index=0, target_height=None, target_bitrate=None):
-    """Build FFmpeg command for video-only HLS extraction.
+                     tier_index=0, target_height=None, target_bitrate=None,
+                     input_override=None):
+    """Build FFmpeg command for video-only HLS with CBR encoding.
 
-    When target_height/target_bitrate are given, scales the video down
-    to that resolution tier.
+    All tiers are re-encoded at constant bitrate for predictable segment sizes.
+    Uses -hls_segment_size for size-based segmentation and forced keyframes
+    every 1 second so the muxer has frequent split points.
+
+    When input_override is given, uses that file/playlist as input instead of
+    the original source (used for encoding lower tiers from tier 0 output).
     """
     video = analysis.video_streams[0]
     tier_dir = os.path.join(output_dir, f"video_{tier_index}")
@@ -89,46 +107,49 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
     segment_pattern = os.path.join(tier_dir, "video_%04d.ts")
     playlist = os.path.join(tier_dir, "video.m3u8")
 
-    cmd = ["ffmpeg", "-y", "-i", analysis.file_path]
+    input_path = input_override or analysis.file_path
+    cmd = ["ffmpeg", "-y", "-i", input_path]
 
     # Map only the first video stream, no audio, no subtitles
-    cmd += ["-map", f"0:{video.index}", "-an", "-sn"]
+    cmd += ["-map", "0:v:0", "-an", "-sn"]
 
     bitrate = target_bitrate or Config.VIDEO_BITRATE
 
-    # Encoding
-    use_copy = (Config.ENABLE_COPY_MODE and video.is_copy_compatible
-                and target_height is None)
-    if use_copy:
-        cmd += ["-c:v", "copy"]
-        logger.info("Video tier %d: using copy mode (codec=%s)", tier_index, video.codec_name)
-    elif hw_encoder:
+    # CBR encoding — always re-encode, never copy
+    if hw_encoder:
         enc_name, enc_flags = hw_encoder
-        cmd += enc_flags + ["-c:v", enc_name, "-b:v", bitrate]
+        cmd += enc_flags + ["-c:v", enc_name,
+                            "-b:v", bitrate, "-minrate", bitrate,
+                            "-maxrate", bitrate, "-bufsize", bitrate]
         if target_height:
             if enc_name == "h264_vaapi":
                 cmd += ["-vf", f"format=nv12,hwupload,scale_vaapi=-2:{target_height}"]
             else:
                 cmd += ["-vf", f"scale=-2:{target_height}"]
         logger.info(
-            "Video tier %d: hardware encoder %s at %s (%s)",
+            "Video tier %d: hardware CBR %s at %s (%s)",
             tier_index, enc_name, bitrate,
             f"{target_height}p" if target_height else "original",
         )
     else:
-        cmd += ["-c:v", "libx264", "-preset", "fast", "-b:v", bitrate]
+        cmd += ["-c:v", "libx264", "-preset", "fast",
+                "-b:v", bitrate, "-minrate", bitrate,
+                "-maxrate", bitrate, "-bufsize", bitrate]
         if target_height:
             cmd += ["-vf", f"scale=-2:{target_height}"]
         logger.info(
-            "Video tier %d: libx264 at %s (%s)",
+            "Video tier %d: libx264 CBR at %s (%s)",
             tier_index, bitrate,
             f"{target_height}p" if target_height else "original",
         )
 
-    # HLS output
+    # Forced keyframes every 1 second for reliable segment splitting
+    cmd += ["-force_key_frames", "expr:gte(t,n_forced*1)"]
+
+    # HLS output with size-based segmentation
     cmd += [
         "-f", "hls",
-        "-hls_time", str(Config.HLS_SEGMENT_DURATION),
+        "-hls_segment_size", str(Config.SEGMENT_MAX_SIZE),
         "-hls_list_size", "0",
         "-hls_segment_filename", segment_pattern,
         "-hls_segment_type", "mpegts",
@@ -148,19 +169,12 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
     cmd = ["ffmpeg", "-y", "-i", analysis.file_path]
     cmd += ["-map", f"0:{audio_stream.index}", "-vn", "-sn"]
 
-    use_copy = Config.ENABLE_COPY_MODE and getattr(audio_stream, "is_copy_compatible", False)
-    if use_copy:
-        cmd += ["-c:a", "copy"]
-        logger.info(
-            "Audio track %d (%s): copy mode (codec=%s)",
-            audio_index, audio_stream.language, audio_stream.codec_name,
-        )
-    else:
-        cmd += ["-c:a", "aac", "-b:a", Config.AUDIO_BITRATE]
-        logger.info(
-            "Audio track %d (%s): AAC encode at %s",
-            audio_index, audio_stream.language, Config.AUDIO_BITRATE,
-        )
+    # Always encode to AAC for consistent HLS compatibility
+    cmd += ["-c:a", "aac", "-b:a", Config.AUDIO_BITRATE]
+    logger.info(
+        "Audio track %d (%s): AAC encode at %s",
+        audio_index, audio_stream.language, Config.AUDIO_BITRATE,
+    )
 
     cmd += [
         "-f", "hls",
@@ -360,24 +374,27 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
 
         return cb
 
-    # 1. Video streams (original + ABR tiers)
+    # 1. Video streams (tier 0 CBR + ABR tiers from tier 0 output)
     if analysis.has_video:
-        # Tier 0: original resolution
+        # Tier 0: high-quality CBR re-encode at source resolution
+        tier0_bitrate = _get_tier0_bitrate(source_height)
         cmd, playlist = _build_video_cmd(
             analysis, output_dir, hw_encoder, tier_index=0,
+            target_bitrate=tier0_bitrate,
         )
         _run_ffmpeg_with_progress(
-            cmd, f"video tier 0 (original) for {job_id}",
+            cmd, f"video tier 0 (original CBR {tier0_bitrate}) for {job_id}",
             duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb("Encoding video (original)"),
         )
+        tier0_playlist = playlist
         tier_dir = os.path.dirname(playlist)
         result.video_playlists.append((
-            playlist, tier_dir, source_width, source_height, Config.VIDEO_BITRATE,
+            playlist, tier_dir, source_width, source_height, tier0_bitrate,
         ))
-        report("Video (original) extracted")
+        report("Video (original) encoded")
 
-        # Additional ABR tiers (lower resolutions)
+        # Additional ABR tiers — encoded from tier 0 output, not original source
         for ti, tier in enumerate(abr_tiers, start=1):
             target_h = tier["height"]
             # Calculate proportional width (even number)
@@ -386,6 +403,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             cmd, playlist = _build_video_cmd(
                 analysis, output_dir, hw_encoder,
                 tier_index=ti, target_height=target_h, target_bitrate=tier["bitrate"],
+                input_override=tier0_playlist,
             )
             _run_ffmpeg_with_progress(
                 cmd, f"video tier {ti} ({target_h}p) for {job_id}",
@@ -396,7 +414,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             result.video_playlists.append((
                 playlist, tier_dir, target_w, target_h, tier["bitrate"],
             ))
-            report(f"Video ({target_h}p) extracted")
+            report(f"Video ({target_h}p) encoded")
 
     # 2. Audio streams - each track gets its own HLS stream
     for i, audio in enumerate(analysis.audio_streams):
