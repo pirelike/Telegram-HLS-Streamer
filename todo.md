@@ -29,12 +29,12 @@
 
 ## P1 — Performance (High Impact)
 
-- [ ] `app.py:864-892`: **Segment proxy has no server-side caching** — every segment request fetches from Telegram (~200-500ms round trip); HLS players re-request segments during seek/quality switch; under concurrent viewers, Telegram rate limits will be hit
-  - Fix: add in-memory LRU cache (e.g. bounded dict or `cachetools.LRUCache`) for recently served segments; even 100MB cache would dramatically reduce Telegram API calls
-- [ ] `app.py:136-144`: **New asyncio event loop created per request** — `_run_async()` creates and tears down an event loop for every segment proxy call; for a video with 500 segments, that's 500 event loop lifecycles
-  - Fix: maintain a single persistent background event loop, dispatch async work via `asyncio.run_coroutine_threadsafe()`; or migrate to Quart (async Flask drop-in)
-- [ ] `app.py:874`: **Segments fully buffered in memory** — `get_file_bytes()` downloads entire segment into a `bytearray` then sends to client; for 20MB segments, each concurrent viewer uses 20MB RAM per segment fetch
-  - Fix: stream Telegram download directly to HTTP response using chunked transfer encoding
+- [x] `app.py:901-937`: **Segment proxy has no server-side caching** — every segment request fetches from Telegram (~200-500ms round trip); HLS players re-request segments during seek/quality switch; under concurrent viewers, Telegram rate limits will be hit
+  - Fix: `_SegmentCache` class — bounded `OrderedDict`-backed LRU cache, configurable via `SEGMENT_CACHE_SIZE_MB` (default 200MB), thread-safe with `Lock`
+- [x] `app.py:147-150`: **New asyncio event loop created per request** — `_run_async()` creates and tears down an event loop for every segment proxy call; for a video with 500 segments, that's 500 event loop lifecycles
+  - Fix: single persistent daemon thread loop (`_async_loop`), dispatched via `asyncio.run_coroutine_threadsafe()` with 30s timeout; clean shutdown via `atexit`
+- [x] `app.py:973-984`: **Segments fully buffered in memory** — `get_file_bytes()` downloads entire segment into a `bytearray` then sends to client; for 20MB segments, each concurrent viewer uses 20MB RAM per segment fetch
+  - Fix: `serve_segment` now fetches via `get_file_url()` + `aiohttp` with `iter_chunked(65536)`; result is cached after first fetch so repeated requests skip Telegram entirely
 
 ## P2 — Reliability
 

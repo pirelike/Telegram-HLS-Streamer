@@ -9,6 +9,7 @@ Web server that handles:
 """
 
 import asyncio
+import atexit
 import base64
 import collections
 import logging
@@ -16,10 +17,14 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
+import threading
 import time
 import uuid
 from threading import Lock, Thread
+
+import aiohttp
 from werkzeug.utils import secure_filename
 
 from flask import (
@@ -133,15 +138,48 @@ def _is_origin_allowed(origin: str) -> bool:
     return origin in Config.CORS_ALLOWED_ORIGINS
 
 
-def _run_async(coro):
-    """Run an async coroutine synchronously from a Flask thread."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+_async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_async_loop_thread = None
+_aiohttp_session = None
+_loop_ready = threading.Event()
+
+
+def _run_async(coro, timeout=30):
+    """Run an async coroutine synchronously from a Flask thread via the persistent loop."""
+    future = asyncio.run_coroutine_threadsafe(coro, _async_loop)
+    return future.result(timeout=timeout)
+
+
+def _start_persistent_loop():
+    global _async_loop_thread, _aiohttp_session
+
+    async def _init():
+        global _aiohttp_session
+        _aiohttp_session = aiohttp.ClientSession()
+
+    def run_loop():
+        asyncio.set_event_loop(_async_loop)
+        _async_loop.call_soon(_loop_ready.set)
+        _async_loop.run_forever()
+
+    _async_loop_thread = Thread(target=run_loop, daemon=True, name="async-loop")
+    _async_loop_thread.start()
+    _loop_ready.wait(timeout=5)
+    asyncio.run_coroutine_threadsafe(_init(), _async_loop).result(timeout=10)
+
+
+def _shutdown_persistent_loop():
+    async def _close():
+        if _aiohttp_session and not _aiohttp_session.closed:
+            await _aiohttp_session.close()
     try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
+        asyncio.run_coroutine_threadsafe(_close(), _async_loop).result(timeout=5)
+    except Exception:
+        pass
+    _async_loop.call_soon_threadsafe(_async_loop.stop)
+
+
+atexit.register(_shutdown_persistent_loop)
 
 
 def _is_upload_authorized():
@@ -386,6 +424,7 @@ def delete_job_endpoint(job_id):
 # Shared TelegramUploader singleton — avoids creating fresh Bot objects on every
 # segment proxy request or processing job.
 _telegram_uploader = TelegramUploader()
+_start_persistent_loop()
 
 _start_timeout_watcher()
 _start_queue_workers()
@@ -859,6 +898,45 @@ def subtitle_playlist(job_id, index):
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
 
 
+# ─── Segment Cache ───
+
+class _SegmentCache:
+    def __init__(self, max_bytes):
+        self._max_bytes = max_bytes
+        self._current_bytes = 0
+        self._data = collections.OrderedDict()
+        self._lock = Lock()
+
+    def get(self, key):
+        with self._lock:
+            if key not in self._data:
+                return None
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def put(self, key, data):
+        size = len(data)
+        if self._max_bytes == 0 or size > self._max_bytes:
+            return
+        with self._lock:
+            if key in self._data:
+                self._current_bytes -= len(self._data[key])
+                del self._data[key]
+            while self._current_bytes + size > self._max_bytes and self._data:
+                _, v = self._data.popitem(last=False)
+                self._current_bytes -= len(v)
+            self._data[key] = data
+            self._current_bytes += size
+
+    @property
+    def current_bytes(self):
+        with self._lock:
+            return self._current_bytes
+
+
+_segment_cache = _SegmentCache(max_bytes=Config.SEGMENT_CACHE_SIZE_MB * 1024 * 1024)
+
+
 # ─── Segment Proxy ───
 
 @app.route("/segment/<job_id>/<path:segment_key>")
@@ -871,11 +949,6 @@ def serve_segment(job_id, segment_key):
     file_id = info["file_id"]
     bot_index = info["bot_index"]
 
-    segment_bytes = _run_async(_telegram_uploader.get_file_bytes(file_id, bot_index))
-
-    if not segment_bytes:
-        return jsonify({"error": "Could not download segment from Telegram"}), 500
-
     if segment_key.endswith(".vtt"):
         content_type = "text/vtt"
     elif segment_key.endswith(".ts"):
@@ -883,13 +956,46 @@ def serve_segment(job_id, segment_key):
     else:
         content_type = "application/octet-stream"
 
-    return Response(
-        bytes(segment_bytes),
-        content_type=content_type,
-        headers={
-            "Cache-Control": "public, max-age=86400",
-        },
-    )
+    headers = {"Cache-Control": "public, max-age=86400"}
+
+    # Cache hit — return immediately
+    cached = _segment_cache.get(segment_key)
+    if cached is not None:
+        logger.debug("Segment cache HIT: %s", segment_key)
+        return Response(cached, content_type=content_type, headers=headers)
+
+    logger.debug("Segment cache MISS: %s", segment_key)
+
+    # Cache miss — stream from Telegram via aiohttp, accumulate, then cache
+    chunks = []
+    error_holder = [None]
+
+    async def _fetch():
+        global _aiohttp_session
+        try:
+            if _aiohttp_session is None or _aiohttp_session.closed:
+                logger.warning("aiohttp session closed, recreating")
+                _aiohttp_session = aiohttp.ClientSession()
+            url = await _telegram_uploader.get_file_url(file_id, bot_index)
+            async with _aiohttp_session.get(url) as resp:
+                if resp.status != 200:
+                    error_holder[0] = f"Telegram HTTP {resp.status}"
+                    return
+                async for chunk in resp.content.iter_chunked(65536):
+                    chunks.append(chunk)
+        except Exception as exc:
+            error_holder[0] = str(exc)
+            logger.warning("Segment download failed %s: %s", segment_key, exc)
+
+    _run_async(_fetch())
+
+    if error_holder[0] or not chunks:
+        return jsonify({"error": "Could not download segment from Telegram"}), 500
+
+    segment_bytes = b"".join(chunks)
+    _segment_cache.put(segment_key, segment_bytes)
+
+    return Response(segment_bytes, content_type=content_type, headers=headers)
 
 
 # ─── CORS for HLS ───
@@ -908,6 +1014,26 @@ def add_cors(response):
     return response
 
 
+def _kill_existing_cloudflared(port: int) -> None:
+    """Kill any orphaned cloudflared processes tunneling to the given port."""
+    target = f"http://localhost:{port}"
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", "cloudflared"],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            if target in line:
+                pid = int(line.split()[0])
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info("Killed orphaned cloudflared process %d", pid)
+                except ProcessLookupError:
+                    pass
+    except Exception:
+        pass
+
+
 def _start_cloudflared_tunnel(port: int) -> None:
     """Start a cloudflared quick tunnel and print the public URL.
 
@@ -920,6 +1046,8 @@ def _start_cloudflared_tunnel(port: int) -> None:
         print("      Telepítés: sudo pacman -S cloudflared")
         return
 
+    _kill_existing_cloudflared(port)
+
     try:
         proc = subprocess.Popen(
             ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
@@ -927,6 +1055,7 @@ def _start_cloudflared_tunnel(port: int) -> None:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        atexit.register(proc.terminate)
         url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
         for line in proc.stdout:
             match = url_pattern.search(line)
@@ -945,6 +1074,7 @@ if __name__ == "__main__":
     logger.info("Configured bots: %d", len(Config.BOTS))
     logger.info("Max upload size: %d GB", Config.MAX_UPLOAD_SIZE // (1024**3))
     logger.info("Chunk size: %d MB", Config.UPLOAD_CHUNK_SIZE // (1024**2))
-    tunnel_thread = Thread(target=_start_cloudflared_tunnel, args=(Config.PORT,), daemon=True)
-    tunnel_thread.start()
+    if Config.CLOUDFLARED_ENABLED:
+        tunnel_thread = Thread(target=_start_cloudflared_tunnel, args=(Config.PORT,), daemon=True)
+        tunnel_thread.start()
     app.run(host=Config.HOST, port=Config.PORT, debug=False, threaded=True)

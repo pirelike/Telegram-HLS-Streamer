@@ -27,11 +27,15 @@ class Config:
     FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
     BEHIND_PROXY = os.getenv("BEHIND_PROXY", "true").lower() == "true"
 
+    # Cloudflare tunnel
+    CLOUDFLARED_ENABLED = os.getenv("CLOUDFLARED_ENABLED", "true").lower() == "true"
+
     # File handling
     TELEGRAM_MAX_FILE_SIZE = _int_env("TELEGRAM_MAX_FILE_SIZE", 20971520)
     MAX_UPLOAD_SIZE = _int_env("MAX_UPLOAD_SIZE", 107374182400)  # 100GB
     UPLOAD_CHUNK_SIZE = _int_env("UPLOAD_CHUNK_SIZE", 10485760)  # 10MB per chunk
     SEGMENT_MAX_SIZE = _int_env("SEGMENT_MAX_SIZE", 18874368)  # 18MB — safe margin under 20MB Telegram limit
+    SEGMENT_CACHE_SIZE_MB = _int_env("SEGMENT_CACHE_SIZE_MB", 200)
 
     # Hardware acceleration
     ENABLE_HW_ACCEL = os.getenv("ENABLE_HARDWARE_ACCELERATION", "true").lower() == "true"
