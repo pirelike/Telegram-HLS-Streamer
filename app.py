@@ -144,10 +144,10 @@ _aiohttp_session = None
 _loop_ready = threading.Event()
 
 
-def _run_async(coro):
+def _run_async(coro, timeout=30):
     """Run an async coroutine synchronously from a Flask thread via the persistent loop."""
     future = asyncio.run_coroutine_threadsafe(coro, _async_loop)
-    return future.result()
+    return future.result(timeout=timeout)
 
 
 def _start_persistent_loop():
@@ -971,7 +971,11 @@ def serve_segment(job_id, segment_key):
     error_holder = [None]
 
     async def _fetch():
+        global _aiohttp_session
         try:
+            if _aiohttp_session is None or _aiohttp_session.closed:
+                logger.warning("aiohttp session closed, recreating")
+                _aiohttp_session = aiohttp.ClientSession()
             url = await _telegram_uploader.get_file_url(file_id, bot_index)
             async with _aiohttp_session.get(url) as resp:
                 if resp.status != 200:
