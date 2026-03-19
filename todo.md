@@ -3,7 +3,10 @@
 ## P0 — Critical Bugs
 
 - [ ] `config.py:31` / `video_processor.py`: `TELEGRAM_MAX_FILE_SIZE` is declared (20MB) but **never enforced** — FFmpeg `-hls_time 4` controls segment duration, not size; a 4K high-bitrate segment can exceed 20MB and cause Telegram upload failure, killing the entire job
-  - Fix: add `-hls_segment_size` to FFmpeg commands as a hard cap, or validate segment sizes before upload and re-segment oversized ones
+  - Fix: replace duration-based segmentation (`-hls_time`) with size-based segmentation (`-hls_segment_size 18874368` — 18MB, leaving 2MB headroom under Telegram's 20MB limit)
+  - Add `-force_key_frames "expr:gte(t,n_forced*1)"` to force keyframes every 1 second, giving FFmpeg frequent split opportunities so segments stay tightly under the size cap
+  - With VBR content this means segment *durations* will vary (low-motion scenes → longer segments, high-action → shorter), but every segment stays ≤~18MB
+  - Keep duration-based segmentation as fallback only for copy-mode streams where re-encoding isn't happening
 
 ## P1 — Performance (High Impact)
 
