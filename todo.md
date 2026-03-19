@@ -2,11 +2,27 @@
 
 ## P0 — Critical Bugs
 
-- [ ] `config.py:31` / `video_processor.py`: `TELEGRAM_MAX_FILE_SIZE` is declared (20MB) but **never enforced** — FFmpeg `-hls_time 4` controls segment duration, not size; a 4K high-bitrate segment can exceed 20MB and cause Telegram upload failure, killing the entire job
-  - Fix: replace duration-based segmentation (`-hls_time`) with size-based segmentation (`-hls_segment_size 18874368` — 18MB, leaving 2MB headroom under Telegram's 20MB limit)
-  - Add `-force_key_frames "expr:gte(t,n_forced*1)"` to force keyframes every 1 second, giving FFmpeg frequent split opportunities so segments stay tightly under the size cap
-  - With VBR content this means segment *durations* will vary (low-motion scenes → longer segments, high-action → shorter), but every segment stays ≤~18MB
-  - Keep duration-based segmentation as fallback only for copy-mode streams where re-encoding isn't happening
+- [ ] `config.py:31` / `video_processor.py`: **Rewrite encoding pipeline — CBR + size-based segmentation**
+  - **Problem:** `TELEGRAM_MAX_FILE_SIZE` (20MB) is never enforced; VBR segments can exceed 20MB and kill uploads; copy mode can't guarantee segment sizes
+  - **Plan:**
+    1. **Ditch copy mode and VBR entirely** — all video tiers are re-encoded at constant bitrate (CBR) for predictable, consistent segment sizes
+    2. **Tier 0 ("near-lossless")** is no longer a stream copy — it's a high-quality CBR re-encode at the source resolution:
+       - 4K → 60 Mbps CBR (~2.4s per 18MB segment)
+       - 1080p → 30 Mbps CBR (~4.8s per 18MB segment)
+       - 720p → 15 Mbps CBR (~9.6s per 18MB segment)
+       - 480p → 5 Mbps CBR (~28.8s per 18MB segment)
+    3. **Lower ABR tiers encode from tier 0's output**, not from the original source — this means FFmpeg only decodes the original once; lower tiers re-encode from the already-decoded high-quality tier 0
+    4. **Size-based segmentation** — use `-hls_segment_size 18874368` (18MB) with `-force_key_frames "expr:gte(t,n_forced*1)"` (keyframe every 1s) on all tiers
+    5. **CBR makes segment sizes predictable** — with constant bitrate, each segment at a given tier will have roughly the same duration and size, eliminating VBR variance
+  - **Config changes:**
+    - Remove `ENABLE_COPY_MODE` — always re-encode
+    - Update `ABR_TIERS` to use CBR values: `{2160: 60M, 1080: 30M, 720: 15M, 480: 5M, 360: 1.2M}`
+    - Add `SEGMENT_MAX_SIZE = 18874368` (18MB) to replace `HLS_SEGMENT_DURATION` as the primary segmentation control
+  - **FFmpeg flags per tier:**
+    - `-c:v libx264 -b:v {bitrate} -minrate {bitrate} -maxrate {bitrate} -bufsize {bitrate}` (true CBR)
+    - `-hls_segment_size 18874368`
+    - `-force_key_frames "expr:gte(t,n_forced*1)"`
+  - **Encoding chain:** source → tier 0 (high CBR) → tier 1, 2, 3… (lower CBR, encoded from tier 0 output)
 
 ## P1 — Performance (High Impact)
 
