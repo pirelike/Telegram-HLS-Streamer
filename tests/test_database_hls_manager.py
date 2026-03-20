@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -99,6 +100,164 @@ class TestDatabaseConnections(TestDatabaseBase):
 
         database._get_conn()
         self.assertEqual(database.open_connection_count(), 1)
+
+
+class TestDatabaseMigrations(TestDatabaseBase):
+    def _reset_db_file(self):
+        database._close_all_connections()
+        database._local = threading.local()
+        for suffix in ("", "-wal", "-shm"):
+            path = f"{self.harness.db_path}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+
+    def _reinit_db_with_sql(self, statements):
+        self._reset_db_file()
+        conn = sqlite3.connect(self.harness.db_path)
+        try:
+            for statement in statements:
+                conn.executescript(statement)
+            conn.commit()
+        finally:
+            conn.close()
+        database._local = threading.local()
+        database.init_db()
+
+    def test_init_db_creates_schema_migrations_table(self):
+        conn = database._get_conn()
+        rows = conn.execute(
+            "SELECT revision, name FROM schema_migrations ORDER BY revision"
+        ).fetchall()
+        self.assertEqual(
+            [(row["revision"], row["name"]) for row in rows],
+            [
+                (1, "create_base_schema"),
+                (2, "add_track_dimensions_and_stream_index"),
+                (3, "add_segment_duration"),
+            ],
+        )
+
+    def test_init_db_bootstraps_legacy_revision_one_and_upgrades(self):
+        self._reinit_db_with_sql([
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                filename TEXT
+            );
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                track_type TEXT NOT NULL,
+                track_index INTEGER NOT NULL,
+                codec TEXT,
+                language TEXT DEFAULT 'und',
+                title TEXT DEFAULT '',
+                channels INTEGER DEFAULT 2,
+                UNIQUE(job_id, track_type, track_index)
+            );
+            CREATE TABLE segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                segment_key TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                bot_index INTEGER NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                UNIQUE(job_id, segment_key)
+            );
+            INSERT INTO jobs (job_id, filename) VALUES ('legacy1', 'legacy.mp4');
+            INSERT INTO tracks (job_id, track_type, track_index, codec, language, title, channels)
+            VALUES ('legacy1', 'audio', 0, 'aac', 'eng', 'English', 2);
+            INSERT INTO segments (job_id, segment_key, file_id, bot_index, file_size)
+            VALUES ('legacy1', 'audio_0/audio_0001.ts', 'f1', 0, 123);
+            """,
+        ])
+
+        conn = database._get_conn()
+        track_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+        segment_cols = {row["name"] for row in conn.execute("PRAGMA table_info(segments)").fetchall()}
+        revision = conn.execute("SELECT MAX(revision) AS revision FROM schema_migrations").fetchone()["revision"]
+
+        self.assertTrue({"width", "height", "bitrate", "original_stream_index"}.issubset(track_cols))
+        self.assertIn("duration", segment_cols)
+        self.assertEqual(revision, database.LATEST_SCHEMA_REVISION)
+        self.assertEqual(database.get_job("legacy1")["filename"], "legacy.mp4")
+        self.assertEqual(
+            database.get_segments_for_prefix("legacy1", "audio_0")[0]["segment_key"],
+            "audio_0/audio_0001.ts",
+        )
+
+    def test_init_db_bootstraps_legacy_revision_two_and_upgrades(self):
+        self._reinit_db_with_sql([
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                filename TEXT
+            );
+            CREATE TABLE tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                track_type TEXT NOT NULL,
+                track_index INTEGER NOT NULL,
+                codec TEXT,
+                language TEXT DEFAULT 'und',
+                title TEXT DEFAULT '',
+                channels INTEGER DEFAULT 2,
+                width INTEGER DEFAULT 0,
+                height INTEGER DEFAULT 0,
+                bitrate TEXT DEFAULT '',
+                original_stream_index INTEGER DEFAULT -1,
+                UNIQUE(job_id, track_type, track_index)
+            );
+            CREATE TABLE segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                segment_key TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                bot_index INTEGER NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                UNIQUE(job_id, segment_key)
+            );
+            INSERT INTO jobs (job_id, filename) VALUES ('legacy2', 'legacy2.mp4');
+            INSERT INTO segments (job_id, segment_key, file_id, bot_index, file_size)
+            VALUES ('legacy2', 'video/video_0001.ts', 'f2', 0, 321);
+            """,
+        ])
+
+        conn = database._get_conn()
+        revision = conn.execute("SELECT MAX(revision) AS revision FROM schema_migrations").fetchone()["revision"]
+        segment_cols = {row["name"] for row in conn.execute("PRAGMA table_info(segments)").fetchall()}
+
+        self.assertEqual(revision, database.LATEST_SCHEMA_REVISION)
+        self.assertIn("duration", segment_cols)
+        self.assertEqual(database.get_job("legacy2")["filename"], "legacy2.mp4")
+
+    def test_init_db_is_idempotent(self):
+        database.init_db()
+        conn = database._get_conn()
+        rows = conn.execute("SELECT revision FROM schema_migrations ORDER BY revision").fetchall()
+        self.assertEqual([row["revision"] for row in rows], [1, 2, 3])
+
+    def test_init_db_fails_for_newer_schema_revision(self):
+        self._reset_db_file()
+        conn = sqlite3.connect(self.harness.db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    revision INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO schema_migrations (revision, name) VALUES (99, 'future_schema');
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        database._local = threading.local()
+        with self.assertRaisesRegex(RuntimeError, "newer than supported"):
+            database.init_db()
 
 
 class TestDatabaseCRUD(TestDatabaseBase):
