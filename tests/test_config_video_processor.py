@@ -158,6 +158,18 @@ class TestConfigLoadBots(unittest.TestCase):
                 config.Config.load_bots()
 
 
+class TestSegmentTargetConfig(unittest.TestCase):
+    def test_segment_target_size_uses_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            val = config._int_env("SEGMENT_TARGET_SIZE", 15728640)
+        self.assertEqual(val, 15728640)
+
+    def test_segment_target_size_reads_env(self):
+        with patch.dict(os.environ, {"SEGMENT_TARGET_SIZE": "8388608"}, clear=True):
+            val = config._int_env("SEGMENT_TARGET_SIZE", 15728640)
+        self.assertEqual(val, 8388608)
+
+
 class TestVideoProcessorHelpers(unittest.TestCase):
     def setUp(self):
         vp._hw_encoder_probed = False
@@ -293,6 +305,27 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         with patch.object(vp.Config, "ABR_ENABLED", True):
             tiers = vp._get_abr_tiers(240)
         self.assertEqual(tiers, [])
+
+    # ─── _get_safe_segment_size ───
+
+    def test_get_safe_segment_size_uses_segment_target_when_safe(self):
+        with patch.object(vp.Config, "SEGMENT_TARGET_SIZE", 8 * 1024 * 1024), \
+             patch.object(vp.Config, "TELEGRAM_MAX_FILE_SIZE", 20 * 1024 * 1024):
+            size = vp._get_safe_segment_size("2M")
+        self.assertEqual(size, 8 * 1024 * 1024)
+
+    def test_get_safe_segment_size_clamps_to_safe_ceiling(self):
+        with patch.object(vp.Config, "SEGMENT_TARGET_SIZE", 19 * 1024 * 1024), \
+             patch.object(vp.Config, "TELEGRAM_MAX_FILE_SIZE", 20 * 1024 * 1024):
+            size = vp._get_safe_segment_size("8M")
+        expected = 20 * 1024 * 1024 - int(vp._parse_bitrate_to_bytes_per_sec("8M") * 1.5)
+        self.assertEqual(size, expected)
+
+    def test_get_safe_segment_size_has_one_mb_floor(self):
+        with patch.object(vp.Config, "SEGMENT_TARGET_SIZE", 2 * 1024 * 1024), \
+             patch.object(vp.Config, "TELEGRAM_MAX_FILE_SIZE", 512 * 1024):
+            size = vp._get_safe_segment_size("10M")
+        self.assertEqual(size, 1024 * 1024)
 
     # ─── _build_video_cmd ───
 
@@ -638,94 +671,6 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as proc_dir:
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 vp.cleanup("no_such_job")  # should not raise
-
-
-class TestSplitOversizedSegments(unittest.TestCase):
-    def test_small_files_are_not_split(self):
-        max_size = 100
-        with tempfile.TemporaryDirectory() as tier_dir:
-            small = os.path.join(tier_dir, "video_0000.ts")
-            with open(small, "wb") as f:
-                f.write(b"x" * max_size)
-            with patch("video_processor._run_ffmpeg") as mock_run:
-                count = vp._split_oversized_segments(tier_dir, max_size)
-            self.assertEqual(count, 0)
-            mock_run.assert_not_called()
-            self.assertTrue(os.path.exists(small))
-
-    def test_oversized_file_is_split_and_original_removed(self):
-        max_size = 100
-        with tempfile.TemporaryDirectory() as tier_dir:
-            big = os.path.join(tier_dir, "video_0000.ts")
-            with open(big, "wb") as f:
-                f.write(b"x" * (max_size + 1))
-
-            def fake_ffmpeg(cmd, description=""):
-                # Create two split files in the tmpdir indicated by the pattern
-                seg_idx = cmd.index("-hls_segment_filename")
-                pattern = cmd[seg_idx + 1]
-                split_dir = os.path.dirname(pattern)
-                open(os.path.join(split_dir, "split_0000.ts"), "wb").close()
-                open(os.path.join(split_dir, "split_0001.ts"), "wb").close()
-                with open(cmd[-1], "w") as f:
-                    f.write("#EXTM3U\n")
-
-            with patch("video_processor._run_ffmpeg", side_effect=fake_ffmpeg):
-                count = vp._split_oversized_segments(tier_dir, max_size)
-
-            self.assertEqual(count, 1)
-            self.assertFalse(os.path.exists(big))
-            self.assertTrue(os.path.exists(os.path.join(tier_dir, "video_0000_split_0000.ts")))
-            self.assertTrue(os.path.exists(os.path.join(tier_dir, "video_0000_split_0001.ts")))
-
-    def test_split_files_sort_correctly_between_neighbors(self):
-        max_size = 100
-        with tempfile.TemporaryDirectory() as tier_dir:
-            # Create neighbors and one oversized middle segment
-            for name in ("video_0000.ts", "video_0002.ts"):
-                with open(os.path.join(tier_dir, name), "wb") as f:
-                    f.write(b"x" * max_size)
-            with open(os.path.join(tier_dir, "video_0001.ts"), "wb") as f:
-                f.write(b"x" * (max_size + 1))
-
-            def fake_ffmpeg(cmd, description=""):
-                seg_idx = cmd.index("-hls_segment_filename")
-                pattern = cmd[seg_idx + 1]
-                split_dir = os.path.dirname(pattern)
-                open(os.path.join(split_dir, "split_0000.ts"), "wb").close()
-                open(os.path.join(split_dir, "split_0001.ts"), "wb").close()
-                with open(cmd[-1], "w") as f:
-                    f.write("#EXTM3U\n")
-
-            with patch("video_processor._run_ffmpeg", side_effect=fake_ffmpeg):
-                vp._split_oversized_segments(tier_dir, max_size)
-
-            ts_files = sorted(f for f in os.listdir(tier_dir) if f.endswith(".ts"))
-            self.assertEqual(ts_files, [
-                "video_0000.ts",
-                "video_0001_split_0000.ts",
-                "video_0001_split_0001.ts",
-                "video_0002.ts",
-            ])
-
-    def test_returns_zero_on_empty_dir(self):
-        with tempfile.TemporaryDirectory() as tier_dir:
-            count = vp._split_oversized_segments(tier_dir, 100)
-        self.assertEqual(count, 0)
-
-    def test_split_ffmpeg_failure_skips_file(self):
-        max_size = 100
-        with tempfile.TemporaryDirectory() as tier_dir:
-            big = os.path.join(tier_dir, "video_0000.ts")
-            with open(big, "wb") as f:
-                f.write(b"x" * (max_size + 1))
-
-            with patch("video_processor._run_ffmpeg", side_effect=RuntimeError("ffmpeg died")):
-                count = vp._split_oversized_segments(tier_dir, max_size)
-
-            # Original should still exist since split failed
-            self.assertEqual(count, 0)
-            self.assertTrue(os.path.exists(big))
 
 
 class TestUploadSizeGate(unittest.TestCase):

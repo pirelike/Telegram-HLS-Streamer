@@ -21,6 +21,7 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -148,6 +149,8 @@ _aiohttp_session = None
 _loop_ready = threading.Event()
 _segment_downloads = {}
 _segment_download_lock = Lock()
+_scheduled_segment_prefetches = set()
+_segment_prefetch_lock = Lock()
 
 _STREAM_EOF = object()
 
@@ -1283,6 +1286,21 @@ def _start_segment_download(file_id, bot_index, cache_key, state):
     )
 
 
+def _claim_segment_prefetch(cache_key):
+    """Reserve a future segment for one queued prefetch task."""
+    with _segment_prefetch_lock:
+        if cache_key in _scheduled_segment_prefetches:
+            return False
+        _scheduled_segment_prefetches.add(cache_key)
+        return True
+
+
+def _release_segment_prefetch(cache_key):
+    """Clear a queued/running prefetch reservation."""
+    with _segment_prefetch_lock:
+        _scheduled_segment_prefetches.discard(cache_key)
+
+
 def _stream_segment_owner(state, first_item):
     """Yield stream items for the owner request while the async download runs."""
     item = first_item
@@ -1331,6 +1349,8 @@ async def _prefetch_segment(job_id, segment_key):
         await _download_segment_to_state(info["file_id"], info["bot_index"], cache_key, state)
     except Exception as exc:
         logger.debug("Segment prefetch failed %s: %s", cache_key, exc)
+    finally:
+        _release_segment_prefetch(cache_key)
 
 
 def _start_prefetch_task(job_id, segment_key):
@@ -1346,9 +1366,7 @@ def _schedule_segment_prefetch(job_id, segment_key):
 
     if _segment_cache.max_bytes <= 0:
         return
-
-    min_free_bytes = max(0, Config.SEGMENT_PREFETCH_MIN_FREE_BYTES)
-    if _segment_cache.free_bytes < min_free_bytes:
+    if _segment_cache.free_bytes < max(0, Config.SEGMENT_PREFETCH_MIN_FREE_BYTES):
         return
 
     prefix = _get_segment_prefix(segment_key)
@@ -1373,8 +1391,9 @@ def _schedule_segment_prefetch(job_id, segment_key):
         next_cache_key = f"{job_id}/{next_segment_key}"
         if _segment_cache.get(next_cache_key) is not None:
             continue
-        _, is_owner = _claim_segment_download(next_cache_key)
-        if not is_owner:
+        if next_cache_key in _segment_downloads:
+            continue
+        if not _claim_segment_prefetch(next_cache_key):
             continue
         _async_loop.call_soon_threadsafe(_start_prefetch_task, job_id, next_segment_key)
 
@@ -1435,8 +1454,24 @@ def serve_segment(job_id, segment_key):
 
     if not state.completed.is_set():
         state.finish_waiting_follower()
-        logger.warning("Segment download timed out waiting for %s", cache_key)
-        return jsonify({"error": "Could not download segment from Telegram"}), 500
+        _release_segment_download(state)
+        logger.debug("Segment follower timed out; falling back to direct download for %s", cache_key)
+        fallback_key = f"{cache_key}#fallback-{threading.get_ident()}"
+        fallback_state = _SegmentDownloadState(fallback_key, enable_stream=True)
+        with _segment_download_lock:
+            _segment_downloads[fallback_key] = fallback_state
+        _start_segment_download(file_id, bot_index, cache_key, fallback_state)
+        first_item = fallback_state.stream_queue.get()
+        if isinstance(first_item, _SegmentStreamError):
+            logger.warning("Segment fallback download failed %s: %s", cache_key, first_item.exc)
+            _release_segment_download(fallback_state)
+            return jsonify({"error": "Could not download segment from Telegram"}), 500
+        _schedule_segment_prefetch(job_id, segment_key)
+        return Response(
+            stream_with_context(_stream_segment_owner(fallback_state, first_item)),
+            content_type=content_type,
+            headers=headers,
+        )
 
     cached = _segment_cache.get(cache_key)
     if cached is not None:
@@ -1527,6 +1562,29 @@ def _stop_cloudflared():
         logger.info("Cloudflared tunnel stopped")
 
 
+def _cloudflared_dns_ready(hostname: str, timeout: float = 3.0) -> bool:
+    """Query 1.1.1.1 directly for hostname, bypassing the system resolver.
+
+    trycloudflare.com is Cloudflare's own zone, so 1.1.1.1 has the record as
+    soon as the tunnel registers — even when the local resolver hasn't caught up.
+    """
+    import struct
+    qid = 0xABCD
+    header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+    parts = hostname.encode().split(b".")
+    question = b"".join(bytes([len(p)]) + p for p in parts) + b"\x00\x00\x01\x00\x01"
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(header + question, ("1.1.1.1", 53))
+            data, _ = s.recvfrom(512)
+        rcode = struct.unpack(">H", data[2:4])[0] & 0xF
+        ancount = struct.unpack(">H", data[6:8])[0]
+        return rcode == 0 and ancount > 0
+    except Exception:
+        return False
+
+
 def _start_cloudflared_tunnel(port: int) -> None:
     """Start a cloudflared quick tunnel and print the public URL.
 
@@ -1556,13 +1614,32 @@ def _start_cloudflared_tunnel(port: int) -> None:
                 text=True,
             )
             _cloudflared_proc = proc
+            tunnel_url = None
+            hostname = None
             for line in proc.stdout:
                 match = url_pattern.search(line)
                 if match:
-                    logger.info("Cloudflared tunnel active: %s", match.group())
-                    print(f"  [✓] Cloudflared tunnel: {match.group()}")
+                    tunnel_url = match.group()
+                    hostname = tunnel_url.removeprefix("https://")
                     backoff = 5  # reset on successful connection
                     break
+            # Drain stdout immediately so cloudflared never stalls on a full pipe buffer.
+            # This must happen before the DNS poll below, which can take up to 30 s.
+            Thread(target=lambda: [_ for _ in proc.stdout], daemon=True).start()
+            if tunnel_url:
+                # Wait for DNS to propagate before announcing the URL.
+                # Query 1.1.1.1 directly — the system resolver often lags on
+                # newly created *.trycloudflare.com subdomains.
+                for attempt in range(30):
+                    if _cloudflared_dns_ready(hostname):
+                        break
+                    if attempt == 29:
+                        logger.warning(
+                            "Cloudflared DNS did not resolve after 30s: %s", tunnel_url
+                        )
+                    time.sleep(1)
+                logger.info("Cloudflared tunnel active: %s", tunnel_url)
+                print(f"  [✓] Cloudflared tunnel: {tunnel_url}")
             proc.wait()
             logger.warning("Cloudflared tunnel exited unexpectedly")
         except Exception as exc:

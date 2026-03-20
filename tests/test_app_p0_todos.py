@@ -66,6 +66,7 @@ def _reset_state():
     app_module._pending_uploads_per_ip.clear()
     app_module._segment_downloads.clear()
     app_module._segment_cache.clear()
+    app_module._scheduled_segment_prefetches.clear()
 
 
 class _FakeContent:
@@ -850,15 +851,44 @@ class TestP0TodoFixes(unittest.TestCase):
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
         call_soon.assert_called_once()
+        self.assertEqual(app_module._segment_downloads, {})
+        self.assertEqual(app_module._scheduled_segment_prefetches, {"job1/video/video_0002.ts"})
+
+    def test_schedule_segment_prefetch_skips_when_cache_headroom_too_low(self):
+        segments = [
+            {"segment_key": "video/video_0001.ts", "duration": 4},
+            {"segment_key": "video/video_0002.ts", "duration": 4},
+        ]
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 1), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 64), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch.object(app_module._segment_cache, "free_bytes", 32), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        call_soon.assert_not_called()
+
+    def test_prefetch_segment_claims_download_and_clears_scheduled_marker(self):
+        cache_key = "job1/video/video_0002.ts"
+        app_module._scheduled_segment_prefetches.add(cache_key)
+        with patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch("app._download_segment_to_state", new=AsyncMock()) as download_to_state:
+            app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
+        download_to_state.assert_awaited_once()
+        self.assertNotIn(cache_key, app_module._scheduled_segment_prefetches)
+        self.assertNotIn(cache_key, app_module._segment_downloads)
 
     def test_prefetch_segment_joins_existing_inflight_download(self):
         cache_key = "job1/video/video_0002.ts"
         app_module._segment_downloads[cache_key] = app_module._SegmentDownloadState(cache_key)
+        app_module._scheduled_segment_prefetches.add(cache_key)
         with patch.object(app_module._segment_cache, "get", return_value=None), \
              patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
              patch("app._download_segment_to_state") as download_to_state:
             app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
         download_to_state.assert_not_called()
+        self.assertNotIn(cache_key, app_module._scheduled_segment_prefetches)
 
     # ─── CORS headers ───
 
