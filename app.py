@@ -959,12 +959,13 @@ def serve_segment(job_id, segment_key):
     headers = {"Cache-Control": "public, max-age=86400"}
 
     # Cache hit — return immediately
-    cached = _segment_cache.get(segment_key)
+    cache_key = f"{job_id}/{segment_key}"
+    cached = _segment_cache.get(cache_key)
     if cached is not None:
-        logger.debug("Segment cache HIT: %s", segment_key)
+        logger.debug("Segment cache HIT: %s", cache_key)
         return Response(cached, content_type=content_type, headers=headers)
 
-    logger.debug("Segment cache MISS: %s", segment_key)
+    logger.debug("Segment cache MISS: %s", cache_key)
 
     # Cache miss — stream from Telegram via aiohttp, accumulate, then cache
     chunks = []
@@ -985,7 +986,7 @@ def serve_segment(job_id, segment_key):
                     chunks.append(chunk)
         except Exception as exc:
             error_holder[0] = str(exc)
-            logger.warning("Segment download failed %s: %s", segment_key, exc)
+            logger.warning("Segment download failed %s: %s", cache_key, exc)
 
     _run_async(_fetch())
 
@@ -993,7 +994,7 @@ def serve_segment(job_id, segment_key):
         return jsonify({"error": "Could not download segment from Telegram"}), 500
 
     segment_bytes = b"".join(chunks)
-    _segment_cache.put(segment_key, segment_bytes)
+    _segment_cache.put(cache_key, segment_bytes)
 
     return Response(segment_bytes, content_type=content_type, headers=headers)
 
