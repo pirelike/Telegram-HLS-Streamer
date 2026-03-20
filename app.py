@@ -746,7 +746,8 @@ def _process_job(job_id, file_path):
                 _active_jobs[job_id]["upload_total"] = total
 
         upload_result = _run_async(
-            _telegram_uploader.upload_job(result, progress_callback=on_upload_progress)
+            _telegram_uploader.upload_job(result, progress_callback=on_upload_progress),
+            timeout=None,
         )
         if _is_job_cancelled(job_id):
             return
