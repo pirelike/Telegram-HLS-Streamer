@@ -113,6 +113,7 @@ def init_db():
             file_id      TEXT NOT NULL,   -- Telegram file_id
             bot_index    INTEGER NOT NULL, -- which bot uploaded it
             file_size    INTEGER DEFAULT 0,
+            duration     REAL DEFAULT 0,  -- actual segment duration from FFmpeg
             UNIQUE(job_id, segment_key)
         );
 
@@ -132,6 +133,13 @@ def init_db():
             default_literal = str(default_val) if isinstance(default_val, int) else f"'{default_val}'"
             conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {col_type} DEFAULT {default_literal}")
     conn.commit()
+
+    # Migrate: add duration column to segments if missing
+    cursor = conn.execute("PRAGMA table_info(segments)")
+    seg_cols = {row["name"] for row in cursor.fetchall()}
+    if "duration" not in seg_cols:
+        conn.execute("ALTER TABLE segments ADD COLUMN duration REAL DEFAULT 0")
+        conn.commit()
 
     logger.info("Database initialized at %s", DB_PATH)
 
@@ -198,12 +206,14 @@ def save_job(job_id, analysis, processing_result, upload_result):
                 )
 
             # Save all segment mappings (the critical Telegram file_id references)
+            segment_durations = getattr(processing_result, "segment_durations", {})
             for key, seg in upload_result.segments.items():
+                dur = segment_durations.get(key, 0)
                 conn.execute(
                     """INSERT OR REPLACE INTO segments
-                       (job_id, segment_key, file_id, bot_index, file_size)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (job_id, key, seg.file_id, seg.bot_index, seg.file_size),
+                       (job_id, segment_key, file_id, bot_index, file_size, duration)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (job_id, key, seg.file_id, seg.bot_index, seg.file_size, dur),
                 )
 
     except Exception:
@@ -256,13 +266,16 @@ def get_segment(job_id, segment_key):
 
 
 def get_segments_for_prefix(job_id, prefix):
-    """Get all segment keys matching a prefix, sorted."""
+    """Get all segments matching a prefix, sorted.
+
+    Returns list of dicts with 'segment_key' and 'duration'.
+    """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT segment_key FROM segments WHERE job_id = ? AND segment_key LIKE ? ORDER BY segment_key",
+        "SELECT segment_key, duration FROM segments WHERE job_id = ? AND segment_key LIKE ? ORDER BY segment_key",
         (job_id, f"{prefix}/%"),
     ).fetchall()
-    return [r["segment_key"] for r in rows]
+    return [{"segment_key": r["segment_key"], "duration": r["duration"] or 0} for r in rows]
 
 
 def list_jobs(limit=50, offset=0):

@@ -1036,6 +1036,25 @@ def _kill_existing_cloudflared(port: int) -> None:
         pass
 
 
+_cloudflared_proc = None
+
+
+def _stop_cloudflared():
+    """Terminate the cloudflared subprocess if it's running."""
+    global _cloudflared_proc
+    if _cloudflared_proc is not None:
+        try:
+            _cloudflared_proc.terminate()
+            _cloudflared_proc.wait(timeout=5)
+        except Exception:
+            try:
+                _cloudflared_proc.kill()
+            except Exception:
+                pass
+        _cloudflared_proc = None
+        logger.info("Cloudflared tunnel stopped")
+
+
 def _start_cloudflared_tunnel(port: int) -> None:
     """Start a cloudflared quick tunnel and print the public URL.
 
@@ -1043,6 +1062,8 @@ def _start_cloudflared_tunnel(port: int) -> None:
     URL from its stderr output, and logs it.  If cloudflared is not installed
     the function prints an install hint instead.
     """
+    global _cloudflared_proc
+
     if not shutil.which("cloudflared"):
         print("  [!] cloudflared nincs telepítve - tunnel nem elérhető")
         print("      Telepítés: sudo pacman -S cloudflared")
@@ -1057,7 +1078,8 @@ def _start_cloudflared_tunnel(port: int) -> None:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        atexit.register(proc.terminate)
+        _cloudflared_proc = proc
+        atexit.register(_stop_cloudflared)
         url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
         for line in proc.stdout:
             match = url_pattern.search(line)
@@ -1070,7 +1092,15 @@ def _start_cloudflared_tunnel(port: int) -> None:
         logger.warning("cloudflared tunnel failed: %s", exc)
 
 
+def _shutdown_handler(signum, frame):
+    """Handle SIGINT/SIGTERM: stop cloudflared, then exit."""
+    _stop_cloudflared()
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
     _cleanup_expired_pending_uploads(force=True)
     logger.info("Starting Telegram HLS Streamer on %s:%d", Config.HOST, Config.PORT)
     logger.info("Configured bots: %d", len(Config.BOTS))

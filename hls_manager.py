@@ -8,6 +8,7 @@ All job/segment data is stored in SQLite via the database module.
 
 import functools
 import logging
+import math
 import os
 
 import database as db
@@ -221,21 +222,25 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
     else:
         return None
 
-    # Query segments from database
-    segment_keys = db.get_segments_for_prefix(job_id, prefix)
-    if not segment_keys:
+    # Query segments from database (now includes durations)
+    segments = db.get_segments_for_prefix(job_id, prefix)
+    if not segments:
         return None
+
+    fallback = Config.HLS_SEGMENT_DURATION
+    durations = [s["duration"] if s["duration"] > 0 else fallback for s in segments]
+    target_duration = math.ceil(max(durations)) if durations else fallback
 
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:4",
-        f"#EXT-X-TARGETDURATION:{Config.HLS_SEGMENT_DURATION}",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
 
-    for key in segment_keys:
-        lines.append(f"#EXTINF:{Config.HLS_SEGMENT_DURATION},")
-        lines.append(f"/segment/{job_id}/{key}")
+    for seg, dur in zip(segments, durations):
+        lines.append(f"#EXTINF:{dur:.6f},")
+        lines.append(f"/segment/{job_id}/{seg['segment_key']}")
 
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
