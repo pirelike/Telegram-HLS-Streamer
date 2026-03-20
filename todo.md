@@ -35,6 +35,8 @@
   - Fix: single persistent daemon thread loop (`_async_loop`), dispatched via `asyncio.run_coroutine_threadsafe()` with 30s timeout; clean shutdown via `atexit`
 - [x] `app.py:973-984`: **Segments fully buffered in memory** — `get_file_bytes()` downloads entire segment into a `bytearray` then sends to client; for 20MB segments, each concurrent viewer uses 20MB RAM per segment fetch
   - Fix: `serve_segment` now fetches via `get_file_url()` + `aiohttp` with `iter_chunked(65536)`; result is cached after first fetch so repeated requests skip Telegram entirely
+- [ ] `app.py:/segment`: **Read-ahead segment prefetch** — opportunistically prefetch the next N segments into `_SegmentCache` to reduce Telegram round trips and minimize playback stalls on sequential streaming
+  - Plan: add `SEGMENT_PREFETCH_COUNT`, in-flight de-duplication, and a cache-headroom guard to avoid evicting the currently hot working set
 
 ## P2 — Reliability
 

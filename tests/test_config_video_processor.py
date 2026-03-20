@@ -25,6 +25,76 @@ class TestIntEnv(unittest.TestCase):
         self.assertEqual(val, 7)
 
 
+class TestParseTiers(unittest.TestCase):
+    def test_valid_list_format(self):
+        result = config._parse_tiers("1080:10M,720:5M,480:2M")
+        self.assertEqual(result, [
+            {"height": 1080, "bitrate": "10M"},
+            {"height": 720, "bitrate": "5M"},
+            {"height": 480, "bitrate": "2M"},
+        ])
+
+    def test_valid_dict_format(self):
+        result = config._parse_tiers("2160:60M,1080:30M", as_dict=True)
+        self.assertEqual(result, {2160: "60M", 1080: "30M"})
+
+    def test_none_returns_none(self):
+        self.assertIsNone(config._parse_tiers(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(config._parse_tiers(""))
+
+    def test_whitespace_only_returns_none(self):
+        self.assertIsNone(config._parse_tiers("   "))
+
+    def test_trailing_commas_ignored(self):
+        result = config._parse_tiers("720:5M,")
+        self.assertEqual(result, [{"height": 720, "bitrate": "5M"}])
+
+    def test_whitespace_tolerance(self):
+        result = config._parse_tiers(" 1080 : 10M , 720 : 5M ")
+        self.assertEqual(result, [
+            {"height": 1080, "bitrate": "10M"},
+            {"height": 720, "bitrate": "5M"},
+        ])
+
+    def test_single_entry(self):
+        result = config._parse_tiers("360:1200k")
+        self.assertEqual(result, [{"height": 360, "bitrate": "1200k"}])
+
+    def test_bad_height_raises(self):
+        with self.assertRaises(ValueError):
+            config._parse_tiers("abc:10M")
+
+    def test_zero_height_raises(self):
+        with self.assertRaises(ValueError):
+            config._parse_tiers("0:10M")
+
+    def test_negative_height_raises(self):
+        with self.assertRaises(ValueError):
+            config._parse_tiers("-720:5M")
+
+    def test_bad_bitrate_raises(self):
+        with self.assertRaises(ValueError):
+            config._parse_tiers("720:fast")
+
+    def test_bad_format_no_colon_raises(self):
+        with self.assertRaises(ValueError):
+            config._parse_tiers("720x5M")
+
+    def test_too_many_colons_raises(self):
+        with self.assertRaises(ValueError):
+            config._parse_tiers("720:5M:extra")
+
+    def test_lowercase_bitrate_suffix(self):
+        result = config._parse_tiers("480:2m")
+        self.assertEqual(result, [{"height": 480, "bitrate": "2m"}])
+
+    def test_decimal_bitrate(self):
+        result = config._parse_tiers("720:5.5M")
+        self.assertEqual(result, [{"height": 720, "bitrate": "5.5M"}])
+
+
 class TestConfigLoadBots(unittest.TestCase):
     def test_load_bots_empty(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -568,6 +638,141 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as proc_dir:
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 vp.cleanup("no_such_job")  # should not raise
+
+
+class TestSplitOversizedSegments(unittest.TestCase):
+    def test_small_files_are_not_split(self):
+        max_size = 100
+        with tempfile.TemporaryDirectory() as tier_dir:
+            small = os.path.join(tier_dir, "video_0000.ts")
+            with open(small, "wb") as f:
+                f.write(b"x" * max_size)
+            with patch("video_processor._run_ffmpeg") as mock_run:
+                count = vp._split_oversized_segments(tier_dir, max_size)
+            self.assertEqual(count, 0)
+            mock_run.assert_not_called()
+            self.assertTrue(os.path.exists(small))
+
+    def test_oversized_file_is_split_and_original_removed(self):
+        max_size = 100
+        with tempfile.TemporaryDirectory() as tier_dir:
+            big = os.path.join(tier_dir, "video_0000.ts")
+            with open(big, "wb") as f:
+                f.write(b"x" * (max_size + 1))
+
+            def fake_ffmpeg(cmd, description=""):
+                # Create two split files in the tmpdir indicated by the pattern
+                seg_idx = cmd.index("-hls_segment_filename")
+                pattern = cmd[seg_idx + 1]
+                split_dir = os.path.dirname(pattern)
+                open(os.path.join(split_dir, "split_0000.ts"), "wb").close()
+                open(os.path.join(split_dir, "split_0001.ts"), "wb").close()
+                with open(cmd[-1], "w") as f:
+                    f.write("#EXTM3U\n")
+
+            with patch("video_processor._run_ffmpeg", side_effect=fake_ffmpeg):
+                count = vp._split_oversized_segments(tier_dir, max_size)
+
+            self.assertEqual(count, 1)
+            self.assertFalse(os.path.exists(big))
+            self.assertTrue(os.path.exists(os.path.join(tier_dir, "video_0000_split_0000.ts")))
+            self.assertTrue(os.path.exists(os.path.join(tier_dir, "video_0000_split_0001.ts")))
+
+    def test_split_files_sort_correctly_between_neighbors(self):
+        max_size = 100
+        with tempfile.TemporaryDirectory() as tier_dir:
+            # Create neighbors and one oversized middle segment
+            for name in ("video_0000.ts", "video_0002.ts"):
+                with open(os.path.join(tier_dir, name), "wb") as f:
+                    f.write(b"x" * max_size)
+            with open(os.path.join(tier_dir, "video_0001.ts"), "wb") as f:
+                f.write(b"x" * (max_size + 1))
+
+            def fake_ffmpeg(cmd, description=""):
+                seg_idx = cmd.index("-hls_segment_filename")
+                pattern = cmd[seg_idx + 1]
+                split_dir = os.path.dirname(pattern)
+                open(os.path.join(split_dir, "split_0000.ts"), "wb").close()
+                open(os.path.join(split_dir, "split_0001.ts"), "wb").close()
+                with open(cmd[-1], "w") as f:
+                    f.write("#EXTM3U\n")
+
+            with patch("video_processor._run_ffmpeg", side_effect=fake_ffmpeg):
+                vp._split_oversized_segments(tier_dir, max_size)
+
+            ts_files = sorted(f for f in os.listdir(tier_dir) if f.endswith(".ts"))
+            self.assertEqual(ts_files, [
+                "video_0000.ts",
+                "video_0001_split_0000.ts",
+                "video_0001_split_0001.ts",
+                "video_0002.ts",
+            ])
+
+    def test_returns_zero_on_empty_dir(self):
+        with tempfile.TemporaryDirectory() as tier_dir:
+            count = vp._split_oversized_segments(tier_dir, 100)
+        self.assertEqual(count, 0)
+
+    def test_split_ffmpeg_failure_skips_file(self):
+        max_size = 100
+        with tempfile.TemporaryDirectory() as tier_dir:
+            big = os.path.join(tier_dir, "video_0000.ts")
+            with open(big, "wb") as f:
+                f.write(b"x" * (max_size + 1))
+
+            with patch("video_processor._run_ffmpeg", side_effect=RuntimeError("ffmpeg died")):
+                count = vp._split_oversized_segments(tier_dir, max_size)
+
+            # Original should still exist since split failed
+            self.assertEqual(count, 0)
+            self.assertTrue(os.path.exists(big))
+
+
+class TestUploadSizeGate(unittest.TestCase):
+    def test_upload_file_raises_on_oversized(self):
+        import asyncio
+        from telegram_uploader import TelegramUploader
+
+        uploader = TelegramUploader.__new__(TelegramUploader)
+        uploader.bots = [{"bot": Mock(), "channel_id": -1001, "index": 0}]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            big_file = os.path.join(tmpdir, "segment.ts")
+            with open(big_file, "wb") as f:
+                f.write(b"x" * 101)
+
+            bot_entry = uploader.bots[0]
+            with patch.object(config.Config, "TELEGRAM_MAX_FILE_SIZE", 100):
+                with self.assertRaisesRegex(RuntimeError, "exceeds Telegram limit"):
+                    asyncio.run(uploader._upload_file(big_file, bot_entry))
+
+    def test_upload_file_does_not_raise_on_exact_limit(self):
+        import asyncio
+        from telegram_uploader import TelegramUploader
+
+        uploader = TelegramUploader.__new__(TelegramUploader)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exact_file = os.path.join(tmpdir, "segment.ts")
+            with open(exact_file, "wb") as f:
+                f.write(b"x" * 100)
+
+            mock_bot = Mock()
+            mock_message = Mock()
+            mock_message.document.file_id = "abc123xyz" * 10
+            mock_message.document.file_size = 100
+
+            async def mock_send_document(**kwargs):
+                return mock_message
+
+            mock_bot.send_document = mock_send_document
+            bot_entry = {"bot": mock_bot, "channel_id": -1001, "index": 0}
+            uploader.bots = [bot_entry]
+
+            with patch.object(config.Config, "TELEGRAM_MAX_FILE_SIZE", 100):
+                # Should not raise — file is exactly at limit
+                result = asyncio.run(uploader._upload_file(exact_file, bot_entry))
+            self.assertEqual(result.file_size, 100)
 
 
 if __name__ == "__main__":
