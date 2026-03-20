@@ -5,7 +5,7 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 ## P0 — Critical Bugs
 
 - [x] `video_processor.py` + `telegram_uploader.py`: Telegram segment size is now enforced by safe size-based HLS splitting plus upload-time hard rejection of oversized files.
-- [ ] `app.py:/health`: health status still does not verify actual Telegram bot usability; it only reports configured bot count, so a dead bot pool can still look healthy.
+- [x] `app.py:/health`: health status still does not verify actual Telegram bot usability; it only reports configured bot count, so a dead bot pool can still look healthy.
 
 ## P1 — Performance (High Impact)
 
