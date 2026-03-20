@@ -121,11 +121,13 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
         cmd += enc_flags + ["-c:v", enc_name,
                             "-b:v", bitrate, "-minrate", bitrate,
                             "-maxrate", bitrate, "-bufsize", bitrate]
-        if target_height:
-            if enc_name == "h264_vaapi":
+        if enc_name == "h264_vaapi":
+            if target_height:
                 cmd += ["-vf", f"format=nv12,hwupload,scale_vaapi=-2:{target_height}"]
             else:
-                cmd += ["-vf", f"scale=-2:{target_height}"]
+                cmd += ["-vf", "format=nv12,hwupload"]
+        elif target_height:
+            cmd += ["-vf", f"scale=-2:{target_height}"]
         logger.info(
             "Video tier %d: hardware CBR %s at %s (%s)",
             tier_index, enc_name, bitrate,
