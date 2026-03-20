@@ -271,7 +271,7 @@ These are documented in `todo.md` with priorities. Key points for contributors:
 Flask is synchronous while Telegram operations remain async. `app.py` now bridges that with a persistent background event loop, which removes the earlier per-request event loop churn. The longer-term architectural tradeoff is still that async Telegram I/O and sync Flask request handling live in the same process.
 
 ### Process-Local Segment Caching
-The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch for Telegram-backed reads. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
+The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch for Telegram-backed reads. Cache misses stream through a temp-file backed single-flight download path, so one request fetches from Telegram while same-key followers wait and then reuse the completed artifact. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
 
 ### TELEGRAM_MAX_FILE_SIZE Not Enforced
 `config.py` declares 20MB but `video_processor.py` never checks segment sizes. High-bitrate 4K segments can exceed this and fail at upload time.
@@ -287,8 +287,7 @@ The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential 
 ## Roadmap
 
 See `todo.md` for the full prioritized backlog. Key items for next season:
-1. Reduce segment download memory amplification on cache misses (P2)
-2. Add metrics for cache hit rate, Telegram latency, and active jobs (P5)
-3. Add backup/export workflow for `streamer.db` (P5)
-4. Thumbnail generation (P6)
-5. Optional shared cache backend if multi-worker deployment becomes necessary
+1. Add metrics for cache hit rate, Telegram latency, and active jobs (P5)
+2. Add backup/export workflow for `streamer.db` (P5)
+3. Thumbnail generation (P6)
+4. Optional shared cache backend if multi-worker deployment becomes necessary

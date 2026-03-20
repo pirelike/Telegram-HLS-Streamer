@@ -19,7 +19,7 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 - [x] `app.py`: job status locking is re-entrant, avoiding the earlier deadlock-prone `Lock` pattern.
 - [x] `video_processor.py` + `database.py` + `hls_manager.py`: actual segment durations are persisted and used for playlist generation.
 - [x] `app.py` + `video_processor.py`: disk space checks and cloudflared restart handling were added.
-- [ ] `app.py:_download_segment_bytes`: Telegram segment downloads buffer the whole response into memory before returning; large concurrent misses can still amplify memory pressure and fail noisily under load.
+- [x] `app.py:/segment`: cache misses now stream through a temp-file backed single-flight download path instead of buffering the full Telegram response in memory per request.
 
 ## P3 — Data Model
 

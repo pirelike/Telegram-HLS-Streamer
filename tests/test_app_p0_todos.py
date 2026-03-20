@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, patch
 telegram_mod = types.ModuleType("telegram")
 telegram_error_mod = types.ModuleType("telegram.error")
 telegram_request_mod = types.ModuleType("telegram.request")
+aiohttp_mod = types.ModuleType("aiohttp")
+dotenv_mod = types.ModuleType("dotenv")
 
 
 class StubBot:
@@ -24,6 +26,18 @@ class StubHTTPXRequest:
         pass
 
 
+class StubClientSession:
+    def __init__(self, *args, **kwargs):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+def _stub_load_dotenv(*args, **kwargs):
+    return None
+
+
 telegram_mod.Bot = StubBot
 telegram_request_mod.HTTPXRequest = StubHTTPXRequest
 telegram_error_mod.RetryAfter = Exception
@@ -31,9 +45,13 @@ telegram_error_mod.NetworkError = Exception
 telegram_error_mod.TimedOut = Exception
 telegram_error_mod.BadRequest = Exception
 telegram_error_mod.Forbidden = Exception
+aiohttp_mod.ClientSession = StubClientSession
+dotenv_mod.load_dotenv = _stub_load_dotenv
 sys.modules.setdefault("telegram", telegram_mod)
 sys.modules.setdefault("telegram.error", telegram_error_mod)
 sys.modules.setdefault("telegram.request", telegram_request_mod)
+sys.modules.setdefault("aiohttp", aiohttp_mod)
+sys.modules.setdefault("dotenv", dotenv_mod)
 
 import app as app_module
 import database
@@ -46,8 +64,38 @@ def _reset_state():
     app_module._upload_locks.clear()
     app_module._rate_limit_hits.clear()
     app_module._pending_uploads_per_ip.clear()
-    app_module._segment_prefetch_inflight.clear()
+    app_module._segment_downloads.clear()
     app_module._segment_cache.clear()
+
+
+class _FakeContent:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, _size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeResponse:
+    def __init__(self, status=200, chunks=None):
+        self.status = status
+        self.content = _FakeContent(chunks or [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, response):
+        self.response = response
+        self.closed = False
+
+    def get(self, _url):
+        return self.response
 
 
 class TestP0TodoFixes(unittest.TestCase):
@@ -657,25 +705,102 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertIn("vtt", resp.content_type)
         schedule_prefetch.assert_called_once_with("job1", "sub_0/subs.vtt")
 
-    def test_serve_segment_schedules_prefetch_after_download(self):
+    def test_serve_segment_streams_owner_miss_and_schedules_prefetch(self):
+        state = app_module._SegmentDownloadState("job1/video/seg.ts", enable_stream=True)
+        state.stream_queue.put(b"fakedata")
+        state.stream_queue.put(app_module._STREAM_EOF)
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
              patch.object(app_module._segment_cache, "get", return_value=None), \
-             patch("app._run_async", return_value=b"fakedata"), \
-             patch.object(app_module._segment_cache, "put"), \
+             patch("app._claim_segment_download", return_value=(state, True)), \
+             patch("app._start_segment_download"), \
              patch("app._schedule_segment_prefetch") as schedule_prefetch:
             resp = self.client.get("/segment/job1/video/seg.ts")
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, b"fakedata")
         schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
 
     def test_serve_segment_download_failure(self):
-        def _close_coro(coro):
-            coro.close()
-            return None
+        state = app_module._SegmentDownloadState("job1/video/seg.ts", enable_stream=True)
+        state.stream_queue.put(app_module._SegmentStreamError(RuntimeError("boom")))
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
              patch.object(app_module._segment_cache, "get", return_value=None), \
-             patch("app._run_async", side_effect=_close_coro):
+             patch("app._claim_segment_download", return_value=(state, True)), \
+             patch("app._start_segment_download"):
             resp = self.client.get("/segment/job1/video/seg.ts")
         self.assertEqual(resp.status_code, 500)
+
+    def test_serve_segment_waits_for_inflight_download_and_serves_cache(self):
+        state = app_module._SegmentDownloadState("job1/video/seg.ts")
+        state.completed.set()
+        app_module._segment_cache.put("job1/video/seg.ts", b"cached")
+        with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch.object(app_module._segment_cache, "get", side_effect=[None, b"cached"]), \
+             patch("app._claim_segment_download", return_value=(state, False)), \
+             patch("app._schedule_segment_prefetch") as schedule_prefetch:
+            resp = self.client.get("/segment/job1/video/seg.ts")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, b"cached")
+        schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
+
+    def test_serve_segment_waits_for_inflight_download_and_serves_temp_file(self):
+        temp_fd, temp_path = tempfile.mkstemp(prefix="segment-test-", suffix=".tmp")
+        os.close(temp_fd)
+        with open(temp_path, "wb") as handle:
+            handle.write(b"from-temp")
+        state = app_module._SegmentDownloadState("job1/video/seg.ts")
+        state.temp_path = temp_path
+        state.completed.set()
+        app_module._segment_downloads[state.cache_key] = state
+        with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch.object(app_module._segment_cache, "get", side_effect=[None, None]), \
+             patch("app._claim_segment_download", return_value=(state, False)), \
+             patch("app._schedule_segment_prefetch") as schedule_prefetch:
+            resp = self.client.get("/segment/job1/video/seg.ts")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, b"from-temp")
+        self.assertFalse(os.path.exists(temp_path))
+        self.assertNotIn(state.cache_key, app_module._segment_downloads)
+        schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
+
+    def test_claim_segment_download_dedupes_same_key(self):
+        state1, owner1 = app_module._claim_segment_download("job1/video/seg.ts")
+        state2, owner2 = app_module._claim_segment_download("job1/video/seg.ts", enable_stream=True)
+        self.assertTrue(owner1)
+        self.assertFalse(owner2)
+        self.assertIs(state1, state2)
+        state1.completed.set()
+        app_module._release_segment_download(state1)
+
+    def test_download_segment_to_state_streams_and_caches_from_temp_file(self):
+        cache_key = "job1/video/seg.ts"
+        state = app_module._SegmentDownloadState(cache_key, enable_stream=True)
+        app_module._segment_downloads[cache_key] = state
+        app_module._aiohttp_session = _FakeSession(_FakeResponse(chunks=[b"abc", b"def"]))
+        with patch.object(app_module._telegram_uploader, "get_file_url", AsyncMock(return_value="https://t")):
+            app_module._run_async(app_module._download_segment_to_state("fid", 0, cache_key, state))
+        self.assertTrue(state.completed.is_set())
+        self.assertTrue(state.cached)
+        self.assertIsNone(state.error)
+        self.assertEqual(app_module._segment_cache.get(cache_key), b"abcdef")
+        self.assertEqual(state.stream_queue.get(), b"abc")
+        self.assertEqual(state.stream_queue.get(), b"def")
+        self.assertIs(app_module._segment_downloads.get(cache_key), None)
+        self.assertIs(state.stream_queue.get(), app_module._STREAM_EOF)
+        self.assertIsNone(state.temp_path)
+
+    def test_download_segment_to_state_failure_cleans_up_registry(self):
+        cache_key = "job1/video/seg.ts"
+        state = app_module._SegmentDownloadState(cache_key, enable_stream=True)
+        app_module._segment_downloads[cache_key] = state
+        app_module._aiohttp_session = _FakeSession(_FakeResponse(status=503))
+        with patch.object(app_module._telegram_uploader, "get_file_url", AsyncMock(return_value="https://t")):
+            app_module._run_async(app_module._download_segment_to_state("fid", 0, cache_key, state))
+        self.assertTrue(state.completed.is_set())
+        self.assertIsInstance(state.error, RuntimeError)
+        stream_error = state.stream_queue.get()
+        self.assertIsInstance(stream_error, app_module._SegmentStreamError)
+        self.assertNotIn(cache_key, app_module._segment_downloads)
+        self.assertFalse(state.temp_path and os.path.exists(state.temp_path))
 
     def test_schedule_segment_prefetch_skips_when_disabled(self):
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 0), \
@@ -726,14 +851,14 @@ class TestP0TodoFixes(unittest.TestCase):
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
         call_soon.assert_called_once()
 
-    def test_prefetch_segment_failure_does_not_leave_inflight_marker(self):
+    def test_prefetch_segment_joins_existing_inflight_download(self):
         cache_key = "job1/video/video_0002.ts"
-        app_module._segment_prefetch_inflight.add(cache_key)
+        app_module._segment_downloads[cache_key] = app_module._SegmentDownloadState(cache_key)
         with patch.object(app_module._segment_cache, "get", return_value=None), \
              patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
-             patch("app._download_segment_bytes", side_effect=RuntimeError("boom")):
+             patch("app._download_segment_to_state") as download_to_state:
             app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
-        self.assertNotIn(cache_key, app_module._segment_prefetch_inflight)
+        download_to_state.assert_not_called()
 
     # ─── CORS headers ───
 

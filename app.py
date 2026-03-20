@@ -22,6 +22,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -31,7 +32,7 @@ import aiohttp
 from werkzeug.utils import secure_filename
 
 from flask import (
-    Flask, jsonify, render_template, request, Response,
+    Flask, jsonify, render_template, request, Response, stream_with_context,
 )
 
 from config import Config
@@ -145,8 +146,66 @@ _async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
 _async_loop_thread = None
 _aiohttp_session = None
 _loop_ready = threading.Event()
-_segment_prefetch_inflight = set()
-_segment_prefetch_lock = Lock()
+_segment_downloads = {}
+_segment_download_lock = Lock()
+
+_STREAM_EOF = object()
+
+
+class _SegmentStreamError:
+    def __init__(self, exc):
+        self.exc = exc
+
+
+class _SegmentDownloadState:
+    def __init__(self, cache_key, enable_stream=False):
+        self.cache_key = cache_key
+        self.enable_stream = enable_stream
+        self.stream_queue = queue.Queue(maxsize=4) if enable_stream else None
+        self.stream_abandoned = threading.Event()
+        self.completed = threading.Event()
+        self.lock = Lock()
+        self.temp_path = None
+        self.error = None
+        self.cached = False
+        self.pending_followers = 0
+        self.file_readers = 0
+
+    def mark_waiting_follower(self):
+        with self.lock:
+            if self.completed.is_set():
+                return False
+            self.pending_followers += 1
+            return True
+
+    def promote_waiting_follower_to_reader(self):
+        with self.lock:
+            if self.pending_followers > 0:
+                self.pending_followers -= 1
+            self.file_readers += 1
+
+    def finish_waiting_follower(self):
+        with self.lock:
+            if self.pending_followers > 0:
+                self.pending_followers -= 1
+
+    def acquire_completed_reader(self):
+        with self.lock:
+            if self.completed.is_set() and self.error is None and not self.cached and self.temp_path:
+                self.file_readers += 1
+                return True
+            return False
+
+    def release_reader(self):
+        with self.lock:
+            if self.file_readers > 0:
+                self.file_readers -= 1
+
+    def should_cleanup(self):
+        with self.lock:
+            if not self.completed.is_set():
+                return False
+            return self.pending_followers == 0 and self.file_readers == 0
 
 
 def _run_async(coro, timeout=30):
@@ -1099,23 +1158,67 @@ def _get_segment_prefix(segment_key):
     return segment_key.split("/", 1)[0]
 
 
-def _claim_segment_prefetch(cache_key):
-    """Mark a cache key as being prefetched. Returns False if already in-flight."""
-    with _segment_prefetch_lock:
-        if cache_key in _segment_prefetch_inflight:
+def _claim_segment_download(cache_key, *, enable_stream=False):
+    """Return an existing in-flight download or claim ownership for a new one."""
+    with _segment_download_lock:
+        state = _segment_downloads.get(cache_key)
+        if state is not None:
+            return state, False
+        state = _SegmentDownloadState(cache_key, enable_stream=enable_stream)
+        _segment_downloads[cache_key] = state
+        return state, True
+
+
+def _release_segment_download(state):
+    """Remove a completed download state and any temp file when no readers remain."""
+    if not state.should_cleanup():
+        return
+
+    temp_path = None
+    with _segment_download_lock:
+        if _segment_downloads.get(state.cache_key) is not state:
+            return
+        if not state.should_cleanup():
+            return
+        temp_path = state.temp_path
+        state.temp_path = None
+        del _segment_downloads[state.cache_key]
+
+    if temp_path:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.debug("Failed to remove temp segment file %s: %s", temp_path, exc)
+
+
+def _enqueue_stream_item(stream_queue, stream_abandoned, item):
+    """Enqueue a stream item with bounded backpressure and disconnect awareness."""
+    while True:
+        if stream_abandoned.is_set():
             return False
-        _segment_prefetch_inflight.add(cache_key)
-        return True
+        try:
+            stream_queue.put(item, timeout=0.1)
+            return True
+        except queue.Full:
+            continue
 
 
-def _release_segment_prefetch(cache_key):
-    """Remove a cache key from the in-flight prefetch registry."""
-    with _segment_prefetch_lock:
-        _segment_prefetch_inflight.discard(cache_key)
+def _cache_segment_from_file(cache_key, temp_path):
+    """Populate the in-memory cache from a completed temp file if it fits."""
+    if _segment_cache.max_bytes <= 0:
+        return False
+    size = os.path.getsize(temp_path)
+    if size <= 0 or size > _segment_cache.max_bytes:
+        return False
+    with open(temp_path, "rb") as handle:
+        _segment_cache.put(cache_key, handle.read())
+    return True
 
 
-async def _download_segment_bytes(file_id, bot_index, cache_key):
-    """Download a segment from Telegram and return its bytes."""
+async def _download_segment_to_state(file_id, bot_index, cache_key, state):
+    """Download a segment from Telegram to temp storage and optionally stream chunks."""
     global _aiohttp_session
 
     if _aiohttp_session is None or _aiohttp_session.closed:
@@ -1123,17 +1226,92 @@ async def _download_segment_bytes(file_id, bot_index, cache_key):
         _aiohttp_session = aiohttp.ClientSession()
 
     url = await _telegram_uploader.get_file_url(file_id, bot_index)
-    chunks = []
-    async with _aiohttp_session.get(url) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"Telegram HTTP {resp.status}")
-        async for chunk in resp.content.iter_chunked(65536):
-            chunks.append(chunk)
+    temp_fd, temp_path = tempfile.mkstemp(prefix="segment-", suffix=".tmp")
+    os.close(temp_fd)
+    state.temp_path = temp_path
+    wrote_any = False
 
-    if not chunks:
-        raise RuntimeError(f"Empty Telegram response for {cache_key}")
+    try:
+        async with _aiohttp_session.get(url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Telegram HTTP {resp.status}")
 
-    return b"".join(chunks)
+            with open(temp_path, "wb") as handle:
+                async for chunk in resp.content.iter_chunked(65536):
+                    if not chunk:
+                        continue
+                    wrote_any = True
+                    handle.write(chunk)
+                    if state.stream_queue is not None:
+                        await asyncio.to_thread(
+                            _enqueue_stream_item,
+                            state.stream_queue,
+                            state.stream_abandoned,
+                            chunk,
+                        )
+
+        if not wrote_any:
+            raise RuntimeError(f"Empty Telegram response for {cache_key}")
+
+        state.cached = await asyncio.to_thread(_cache_segment_from_file, cache_key, temp_path)
+    except Exception as exc:
+        state.error = exc
+        if state.stream_queue is not None:
+            await asyncio.to_thread(
+                _enqueue_stream_item,
+                state.stream_queue,
+                state.stream_abandoned,
+                _SegmentStreamError(exc),
+            )
+    finally:
+        if state.stream_queue is not None and state.error is None:
+            await asyncio.to_thread(
+                _enqueue_stream_item,
+                state.stream_queue,
+                state.stream_abandoned,
+                _STREAM_EOF,
+            )
+        state.completed.set()
+        _release_segment_download(state)
+
+
+def _start_segment_download(file_id, bot_index, cache_key, state):
+    """Run a segment download on the persistent async loop."""
+    asyncio.run_coroutine_threadsafe(
+        _download_segment_to_state(file_id, bot_index, cache_key, state),
+        _async_loop,
+    )
+
+
+def _stream_segment_owner(state, first_item):
+    """Yield stream items for the owner request while the async download runs."""
+    item = first_item
+    try:
+        while True:
+            if item is _STREAM_EOF:
+                return
+            if isinstance(item, _SegmentStreamError):
+                raise item.exc
+            yield item
+            item = state.stream_queue.get()
+    finally:
+        state.stream_abandoned.set()
+        _release_segment_download(state)
+
+
+def _stream_segment_file(state):
+    """Yield bytes from a completed temp file for waiting followers."""
+    temp_path = state.temp_path
+    try:
+        with open(temp_path, "rb") as handle:
+            while True:
+                chunk = handle.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        state.release_reader()
+        _release_segment_download(state)
 
 
 async def _prefetch_segment(job_id, segment_key):
@@ -1147,14 +1325,12 @@ async def _prefetch_segment(job_id, segment_key):
         if not info:
             return
 
-        segment_bytes = await _download_segment_bytes(
-            info["file_id"], info["bot_index"], cache_key,
-        )
-        _segment_cache.put(cache_key, segment_bytes)
+        state, is_owner = _claim_segment_download(cache_key)
+        if not is_owner:
+            return
+        await _download_segment_to_state(info["file_id"], info["bot_index"], cache_key, state)
     except Exception as exc:
         logger.debug("Segment prefetch failed %s: %s", cache_key, exc)
-    finally:
-        _release_segment_prefetch(cache_key)
 
 
 def _start_prefetch_task(job_id, segment_key):
@@ -1197,7 +1373,8 @@ def _schedule_segment_prefetch(job_id, segment_key):
         next_cache_key = f"{job_id}/{next_segment_key}"
         if _segment_cache.get(next_cache_key) is not None:
             continue
-        if not _claim_segment_prefetch(next_cache_key):
+        _, is_owner = _claim_segment_download(next_cache_key)
+        if not is_owner:
             continue
         _async_loop.call_soon_threadsafe(_start_prefetch_task, job_id, next_segment_key)
 
@@ -1236,20 +1413,57 @@ def serve_segment(job_id, segment_key):
 
     logger.debug("Segment cache MISS: %s", cache_key)
 
-    # Cache miss — stream from Telegram via aiohttp, accumulate, then cache
-    try:
-        segment_bytes = _run_async(_download_segment_bytes(file_id, bot_index, cache_key))
-    except Exception as exc:
-        logger.warning("Segment download failed %s: %s", cache_key, exc)
+    state, is_owner = _claim_segment_download(cache_key, enable_stream=True)
+
+    if is_owner:
+        _start_segment_download(file_id, bot_index, cache_key, state)
+        first_item = state.stream_queue.get()
+        if isinstance(first_item, _SegmentStreamError):
+            logger.warning("Segment download failed %s: %s", cache_key, first_item.exc)
+            _release_segment_download(state)
+            return jsonify({"error": "Could not download segment from Telegram"}), 500
+
+        _schedule_segment_prefetch(job_id, segment_key)
+        return Response(
+            stream_with_context(_stream_segment_owner(state, first_item)),
+            content_type=content_type,
+            headers=headers,
+        )
+
+    if state.mark_waiting_follower():
+        state.completed.wait(timeout=30)
+
+    if not state.completed.is_set():
+        state.finish_waiting_follower()
+        logger.warning("Segment download timed out waiting for %s", cache_key)
         return jsonify({"error": "Could not download segment from Telegram"}), 500
 
-    if not segment_bytes:
+    cached = _segment_cache.get(cache_key)
+    if cached is not None:
+        state.finish_waiting_follower()
+        _schedule_segment_prefetch(job_id, segment_key)
+        _release_segment_download(state)
+        return Response(cached, content_type=content_type, headers=headers)
+
+    if state.error is not None:
+        state.finish_waiting_follower()
+        _release_segment_download(state)
+        logger.warning("Segment download failed %s: %s", cache_key, state.error)
         return jsonify({"error": "Could not download segment from Telegram"}), 500
 
-    _segment_cache.put(cache_key, segment_bytes)
+    if not state.temp_path:
+        state.finish_waiting_follower()
+        _release_segment_download(state)
+        logger.warning("Segment download produced no cacheable output for %s", cache_key)
+        return jsonify({"error": "Could not download segment from Telegram"}), 500
+
+    state.promote_waiting_follower_to_reader()
     _schedule_segment_prefetch(job_id, segment_key)
-
-    return Response(segment_bytes, content_type=content_type, headers=headers)
+    return Response(
+        stream_with_context(_stream_segment_file(state)),
+        content_type=content_type,
+        headers=headers,
+    )
 
 
 # ─── CORS for HLS ───
