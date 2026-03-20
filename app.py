@@ -22,7 +22,7 @@ import subprocess
 import threading
 import time
 import uuid
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 
 import aiohttp
 from werkzeug.utils import secure_filename
@@ -108,7 +108,7 @@ _TERMINAL_JOB_STATES = {"complete", "error"}
 # How long to keep finished jobs in _active_jobs before eviction (seconds).
 _ACTIVE_JOB_RETENTION = 300  # 5 minutes
 # Protects status transitions so cancel_job cannot overwrite a just-completed job.
-_job_status_lock = Lock()
+_job_status_lock = RLock()
 
 # ─── Job Queue ───
 # Supports multiple concurrent processing jobs via a bounded worker pool.
@@ -633,6 +633,26 @@ def upload_chunk():
     })
 
 
+def _check_disk_space(file_size):
+    """Check that at least 2x file_size bytes are free in the processing directory.
+
+    Returns (ok, message). Caller should return HTTP 507 on failure.
+    """
+    try:
+        usage = shutil.disk_usage(Config.PROCESSING_DIR)
+        required = 2 * file_size
+        if usage.free < required:
+            free_gb = usage.free / (1024 ** 3)
+            req_gb = required / (1024 ** 3)
+            return False, (
+                f"Insufficient disk space: {free_gb:.1f} GB free, "
+                f"{req_gb:.1f} GB required (2x file size)"
+            )
+    except OSError as e:
+        logger.warning("Could not check disk space: %s", e)
+    return True, ""
+
+
 @app.route("/api/upload/finalize", methods=["POST"])
 def upload_finalize():
     """Finalize a chunked upload and start processing."""
@@ -663,6 +683,12 @@ def upload_finalize():
         return jsonify({
             "error": f"Incomplete upload: got {actual_size} bytes, expected {expected_size}",
         }), 400
+
+    # Check disk space before queuing (needs ~2x file size for ABR processing)
+    ok, msg = _check_disk_space(actual_size)
+    if not ok:
+        logger.warning("Job rejected due to disk space: %s", msg)
+        return jsonify({"error": msg}), 507
 
     # Create job and enqueue for processing
     job_id = uuid.uuid4().hex[:12]
@@ -706,6 +732,18 @@ def _process_job(job_id, file_path):
     """Full pipeline: analyze -> process -> upload -> register."""
     try:
         if _is_job_cancelled(job_id):
+            return
+        # Disk space check (space may have dropped since finalize if queue was long)
+        file_size = _active_jobs.get(job_id, {}).get("file_size", 0)
+        ok, msg = _check_disk_space(file_size)
+        if not ok:
+            logger.warning("Job %s aborted: %s", job_id, msg)
+            with _job_status_lock:
+                job = _active_jobs.get(job_id)
+                if job and not job.get("timed_out") and not job.get("cancelled"):
+                    job["status"] = "error"
+                    job["error"] = msg
+                    job["finished_ts"] = time.time()
             return
         # Step 1: Analyze
         with _job_status_lock:
@@ -769,8 +807,6 @@ def _process_job(job_id, file_path):
 
         with _job_status_lock:
             # Only mark complete if the user hasn't cancelled in the meantime.
-            # NOTE: We inline the check here instead of calling _is_job_cancelled()
-            # because we already hold _job_status_lock (which is not reentrant).
             job = _active_jobs.get(job_id)
             if job and not job.get("timed_out") and not job.get("cancelled"):
                 job["status"] = "complete"
@@ -784,8 +820,6 @@ def _process_job(job_id, file_path):
             return
         logger.exception("Job %s failed", job_id)
         with _job_status_lock:
-            # Inline cancellation check — cannot call _is_job_cancelled() here
-            # because we already hold _job_status_lock (not reentrant).
             job = _active_jobs.get(job_id)
             if job and not job.get("timed_out") and not job.get("cancelled"):
                 job["status"] = "error"
@@ -1060,7 +1094,8 @@ def _start_cloudflared_tunnel(port: int) -> None:
 
     Runs cloudflared as a subprocess, parses the assigned *.trycloudflare.com
     URL from its stderr output, and logs it.  If cloudflared is not installed
-    the function prints an install hint instead.
+    the function prints an install hint instead.  Restarts the tunnel with
+    exponential backoff if it exits unexpectedly.
     """
     global _cloudflared_proc
 
@@ -1069,27 +1104,34 @@ def _start_cloudflared_tunnel(port: int) -> None:
         print("      Telepítés: sudo pacman -S cloudflared")
         return
 
-    _kill_existing_cloudflared(port)
+    atexit.register(_stop_cloudflared)
+    url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+    backoff = 5
 
-    try:
-        proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        _cloudflared_proc = proc
-        atexit.register(_stop_cloudflared)
-        url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
-        for line in proc.stdout:
-            match = url_pattern.search(line)
-            if match:
-                logger.info("Cloudflared tunnel active: %s", match.group())
-                print(f"  [✓] Cloudflared tunnel: {match.group()}")
-                break
-        proc.wait()
-    except Exception as exc:
-        logger.warning("cloudflared tunnel failed: %s", exc)
+    while True:
+        _kill_existing_cloudflared(port)
+        try:
+            proc = subprocess.Popen(
+                ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            _cloudflared_proc = proc
+            for line in proc.stdout:
+                match = url_pattern.search(line)
+                if match:
+                    logger.info("Cloudflared tunnel active: %s", match.group())
+                    print(f"  [✓] Cloudflared tunnel: {match.group()}")
+                    backoff = 5  # reset on successful connection
+                    break
+            proc.wait()
+            logger.warning("Cloudflared tunnel exited unexpectedly")
+        except Exception as exc:
+            logger.warning("cloudflared tunnel failed: %s", exc)
+        logger.info("Restarting cloudflared tunnel in %ds...", backoff)
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 300)
 
 
 def _shutdown_handler(signum, frame):
