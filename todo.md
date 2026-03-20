@@ -25,7 +25,7 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 
 - [x] `database.py`: subtitle `original_stream_index` is stored separately from HLS-facing `track_index`.
 - [x] `database.py`: per-segment duration is stored in `segments.duration`.
-- [ ] `database.py` + `config.py`: the SQLite database remains the sole source of truth for playback, but there is still no schema versioning or explicit migration framework beyond ad hoc `ALTER TABLE` checks.
+- [x] `database.py`: the SQLite playback database now uses explicit schema revisions with ordered startup migrations and fail-closed handling for newer unknown schemas.
 
 ## P4 — Security Hardening
 

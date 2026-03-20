@@ -1,7 +1,12 @@
 import logging
 import os
 import re
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - exercised only in minimal environments
+    def load_dotenv():
+        return False
 
 load_dotenv()
 

@@ -62,8 +62,10 @@ The database (`streamer.db`) is the source of truth for playback.
 - `jobs`: one row per uploaded media job.
 - `tracks`: one row per track variant (video tier, audio track, subtitle track).
 - `segments`: maps `segment_key` (e.g. `video_0/video_0001.ts`) to Telegram `file_id` + `bot_index`.
+- `schema_migrations`: ordered schema revision history applied on startup.
 
 If `segments` data is lost, the server cannot resolve files back from Telegram for streaming.
+On startup, the app upgrades older schemas in place and refuses to run against a newer unknown schema revision.
 
 ---
 

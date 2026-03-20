@@ -16,12 +16,12 @@ import os
 import sqlite3
 import threading
 import time
-
-from config import Config
+from typing import Set
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "streamer.db")
+LATEST_SCHEMA_REVISION = 3
 
 # Thread-local connections for SQLite (which doesn't allow sharing across threads)
 _local = threading.local()
@@ -81,9 +81,93 @@ def _close_all_connections():
 atexit.register(_close_all_connections)
 
 
-def init_db():
-    """Create tables if they don't exist."""
-    conn = _get_conn()
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _list_table_columns(conn: sqlite3.Connection, table_name: str) -> Set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _create_schema_migrations_table(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            revision   INTEGER PRIMARY KEY,
+            name       TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+def _record_migration(conn: sqlite3.Connection, revision: int, name: str):
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_migrations (revision, name) VALUES (?, ?)",
+        (revision, name),
+    )
+
+
+def _get_recorded_schema_revision(conn: sqlite3.Connection) -> int:
+    if not _table_exists(conn, "schema_migrations"):
+        return 0
+    row = conn.execute("SELECT MAX(revision) AS revision FROM schema_migrations").fetchone()
+    return int(row["revision"] or 0)
+
+
+def _detect_legacy_schema_revision(conn: sqlite3.Connection) -> int:
+    base_tables = ("jobs", "tracks", "segments")
+    table_presence = {table: _table_exists(conn, table) for table in base_tables}
+    if not any(table_presence.values()):
+        return 0
+    if not all(table_presence.values()):
+        raise RuntimeError(
+            f"Unsupported partial legacy schema in {DB_PATH}: "
+            f"expected {base_tables}, found {[name for name, present in table_presence.items() if present]}"
+        )
+
+    track_cols = _list_table_columns(conn, "tracks")
+    segment_cols = _list_table_columns(conn, "segments")
+
+    v2_track_cols = {"width", "height", "bitrate", "original_stream_index"}
+    has_v2_tracks = v2_track_cols.issubset(track_cols)
+    has_any_v2_tracks = bool(v2_track_cols & track_cols)
+    has_v3_segments = "duration" in segment_cols
+
+    if has_any_v2_tracks and not has_v2_tracks:
+        raise RuntimeError(
+            f"Unsupported legacy tracks schema in {DB_PATH}: expected all of {sorted(v2_track_cols)}"
+        )
+    if has_v3_segments and not has_v2_tracks:
+        raise RuntimeError(
+            f"Unsupported legacy schema in {DB_PATH}: segments.duration exists without full tracks v2 columns"
+        )
+
+    if has_v3_segments:
+        return 3
+    if has_v2_tracks:
+        return 2
+    return 1
+
+
+def _bootstrap_legacy_schema_migrations(conn: sqlite3.Connection):
+    revision = _detect_legacy_schema_revision(conn)
+    _create_schema_migrations_table(conn)
+    if revision == 0:
+        return
+    names = {
+        1: "create_base_schema",
+        2: "add_track_dimensions_and_stream_index",
+        3: "add_segment_duration",
+    }
+    for current_revision in range(1, revision + 1):
+        _record_migration(conn, current_revision, names[current_revision])
+    logger.info("Bootstrapped legacy database at schema revision %d", revision)
+
+
+def _migration_001_create_base_schema(conn: sqlite3.Connection):
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS jobs (
             job_id       TEXT PRIMARY KEY,
@@ -106,10 +190,6 @@ def init_db():
             language     TEXT DEFAULT 'und',
             title        TEXT DEFAULT '',
             channels     INTEGER DEFAULT 2,
-            width        INTEGER DEFAULT 0,
-            height       INTEGER DEFAULT 0,
-            bitrate      TEXT DEFAULT '',
-            original_stream_index INTEGER DEFAULT -1,
             UNIQUE(job_id, track_type, track_index)
         );
 
@@ -120,35 +200,58 @@ def init_db():
             file_id      TEXT NOT NULL,   -- Telegram file_id
             bot_index    INTEGER NOT NULL, -- which bot uploaded it
             file_size    INTEGER DEFAULT 0,
-            duration     REAL DEFAULT 0,  -- actual segment duration from FFmpeg
             UNIQUE(job_id, segment_key)
         );
 
         CREATE INDEX IF NOT EXISTS idx_segments_job ON segments(job_id);
         CREATE INDEX IF NOT EXISTS idx_tracks_job ON tracks(job_id);
     """)
-    conn.commit()
 
-    # Migrate: add width/height/bitrate columns to tracks if missing
-    cursor = conn.execute("PRAGMA table_info(tracks)")
-    existing_cols = {row["name"] for row in cursor.fetchall()}
-    for col, default_val in [("width", 0), ("height", 0), ("bitrate", ""), ("original_stream_index", -1)]:
-        if col not in existing_cols:
-            col_type = "INTEGER" if isinstance(default_val, int) else "TEXT"
-            # DDL statements don't support parameter binding in SQLite,
-            # so we format the default value directly (safe: values are hardcoded above).
-            default_literal = str(default_val) if isinstance(default_val, int) else f"'{default_val}'"
-            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {col_type} DEFAULT {default_literal}")
-    conn.commit()
 
-    # Migrate: add duration column to segments if missing
-    cursor = conn.execute("PRAGMA table_info(segments)")
-    seg_cols = {row["name"] for row in cursor.fetchall()}
-    if "duration" not in seg_cols:
-        conn.execute("ALTER TABLE segments ADD COLUMN duration REAL DEFAULT 0")
-        conn.commit()
+def _migration_002_add_track_dimensions_and_stream_index(conn: sqlite3.Connection):
+    conn.executescript("""
+        ALTER TABLE tracks ADD COLUMN width INTEGER DEFAULT 0;
+        ALTER TABLE tracks ADD COLUMN height INTEGER DEFAULT 0;
+        ALTER TABLE tracks ADD COLUMN bitrate TEXT DEFAULT '';
+        ALTER TABLE tracks ADD COLUMN original_stream_index INTEGER DEFAULT -1;
+    """)
 
-    logger.info("Database initialized at %s", DB_PATH)
+
+def _migration_003_add_segment_duration(conn: sqlite3.Connection):
+    conn.execute("ALTER TABLE segments ADD COLUMN duration REAL DEFAULT 0")
+
+
+MIGRATIONS = [
+    (1, "create_base_schema", _migration_001_create_base_schema),
+    (2, "add_track_dimensions_and_stream_index", _migration_002_add_track_dimensions_and_stream_index),
+    (3, "add_segment_duration", _migration_003_add_segment_duration),
+]
+
+
+def init_db():
+    """Initialize the database and migrate it to the latest supported schema."""
+    conn = _get_conn()
+    with conn:
+        if not _table_exists(conn, "schema_migrations"):
+            _bootstrap_legacy_schema_migrations(conn)
+
+        current_revision = _get_recorded_schema_revision(conn)
+        if current_revision > LATEST_SCHEMA_REVISION:
+            raise RuntimeError(
+                f"Database schema revision {current_revision} is newer than supported "
+                f"revision {LATEST_SCHEMA_REVISION} for {DB_PATH}"
+            )
+
+        for revision, name, migrate in MIGRATIONS:
+            if revision <= current_revision:
+                continue
+            logger.info("Applying database migration %03d: %s", revision, name)
+            migrate(conn)
+            _create_schema_migrations_table(conn)
+            _record_migration(conn, revision, name)
+            current_revision = revision
+
+    logger.info("Database initialized at %s (schema revision %d)", DB_PATH, current_revision)
 
 
 # ─── Jobs ───
