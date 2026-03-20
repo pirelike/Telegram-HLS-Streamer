@@ -1,8 +1,12 @@
 .env
 streamer.db
+streamer.db-shm
+streamer.db-wal
 uploads/
 processing/
 __pycache__/
 *.pyc
 .venv/
 venv/
+*.mkv
+*.mp4

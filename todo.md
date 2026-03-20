@@ -4,7 +4,7 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 
 ## P0 — Critical Bugs
 
-- [x] `video_processor.py` + `telegram_uploader.py`: Telegram segment size is now enforced by safe size-based HLS splitting plus upload-time hard rejection of oversized files.
+- [x] `video_processor.py` + `telegram_uploader.py`: segment sizing now uses a configurable FFmpeg target size plus upload-time hard rejection against the Telegram file size limit.
 - [x] `app.py:/health`: health status still does not verify actual Telegram bot usability; it only reports configured bot count, so a dead bot pool can still look healthy.
 
 ## P1 — Performance (High Impact)
@@ -39,7 +39,7 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 - [x] `app.py:/health`: a health endpoint exists and verifies database access.
 - [ ] `app.py` + `telegram_uploader.py`: there is still no metrics surface for queue depth, Telegram API latency/error rates, cache hit rate, or active job counts.
 - [ ] `database.py`: there is still no backup/export workflow for `streamer.db`.
-- [ ] `README.md` + `CLAUDE.md`: operational docs are stale in several places and still describe removed or outdated behavior such as `ENABLE_COPY_MODE`, the old 1-8 bot framing, and superseded performance issues.
+- [x] `README.md` + `CLAUDE.md` + `.env.example`: docs now reflect the current config surface, queue/cache behavior, and playback/auth endpoints.
 - [ ] Test environment: repository tests require undeclared local dependencies in this environment (`aiohttp`, `python-dotenv`, telegram package pieces), so verification is not reproducible from a bare Python install.
 
 ## P6 — New Features

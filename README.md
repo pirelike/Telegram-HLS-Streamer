@@ -130,12 +130,19 @@ LOCAL_HOST=0.0.0.0
 LOCAL_PORT=5050
 FORCE_HTTPS=false
 BEHIND_PROXY=true
+CORS_ALLOWED_ORIGINS=
+
+# Cloudflare tunnel
+CLOUDFLARED_ENABLED=true
 
 # File handling
 TELEGRAM_MAX_FILE_SIZE=20971520
+SEGMENT_TARGET_SIZE=15728640
 MAX_UPLOAD_SIZE=107374182400
 UPLOAD_CHUNK_SIZE=10485760
-ENABLE_COPY_MODE=true
+SEGMENT_CACHE_SIZE_MB=512
+SEGMENT_PREFETCH_COUNT=2
+SEGMENT_PREFETCH_MIN_FREE_BYTES=134217728
 
 # Processing
 HLS_SEGMENT_DURATION=4
@@ -145,22 +152,33 @@ AUDIO_BITRATE=128k
 # Hardware acceleration
 ENABLE_HARDWARE_ACCELERATION=true
 PREFERRED_ENCODER=vaapi
+VAAPI_DEVICE=
 
 # Adaptive bitrate
 ABR_ENABLED=true
+# ABR_TIERS=1080:10M,720:5M,480:2M,360:1200k
+# TIER0_BITRATES=2160:60M,1080:30M,720:15M,480:5M
+# TIER0_BITRATE_DEFAULT=15M
 
 # Reliability / cleanup
 JOB_TIMEOUT_SECONDS=7200
 PENDING_UPLOAD_TTL_SECONDS=86400
 PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS=300
+JOB_RETENTION_DAYS=0
+MAX_CONCURRENT_JOBS=1
+
+# Upload rate limiting
+UPLOAD_RATE_LIMIT_WINDOW=60
+UPLOAD_RATE_LIMIT_MAX_REQUESTS=100
+MAX_PENDING_UPLOADS_PER_IP=5
 
 # Upload security (optional)
 UPLOAD_API_KEY=
 UPLOAD_BASIC_USER=
 UPLOAD_BASIC_PASSWORD=
 
-# CORS
-CORS_ALLOWED_ORIGINS=https://your-player.example.com,https://another-origin.example
+# Playback auth (optional)
+PLAYBACK_SECRET=
 
 # Telegram upload behavior
 UPLOAD_PARALLELISM=8
@@ -186,9 +204,13 @@ TELEGRAM_CHANNEL_ID_8=
 
 ### Important behavior notes
 
-- `TELEGRAM_MAX_FILE_SIZE` is currently config for segment planning context; FFmpeg segmentation output and upload flow still determine actual file boundaries.
-- `ENABLE_COPY_MODE=true` allows direct stream copy when codec/container compatibility permits (faster, lossless).
+- `SEGMENT_TARGET_SIZE` is the preferred FFmpeg segment size target. Lower values produce smaller segments.
+- `TELEGRAM_MAX_FILE_SIZE` is the hard upload ceiling. Segment planning clamps under it, and uploads still fail fast if a file exceeds it.
+- `SEGMENT_CACHE_SIZE_MB` is a shared cache budget for the full app process, not per viewer.
+- `SEGMENT_PREFETCH_COUNT` controls how many upcoming segments are warmed per active playback flow.
+- `SEGMENT_PREFETCH_MIN_FREE_BYTES` stops prefetch when the cache is close to full, reducing churn on smaller home servers.
 - `UPLOAD_CHUNK_SIZE` must match frontend expectation if using bundled UI (currently 10MB).
+- `PLAYBACK_SECRET` enables HMAC-signed playlist and segment URLs; tokens are deterministic per job until the secret is rotated.
 
 ---
 
@@ -289,6 +311,18 @@ Returns live/in-memory status for active jobs, or persisted metadata for complet
 #### `GET /api/jobs?page=1&limit=20`
 Returns paginated completed jobs (`limit` max 50).
 
+#### `GET /api/jobs/<job_id>/token`
+Returns the playback token for a completed job when `PLAYBACK_SECRET` is enabled.
+
+#### `DELETE /api/jobs/<job_id>`
+Deletes a completed job and its playback metadata from SQLite.
+
+#### `POST /api/cancel/<job_id>`
+Marks an active job as cancelled.
+
+#### `GET /health`
+Checks SQLite access plus Telegram bot/channel reachability via `get_chat`.
+
 ### Playlist APIs
 
 - `GET /hls/<job_id>/master.m3u8`
@@ -353,7 +387,7 @@ If configured, upload APIs require either:
 
 ### CORS
 
-CORS is applied to `/api`, `/hls`, and `/segment` routes. Origins must be explicitly listed in `CORS_ALLOWED_ORIGINS`.
+CORS is applied to `/api`, `/hls`, and `/segment` routes. Set `CORS_ALLOWED_ORIGINS=*` to allow all origins, or provide an explicit comma-separated allowlist.
 
 ### Reverse proxy
 
@@ -363,7 +397,7 @@ If running behind Nginx/Caddy/Traefik:
 
 ### Playback cache behavior
 
-The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
+The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. Sequential prefetch can warm upcoming segments into RAM for faster playback on the next requests. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
 
 If you run multiple workers or multiple app instances, they will not share cached segments. Playback will still work, but hot segments may be re-downloaded from Telegram by each worker or node.
 
@@ -391,6 +425,13 @@ ffmpeg -version
 - verify bot has permission in target channel
 - confirm channel id format is negative integer (`-100...`)
 - lower `UPLOAD_PARALLELISM` if you hit frequent network/rate-limit issues
+
+### Segment playback times out after the manifest loads
+
+- increase `SEGMENT_CACHE_SIZE_MB` on machines with available RAM
+- keep `SEGMENT_PREFETCH_COUNT` modest (`1` or `2` is usually enough for a home server)
+- use `SEGMENT_PREFETCH_MIN_FREE_BYTES` to prevent cache churn when many streams are active
+- if you run multiple workers, remember each worker has its own cache and will re-fetch hot segments independently
 
 ### Playback fails for older jobs after bot changes
 
@@ -434,7 +475,6 @@ See `todo.md` for the prioritized list of known issues, planned improvements, an
 - SQLite is still the only playback metadata store; there is no schema versioning or migration framework beyond ad hoc startup fixes.
 - ABR tiers are static config; no per-title complexity optimization.
 - Playback tokens are deterministic per `job_id` and do not expire until `PLAYBACK_SECRET` is rotated.
-- SQLite is the sole database; horizontal scaling would require migration to PostgreSQL/MySQL.
 - There is still no backup/export workflow for `streamer.db`.
 
 ---
