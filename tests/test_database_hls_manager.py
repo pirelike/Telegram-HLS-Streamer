@@ -24,10 +24,12 @@ class TestDatabaseBase(unittest.TestCase):
         self.harness = DatabaseHarness()
         self.db_patch = patch.object(database, "DB_PATH", self.harness.db_path)
         self.db_patch.start()
+        database._close_all_connections()
         database._local = threading.local()
         database.init_db()
 
     def tearDown(self):
+        database._close_all_connections()
         self.db_patch.stop()
         self.harness.close()
 
@@ -89,6 +91,14 @@ class TestDatabaseConnections(TestDatabaseBase):
     def test_close_conn_idempotent_when_no_connection(self):
         database.close_conn()
         database.close_conn()  # second call should not raise
+
+    def test_open_connection_count_tracks_live_connections(self):
+        self.assertEqual(database.open_connection_count(), 1)  # init_db opened main-thread conn
+        database.close_conn()
+        self.assertEqual(database.open_connection_count(), 0)
+
+        database._get_conn()
+        self.assertEqual(database.open_connection_count(), 1)
 
 
 class TestDatabaseCRUD(TestDatabaseBase):

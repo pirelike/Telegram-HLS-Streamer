@@ -6,10 +6,12 @@ For each input file, produces:
   - One WebVTT file per subtitle track
 """
 
+import glob as _glob
 import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 
 from config import Config
@@ -20,6 +22,22 @@ logger = logging.getLogger(__name__)
 
 _hw_encoder_cache = None
 _hw_encoder_probed = False
+
+
+def _detect_vaapi_device():
+    """Pick the best available VAAPI render device.
+
+    Scans /dev/dri/renderD* and returns the highest-numbered one, which is
+    typically the discrete GPU on systems with both an iGPU and a dGPU.
+    Falls back to /dev/dri/renderD128 if nothing is found.
+    """
+    devices = sorted(_glob.glob("/dev/dri/renderD*"))
+    if devices:
+        device = devices[-1]  # highest number = dGPU on most multi-GPU systems
+        logger.info("Auto-detected VAAPI device: %s", device)
+        return device
+    logger.warning("No /dev/dri/renderD* devices found, falling back to renderD128")
+    return "/dev/dri/renderD128"
 
 
 def _detect_hw_encoder():
@@ -36,12 +54,15 @@ def _detect_hw_encoder():
         return None
 
     encoders = {
-        "vaapi": ("h264_vaapi", ["-vaapi_device", "/dev/dri/renderD128"]),
         "nvenc": ("h264_nvenc", []),
         "qsv": ("h264_qsv", []),
     }
 
     preferred = Config.PREFERRED_ENCODER
+    if preferred == "vaapi":
+        vaapi_device = Config.VAAPI_DEVICE or _detect_vaapi_device()
+        encoders["vaapi"] = ("h264_vaapi", ["-vaapi_device", vaapi_device])
+
     if preferred in encoders:
         enc_name, _ = encoders[preferred]
         try:
@@ -87,6 +108,48 @@ def _get_abr_tiers(source_height):
         if tier["height"] <= source_height:
             tiers.append(tier)
     return tiers
+
+
+def _parse_bitrate_to_bytes_per_sec(bitrate_str):
+    """Convert a bitrate string like '5M' or '1200k' to bytes per second."""
+    import re
+    bitrate_str = str(bitrate_str).upper()
+    match = re.search(r'([\d\.]+)([KMG]?)', bitrate_str)
+    if not match:
+        return 0
+    val = float(match.group(1))
+    unit = match.group(2)
+    if unit == 'K':
+        val *= 1000
+    elif unit == 'M':
+        val *= 1000000
+    elif unit == 'G':
+        val *= 1000000000
+    return int(val / 8)
+
+
+def _get_safe_segment_size(bitrate_str):
+    """Calculate a safe -hls_segment_size to avoid exceeding TELEGRAM_MAX_FILE_SIZE.
+
+    FFmpeg's -hls_segment_size writes until the limit, then splits at the NEXT keyframe.
+    Since we force keyframes every 1 second, the overshoot can be up to 1 second of
+    video plus container overhead. We subtract 1.5 seconds of bitrate from the absolute
+    limit to ensure we almost never trigger the resplitting fallback.
+    """
+    bytes_per_sec = _parse_bitrate_to_bytes_per_sec(bitrate_str)
+    # Estimate max overshoot as 1.5 seconds of data (1 sec keyframe interval + 50% overhead margin)
+    max_overshoot = int(bytes_per_sec * 1.5)
+    
+    # The absolute ceiling before resplitting kicks in
+    absolute_limit = Config.TELEGRAM_MAX_FILE_SIZE
+    
+    # Calculate safe size
+    safe_size = absolute_limit - max_overshoot
+    
+    # Apply reasonable bounds (don't go below 1MB if bitrate is crazy high, 
+    # and don't exceed the configured SEGMENT_MAX_SIZE preference)
+    safe_size = max(1024 * 1024, safe_size)
+    return min(Config.SEGMENT_MAX_SIZE, safe_size)
 
 
 def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
@@ -148,10 +211,13 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
     # Forced keyframes every 1 second for reliable segment splitting
     cmd += ["-force_key_frames", "expr:gte(t,n_forced*1)"]
 
+    # Calculate safe segment size to prevent overshooting TELEGRAM_MAX_FILE_SIZE
+    safe_segment_size = _get_safe_segment_size(bitrate)
+
     # HLS output with size-based segmentation
     cmd += [
         "-f", "hls",
-        "-hls_segment_size", str(Config.SEGMENT_MAX_SIZE),
+        "-hls_segment_size", str(safe_segment_size),
         "-hls_list_size", "0",
         "-hls_segment_filename", segment_pattern,
         "-hls_segment_type", "mpegts",
@@ -172,15 +238,18 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
     cmd += ["-map", f"0:{audio_stream.index}", "-vn", "-sn"]
 
     # Always encode to AAC for consistent HLS compatibility
-    cmd += ["-c:a", "aac", "-b:a", Config.AUDIO_BITRATE]
+    audio_bitrate = Config.AUDIO_BITRATE
+    cmd += ["-c:a", "aac", "-b:a", audio_bitrate]
     logger.info(
         "Audio track %d (%s): AAC encode at %s",
-        audio_index, audio_stream.language, Config.AUDIO_BITRATE,
+        audio_index, audio_stream.language, audio_bitrate,
     )
+
+    safe_segment_size = _get_safe_segment_size(audio_bitrate)
 
     cmd += [
         "-f", "hls",
-        "-hls_segment_size", str(Config.SEGMENT_MAX_SIZE),
+        "-hls_segment_size", str(safe_segment_size),
         "-hls_list_size", "0",
         "-hls_segment_filename", segment_pattern,
         "-hls_segment_type", "mpegts",
@@ -326,6 +395,83 @@ def _parse_segment_durations(playlist_path):
     return durations
 
 
+def _split_oversized_segments(tier_dir, max_size):
+    """Split any .ts segments in tier_dir that exceed max_size bytes.
+
+    Each oversized segment is re-muxed into 1-second sub-segments using
+    stream copy (-c copy) so no quality is lost. The original file is
+    replaced by the sub-segments, named to sort correctly in place.
+
+    Returns the number of files that were split.
+    """
+    try:
+        ts_files = sorted(f for f in os.listdir(tier_dir) if f.endswith(".ts"))
+    except OSError as e:
+        logger.warning("Failed to list segments in %s: %s", tier_dir, e)
+        return 0
+
+    split_count = 0
+    for filename in ts_files:
+        filepath = os.path.join(tier_dir, filename)
+        try:
+            file_size = os.path.getsize(filepath)
+        except OSError:
+            continue
+
+        if file_size <= max_size:
+            continue
+
+        logger.warning(
+            "Segment %s is %d bytes (limit %d) — re-splitting",
+            filename, file_size, max_size,
+        )
+        stem = filename[:-3]  # strip ".ts"
+        n_split = 0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            split_pattern = os.path.join(tmpdir, "split_%04d.ts")
+            split_playlist = os.path.join(tmpdir, "split.m3u8")
+            cmd = [
+                "ffmpeg", "-y", "-i", filepath,
+                "-c", "copy",
+                "-f", "hls",
+                "-hls_time", "1",
+                "-hls_list_size", "0",
+                "-hls_segment_filename", split_pattern,
+                split_playlist,
+            ]
+            try:
+                _run_ffmpeg(cmd, f"re-split {filename}")
+            except RuntimeError as e:
+                logger.error("Failed to re-split %s: %s", filename, e)
+                continue
+
+            split_files = sorted(f for f in os.listdir(tmpdir) if f.endswith(".ts"))
+            if not split_files:
+                logger.error("Re-split produced no output for %s", filename)
+                continue
+
+            # Move splits into tier_dir first, then delete the original.
+            # This way a partial failure leaves extra data rather than lost data.
+            for i, sf in enumerate(split_files):
+                src = os.path.join(tmpdir, sf)
+                dst = os.path.join(tier_dir, f"{stem}_split_{i:04d}.ts")
+                shutil.move(src, dst)
+            n_split = len(split_files)
+
+            try:
+                os.remove(filepath)
+            except OSError as e:
+                logger.error("Failed to remove original %s: %s", filepath, e)
+
+        split_count += 1
+        logger.info(
+            "Re-split %s (%d bytes) into %d sub-segments",
+            filename, file_size, n_split,
+        )
+
+    return split_count
+
+
 class ProcessingResult:
     """Result of processing a single media file."""
 
@@ -424,6 +570,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         )
         tier0_playlist = playlist
         tier_dir = os.path.dirname(playlist)
+        _split_oversized_segments(tier_dir, Config.TELEGRAM_MAX_FILE_SIZE)
         result.video_playlists.append((
             playlist, tier_dir, source_width, source_height, tier0_bitrate,
         ))
@@ -448,6 +595,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
                 step_progress_cb=make_step_progress_cb(f"Encoding video ({target_h}p)"),
             )
             tier_dir = os.path.dirname(playlist)
+            _split_oversized_segments(tier_dir, Config.TELEGRAM_MAX_FILE_SIZE)
             result.video_playlists.append((
                 playlist, tier_dir, target_w, target_h, tier["bitrate"],
             ))
@@ -463,6 +611,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb(f"Encoding audio {i}"),
         )
+        _split_oversized_segments(audio_dir, Config.TELEGRAM_MAX_FILE_SIZE)
         result.audio_playlists.append((
             playlist, audio_dir, audio.language, audio.title, audio.channels,
         ))

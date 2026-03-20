@@ -61,6 +61,12 @@ def close_conn():
                 pass
 
 
+def open_connection_count() -> int:
+    """Return the number of currently tracked open SQLite connections."""
+    with _all_connections_lock:
+        return len(_all_connections)
+
+
 def _close_all_connections():
     """Close all tracked database connections (called at interpreter shutdown)."""
     with _all_connections_lock:

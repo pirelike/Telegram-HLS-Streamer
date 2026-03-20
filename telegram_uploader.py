@@ -85,6 +85,11 @@ class TelegramUploader:
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
 
+        if file_size > Config.TELEGRAM_MAX_FILE_SIZE:
+            raise RuntimeError(
+                f"Segment {file_name} is {file_size} bytes, exceeds Telegram limit of {Config.TELEGRAM_MAX_FILE_SIZE}"
+            )
+
         for attempt in range(retries):
             try:
                 with open(file_path, "rb") as f:
