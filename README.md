@@ -301,7 +301,7 @@ Returns paginated completed jobs (`limit` max 50).
 
 - `GET /segment/<job_id>/<segment_key>`
 
-This endpoint downloads the segment from Telegram with the original bot and returns bytes to the player.
+This endpoint proxies the segment from Telegram with the original bot. Cache hits return immediately from the in-memory segment cache; cache misses stream to the player while the server writes a temp-file spill copy and warms the cache when the completed segment fits.
 
 ---
 
@@ -363,7 +363,7 @@ If running behind Nginx/Caddy/Traefik:
 
 ### Playback cache behavior
 
-The `/segment/...` proxy uses an in-memory LRU cache inside the app process. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
+The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
 
 If you run multiple workers or multiple app instances, they will not share cached segments. Playback will still work, but hot segments may be re-downloaded from Telegram by each worker or node.
 
@@ -429,15 +429,13 @@ See `todo.md` for the prioritized list of known issues, planned improvements, an
 ## Limitations
 
 - Single-process architecture — no distributed queue/worker support; job state is in-memory and not durable across restarts.
-- Segment proxy fetches bytes from Telegram per request with no server-side caching; concurrent viewers will hit Telegram rate limits.
-- Each segment proxy request creates and tears down a new asyncio event loop.
-- Segments are fully buffered in memory before serving (~20MB RAM per concurrent segment fetch).
-- `TELEGRAM_MAX_FILE_SIZE` is declared but not enforced — oversized HLS segments can fail at upload time.
-- HLS playlist `#EXTINF` durations use the configured target rather than actual FFmpeg segment durations.
+- Segment caching is process-local only; multiple workers or nodes will still duplicate hot Telegram reads unless a shared cache is added.
+- Metrics for cache hit rate, Telegram latency/error rates, and active jobs are not exposed yet.
+- SQLite is still the only playback metadata store; there is no schema versioning or migration framework beyond ad hoc startup fixes.
 - ABR tiers are static config; no per-title complexity optimization.
-- No authentication on HLS playback endpoints — anyone with a `job_id` can stream.
+- Playback tokens are deterministic per `job_id` and do not expire until `PLAYBACK_SECRET` is rotated.
 - SQLite is the sole database; horizontal scaling would require migration to PostgreSQL/MySQL.
-- No disk space pre-flight checks before upload assembly or FFmpeg processing.
+- There is still no backup/export workflow for `streamer.db`.
 
 ---
 
