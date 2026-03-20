@@ -231,8 +231,8 @@ class TelegramUploader:
 
         # 3. Subtitle files
         subtitle_files = [
-            (f"sub_{i}/subtitles.vtt", vtt_path)
-            for i, (vtt_path, _, _, _) in enumerate(processing_result.subtitle_files)
+            (f"sub_{enum_idx}/subtitles.vtt", vtt_path)
+            for vtt_path, _, _, _, enum_idx, _ in processing_result.subtitle_files
         ]
         all_upload_tasks.append(("sub", subtitle_files))
         total_files += len(subtitle_files)

@@ -296,7 +296,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
                 output_dir=out_dir,
                 video_playlists=[(os.path.join(video_dir, "video.m3u8"), video_dir, 1280, 720, "2500k")],
                 audio_playlists=[("a.m3u8", audio_dir, "eng", "English", 2)],
-                subtitle_files=[(vtt, os.path.dirname(vtt), "eng", "English")],
+                subtitle_files=[(vtt, os.path.dirname(vtt), "eng", "English", 0, 3)],
             )
 
             async def fake_upload_files(files, cb=None):

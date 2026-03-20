@@ -49,21 +49,21 @@
 
 ## P3 — Data Model
 
-- [ ] `database.py:192`: **Original stream indices lost for subtitles** — when non-text subtitles are skipped, the `track_index` in DB uses processing-result enumerate index, not the original FFprobe stream index; makes debugging difficult
+- [x] `database.py:192`: **Original stream indices lost for subtitles** — when non-text subtitles are skipped, the `track_index` in DB uses processing-result enumerate index, not the original FFprobe stream index; makes debugging difficult
   - Fix: store original stream index as a separate column in `tracks` table
 - [x] No per-segment duration stored in DB — prevents accurate HLS playlist generation and makes it impossible to generate correct `#EXTINF` values after the FFmpeg output is cleaned up
   - Fix: add `duration` column to `segments` table; populate from FFmpeg output `.m3u8`
 
 ## P4 — Security Hardening
 
-- [ ] HLS/segment endpoints have **no authentication** — upload can be protected with API key/Basic auth, but anyone with a `job_id` can stream content
+- [x] HLS/segment endpoints have **no authentication** — upload can be protected with API key/Basic auth, but anyone with a `job_id` can stream content
   - Fix: add optional token-based auth for playback endpoints (signed URLs or session tokens)
-- [ ] `templates/index.html:559`: **Fragile XSS pattern** in `onclick="deleteJob('${safeId}')"` — `escapeHtml()` prevents HTML injection but a `job_id` containing `'` could break the JS string; safe today (UUIDs are alphanumeric) but brittle pattern
+- [x] `templates/index.html:559`: **Fragile XSS pattern** in `onclick="deleteJob('${safeId}')"` — `escapeHtml()` prevents HTML injection but a `job_id` containing `'` could break the JS string; safe today (UUIDs are alphanumeric) but brittle pattern
   - Fix: use `addEventListener` instead of inline `onclick` with interpolated values
 
 ## P5 — Operational
 
-- [ ] No `/health` endpoint — load balancers, monitoring systems, and container orchestrators need a health check endpoint
+- [x] No `/health` endpoint — load balancers, monitoring systems, and container orchestrators need a health check endpoint
   - Fix: add `GET /health` returning `{"status": "ok", "bots": N, "db": true}` with checks for DB connectivity and bot availability
 - [ ] No metrics/observability — no request timing, error rates, Telegram API call counting, or queue depth reporting
   - Fix: add optional Prometheus metrics endpoint or structured JSON logging for key events
@@ -72,6 +72,9 @@
 
 ## P6 — New Features
 
+- [ ] **Scalable bot pool beyond 8** — `config.py` hardcodes a max of 8 bots; target is at least 256, but actual Telegram API limits (rate limits per bot, max bots per account, channel member limits) are unknown and need investigation before implementation
+  - Investigation needed: Telegram BotFather limits, per-bot `send_document` rate limits, whether a single channel can receive from 256+ bots, and whether `HTTPXRequest` connection pool sizing needs adjustment at scale
+  - Fix: remove the hardcoded `8` cap in `config.py` bot loading loop; make it dynamic (scan all `TELEGRAM_BOT_TOKEN_N` / `TELEGRAM_CHANNEL_ID_N` env vars up to a configurable `MAX_BOTS` limit); update `UPLOAD_PARALLELISM` default to scale with bot count
 - [ ] **Thumbnail generation** — no preview thumbnails for job list; would improve UX significantly
   - Implementation: extract frame at ~10% duration via `ffmpeg -ss <time> -vframes 1`, upload to Telegram, store `file_id` in `jobs` table, serve via proxy endpoint
 - [ ] **Job re-processing** — no way to re-process a job (e.g. to add/change ABR tiers) without re-uploading the original file

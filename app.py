@@ -12,6 +12,8 @@ import asyncio
 import atexit
 import base64
 import collections
+import hashlib
+import hmac
 import logging
 import os
 import queue
@@ -219,6 +221,28 @@ def _require_upload_auth():
     return jsonify({"error": "Unauthorized"}), 401
 
 
+def _generate_playback_token(job_id):
+    """Generate a deterministic HMAC-SHA256 token for a job. Returns None if auth is disabled."""
+    if not Config.PLAYBACK_SECRET:
+        return None
+    return hmac.new(
+        Config.PLAYBACK_SECRET.encode(),
+        job_id.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _require_playback_auth(job_id):
+    """Return a 403 response if playback auth is enabled and the token is missing or invalid."""
+    if not Config.PLAYBACK_SECRET:
+        return None
+    token = request.args.get("token", "")
+    expected = _generate_playback_token(job_id)
+    if not token or not hmac.compare_digest(token, expected):
+        return jsonify({"error": "Unauthorized"}), 403
+    return None
+
+
 def _cleanup_expired_pending_uploads(force=False):
     """Delete stale pending uploads from memory + disk."""
     global _last_pending_cleanup
@@ -401,6 +425,17 @@ def cancel_job(job_id):
     return jsonify({"message": "Job cancellation requested"})
 
 
+@app.route("/api/jobs/<job_id>/token")
+def get_playback_token(job_id):
+    """Return the HMAC playback token for a job (requires upload auth if configured)."""
+    unauthorized = _require_upload_auth()
+    if unauthorized:
+        return unauthorized
+    if not get_job(job_id):
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify({"token": _generate_playback_token(job_id)})
+
+
 @app.route("/api/jobs/<job_id>", methods=["DELETE"])
 def delete_job_endpoint(job_id):
     """Delete a completed job from the database."""
@@ -436,6 +471,28 @@ _start_retention_cleanup()
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ─── Health Check ───
+
+@app.route("/health")
+def health():
+    """Health check endpoint for load balancers and monitoring."""
+    db_ok = False
+    try:
+        db.get_job("__healthcheck__")
+        db_ok = True
+    except Exception:
+        pass
+
+    status = "ok" if db_ok else "degraded"
+    code = 200 if db_ok else 503
+
+    return jsonify({
+        "status": status,
+        "bots": len(Config.BOTS),
+        "db": db_ok,
+    }), code
 
 
 # ─── Chunked Upload API ───
@@ -890,8 +947,12 @@ def jobs_list():
 @app.route("/hls/<job_id>/master.m3u8")
 def master_playlist(job_id):
     """Serve master M3U8 playlist with multi-audio and subtitle variants."""
+    auth_error = _require_playback_auth(job_id)
+    if auth_error:
+        return auth_error
     base_url = _get_base_url()
-    playlist = generate_master_playlist(job_id, base_url)
+    token = request.args.get("token")
+    playlist = generate_master_playlist(job_id, base_url, token=token)
     if not playlist:
         return jsonify({"error": "Job not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -900,7 +961,11 @@ def master_playlist(job_id):
 @app.route("/hls/<job_id>/video.m3u8")
 def video_playlist(job_id):
     """Serve video-only media playlist (legacy, single-tier)."""
-    playlist = generate_media_playlist(job_id, "video")
+    auth_error = _require_playback_auth(job_id)
+    if auth_error:
+        return auth_error
+    token = request.args.get("token")
+    playlist = generate_media_playlist(job_id, "video", token=token)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -909,7 +974,11 @@ def video_playlist(job_id):
 @app.route("/hls/<job_id>/video_<int:index>.m3u8")
 def video_tier_playlist(job_id, index):
     """Serve video media playlist for a specific quality tier."""
-    playlist = generate_media_playlist(job_id, "video", index)
+    auth_error = _require_playback_auth(job_id)
+    if auth_error:
+        return auth_error
+    token = request.args.get("token")
+    playlist = generate_media_playlist(job_id, "video", index, token=token)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -918,7 +987,11 @@ def video_tier_playlist(job_id, index):
 @app.route("/hls/<job_id>/audio_<int:index>.m3u8")
 def audio_playlist(job_id, index):
     """Serve audio track media playlist."""
-    playlist = generate_media_playlist(job_id, "audio", index)
+    auth_error = _require_playback_auth(job_id)
+    if auth_error:
+        return auth_error
+    token = request.args.get("token")
+    playlist = generate_media_playlist(job_id, "audio", index, token=token)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -927,7 +1000,11 @@ def audio_playlist(job_id, index):
 @app.route("/hls/<job_id>/sub_<int:index>.m3u8")
 def subtitle_playlist(job_id, index):
     """Serve subtitle track playlist."""
-    playlist = generate_media_playlist(job_id, "sub", index)
+    auth_error = _require_playback_auth(job_id)
+    if auth_error:
+        return auth_error
+    token = request.args.get("token")
+    playlist = generate_media_playlist(job_id, "sub", index, token=token)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -977,6 +1054,9 @@ _segment_cache = _SegmentCache(max_bytes=Config.SEGMENT_CACHE_SIZE_MB * 1024 * 1
 @app.route("/segment/<job_id>/<path:segment_key>")
 def serve_segment(job_id, segment_key):
     """Proxy a segment from Telegram."""
+    auth_error = _require_playback_auth(job_id)
+    if auth_error:
+        return auth_error
     info = get_segment_info(job_id, segment_key)
     if not info:
         return jsonify({"error": "Segment not found"}), 404
