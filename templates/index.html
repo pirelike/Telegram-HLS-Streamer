@@ -493,6 +493,7 @@
                     return;
                 }
                 container.innerHTML = ids.map(id => renderJobItem(id, jobs[id])).join('');
+                applyTokensToJobLinks(ids);
                 const loadMoreBtn = document.getElementById('loadMoreBtn');
                 if (data.has_more) {
                     loadMoreBtn.classList.add('visible');
@@ -515,6 +516,7 @@
                 if (ids.length === 0) return;
                 const container = document.getElementById('jobsList');
                 container.insertAdjacentHTML('beforeend', ids.map(id => renderJobItem(id, jobs[id])).join(''));
+                applyTokensToJobLinks(ids);
                 const loadMoreBtn = document.getElementById('loadMoreBtn');
                 if (data.has_more) {
                     loadMoreBtn.classList.add('visible');
@@ -557,14 +559,14 @@
             </div>
             <div class="job-actions">
                 <a class="job-link" href="/hls/${safeId}/master.m3u8" target="_blank">M3U8</a>
-                <button class="delete-btn" id="delete-${safeId}" onclick="deleteJob('${safeId}')">Delete</button>
+                <button class="delete-btn" data-job-id="${safeId}">Delete</button>
             </div>
         </div>`;
     }
 
     function deleteJob(jobId) {
         if (!confirm('Delete this job? This cannot be undone.')) return;
-        const btn = document.getElementById(`delete-${jobId}`);
+        const btn = document.querySelector(`.delete-btn[data-job-id="${jobId}"]`);
         if (btn) {
             btn.disabled = true;
             btn.textContent = 'Deleting...';
@@ -604,6 +606,25 @@
             `Last activity: ${ageStr}. Re-select the same file to resume.`;
         resumeBanner.classList.add('active');
     })();
+
+    document.getElementById('jobsList').addEventListener('click', function(e) {
+        const btn = e.target.closest('.delete-btn[data-job-id]');
+        if (!btn) return;
+        deleteJob(btn.dataset.jobId);
+    });
+
+    function applyTokensToJobLinks(ids) {
+        ids.forEach(function(id) {
+            fetch('/api/jobs/' + id + '/token')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data.token) return;
+                    var link = document.querySelector('#job-' + id + ' .job-link');
+                    if (link) link.href += '?token=' + data.token;
+                })
+                .catch(function() {});
+        });
+    }
 
     loadJobs();
     </script>

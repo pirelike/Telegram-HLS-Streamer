@@ -393,7 +393,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         result = vp.ProcessingResult("id", "/tmp/out")
         result.video_playlists = [("/tmp/out/video_0/video.m3u8", "/tmp/out/video_0", 1280, 720, "2500k")]
         result.audio_playlists = [("a", "/tmp/out/audio_0", "eng", "", 2)]
-        result.subtitle_files = [("s", "/tmp/out/sub_0", "eng", "")]
+        result.subtitle_files = [("s", "/tmp/out/sub_0", "eng", "", 0, 3)]
         dirs = result.all_segment_dirs()
         self.assertEqual(dirs, ["/tmp/out/video_0", "/tmp/out/audio_0", "/tmp/out/sub_0"])
 

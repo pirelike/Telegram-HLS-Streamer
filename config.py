@@ -96,6 +96,9 @@ class Config:
     UPLOAD_BASIC_USER = os.getenv("UPLOAD_BASIC_USER", "").strip()
     UPLOAD_BASIC_PASSWORD = os.getenv("UPLOAD_BASIC_PASSWORD", "").strip()
 
+    # Optional auth for HLS playback endpoints (HMAC-signed per-job tokens)
+    PLAYBACK_SECRET = os.getenv("PLAYBACK_SECRET", "").strip()
+
     # Telegram bots
     BOTS = []
     UPLOAD_PARALLELISM = _int_env("UPLOAD_PARALLELISM", 8)

@@ -103,6 +103,7 @@ def init_db():
             width        INTEGER DEFAULT 0,
             height       INTEGER DEFAULT 0,
             bitrate      TEXT DEFAULT '',
+            original_stream_index INTEGER DEFAULT -1,
             UNIQUE(job_id, track_type, track_index)
         );
 
@@ -125,7 +126,7 @@ def init_db():
     # Migrate: add width/height/bitrate columns to tracks if missing
     cursor = conn.execute("PRAGMA table_info(tracks)")
     existing_cols = {row["name"] for row in cursor.fetchall()}
-    for col, default_val in [("width", 0), ("height", 0), ("bitrate", "")]:
+    for col, default_val in [("width", 0), ("height", 0), ("bitrate", ""), ("original_stream_index", -1)]:
         if col not in existing_cols:
             col_type = "INTEGER" if isinstance(default_val, int) else "TEXT"
             # DDL statements don't support parameter binding in SQLite,
@@ -173,36 +174,37 @@ def save_job(job_id, analysis, processing_result, upload_result):
             )
 
             # Save video tracks (ABR tiers)
+            orig_video_idx = video.index if video else -1
             for i, (_, _, width, height, bitrate) in enumerate(processing_result.video_playlists):
                 conn.execute(
                     """INSERT OR REPLACE INTO tracks
-                       (job_id, track_type, track_index, codec, language, title, channels, width, height, bitrate)
-                       VALUES (?, 'video', ?, ?, 'und', ?, 0, ?, ?, ?)""",
+                       (job_id, track_type, track_index, codec, language, title, channels, width, height, bitrate, original_stream_index)
+                       VALUES (?, 'video', ?, ?, 'und', ?, 0, ?, ?, ?, ?)""",
                     (job_id, i, video.codec_name if video else "h264",
-                     f"{width}x{height}", width, height, bitrate),
+                     f"{width}x{height}", width, height, bitrate, orig_video_idx),
                 )
 
             # Save audio tracks
             for i, (_, _, lang, title, channels) in enumerate(processing_result.audio_playlists):
                 audio = analysis.audio_streams[i] if i < len(analysis.audio_streams) else None
+                orig_audio_idx = audio.index if audio else -1
                 conn.execute(
                     """INSERT OR REPLACE INTO tracks
-                       (job_id, track_type, track_index, codec, language, title, channels)
-                       VALUES (?, 'audio', ?, ?, ?, ?, ?)""",
-                    (job_id, i, audio.codec_name if audio else "aac", lang, title, channels),
+                       (job_id, track_type, track_index, codec, language, title, channels, original_stream_index)
+                       VALUES (?, 'audio', ?, ?, ?, ?, ?, ?)""",
+                    (job_id, i, audio.codec_name if audio else "aac", lang, title, channels, orig_audio_idx),
                 )
 
             # Save subtitle tracks
-            # NOTE: processing_result.subtitle_files only contains successfully
-            # extracted (text-based) subtitles, so its indices don't correspond
-            # to analysis.subtitle_streams. We use "webvtt" as the codec since
-            # all extracted subtitles are converted to WebVTT.
-            for i, (_, _, lang, title) in enumerate(processing_result.subtitle_files):
+            # Each tuple is (vtt_path, sub_dir, lang, title, enum_idx, orig_stream_idx).
+            # enum_idx is the enumerate index over ALL subtitle streams (including skipped
+            # bitmap ones), so it matches the sub_N directory name used by video_processor.
+            for _, _, lang, title, enum_idx, orig_idx in processing_result.subtitle_files:
                 conn.execute(
                     """INSERT OR REPLACE INTO tracks
-                       (job_id, track_type, track_index, codec, language, title, channels)
-                       VALUES (?, 'subtitle', ?, 'webvtt', ?, ?, 0)""",
-                    (job_id, i, lang, title),
+                       (job_id, track_type, track_index, codec, language, title, channels, original_stream_index)
+                       VALUES (?, 'subtitle', ?, 'webvtt', ?, ?, 0, ?)""",
+                    (job_id, enum_idx, lang, title, orig_idx),
                 )
 
             # Save all segment mappings (the critical Telegram file_id references)

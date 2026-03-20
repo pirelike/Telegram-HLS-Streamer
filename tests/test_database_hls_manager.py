@@ -37,14 +37,14 @@ class TestDatabaseBase(unittest.TestCase):
             duration=12.0,
             file_size=1200,
             has_video=True,
-            video_streams=[SimpleNamespace(codec_name="h264", width=1280, height=720)],
-            audio_streams=[SimpleNamespace(codec_name="aac")],
-            subtitle_streams=[SimpleNamespace(codec_name="srt")],
+            video_streams=[SimpleNamespace(codec_name="h264", width=1280, height=720, index=0)],
+            audio_streams=[SimpleNamespace(codec_name="aac", index=1)],
+            subtitle_streams=[SimpleNamespace(codec_name="srt", index=3)],
         )
         processing = SimpleNamespace(
             video_playlists=[("video.m3u8", "/tmp/video", 1280, 720, "2500k")],
             audio_playlists=[("a.m3u8", "/tmp/a", "eng", "English", 2)],
-            subtitle_files=[("s.vtt", "/tmp/s", "eng", "English")],
+            subtitle_files=[("s.vtt", "/tmp/s", "eng", "English", 0, 3)],
             segment_durations={},
         )
         upload = SimpleNamespace(
@@ -252,7 +252,7 @@ class TestDatabaseCRUD(TestDatabaseBase):
             file_size=500,
             has_video=False,
             video_streams=[],
-            audio_streams=[SimpleNamespace(codec_name="aac")],
+            audio_streams=[SimpleNamespace(codec_name="aac", index=1)],
             subtitle_streams=[],
         )
         processing = SimpleNamespace(
@@ -388,7 +388,7 @@ class TestHLSManagerWithDB(TestDatabaseBase):
             duration=10.0,
             file_size=1000,
             has_video=True,
-            video_streams=[SimpleNamespace(codec_name="h264", width=640, height=480)],
+            video_streams=[SimpleNamespace(codec_name="h264", width=640, height=480, index=0)],
             audio_streams=[],
             subtitle_streams=[],
         )
@@ -408,7 +408,7 @@ class TestHLSManagerWithDB(TestDatabaseBase):
             duration=5.0,
             file_size=500,
             has_video=True,
-            video_streams=[SimpleNamespace(codec_name="h264", width=1280, height=720)],
+            video_streams=[SimpleNamespace(codec_name="h264", width=1280, height=720, index=0)],
             audio_streams=[],
             subtitle_streams=[],
         )
@@ -490,6 +490,140 @@ class TestHLSManagerWithDB(TestDatabaseBase):
 
         playlist = hls_manager.generate_media_playlist("job5b", "video", 0)
         self.assertIn("/segment/job5b/video_0/video_0001.ts", playlist)
+
+
+class TestSubtitleTrackIndexMismatch(TestDatabaseBase):
+    """P3: subtitle track_index must match the enumerate index (including skipped bitmaps)."""
+
+    def _payload_with_skipped_bitmap_sub(self, job_id="jobsub"):
+        """Simulate a file with a bitmap sub at index 0 (skipped) and text sub at index 1."""
+        analysis = SimpleNamespace(
+            file_path=f"/tmp/{job_id}.mkv",
+            duration=10.0,
+            file_size=1000,
+            has_video=True,
+            video_streams=[SimpleNamespace(codec_name="h264", width=1280, height=720, index=0)],
+            audio_streams=[SimpleNamespace(codec_name="aac", index=1)],
+            subtitle_streams=[
+                SimpleNamespace(codec_name="hdmv_pgs_subtitle", index=2),  # bitmap, skipped
+                SimpleNamespace(codec_name="srt", index=3),                # text, extracted
+            ],
+        )
+        # video_processor skips index 0 (bitmap) and only appends index 1 (text).
+        # The 6-tuple is (vtt_path, sub_dir, lang, title, enum_idx, orig_stream_idx).
+        processing = SimpleNamespace(
+            video_playlists=[("v.m3u8", "/tmp/v", 1280, 720, "2M")],
+            audio_playlists=[("a.m3u8", "/tmp/a", "eng", "English", 2)],
+            subtitle_files=[("s.vtt", "/tmp/sub_1", "eng", "English", 1, 3)],
+            segment_durations={},
+        )
+        upload = SimpleNamespace(
+            segments={
+                "video_0/video_0001.ts": SimpleNamespace(file_id="fv", bot_index=0, file_size=100),
+                "audio_0/audio_0001.ts": SimpleNamespace(file_id="fa", bot_index=0, file_size=50),
+                "sub_1/subtitles.vtt": SimpleNamespace(file_id="fs", bot_index=0, file_size=10),
+            }
+        )
+        return analysis, processing, upload
+
+    def test_subtitle_track_index_matches_directory_when_bitmap_skipped(self):
+        """track_index stored in DB must be enum_idx (1), not sequential (0)."""
+        analysis, processing, upload = self._payload_with_skipped_bitmap_sub()
+        database.save_job("jobsub", analysis, processing, upload)
+
+        sub_tracks = database.get_job_tracks("jobsub", "subtitle")
+        self.assertEqual(len(sub_tracks), 1)
+        self.assertEqual(sub_tracks[0]["track_index"], 1,
+                         "track_index must be 1 to match sub_1/ directory")
+
+    def test_subtitle_original_stream_index_stored(self):
+        """original_stream_index must store the FFprobe stream index."""
+        analysis, processing, upload = self._payload_with_skipped_bitmap_sub()
+        database.save_job("jobsub", analysis, processing, upload)
+
+        sub_tracks = database.get_job_tracks("jobsub", "subtitle")
+        self.assertEqual(sub_tracks[0]["original_stream_index"], 3)
+
+    def test_subtitle_segment_lookup_succeeds_with_correct_index(self):
+        """get_segment for sub_1/subtitles.vtt must succeed."""
+        analysis, processing, upload = self._payload_with_skipped_bitmap_sub()
+        database.save_job("jobsub", analysis, processing, upload)
+
+        seg = database.get_segment("jobsub", "sub_1/subtitles.vtt")
+        self.assertIsNotNone(seg)
+        self.assertEqual(seg["file_id"], "fs")
+
+    def test_subtitle_playlist_uses_correct_key(self):
+        """generate_media_playlist for sub index 1 must find sub_1/subtitles.vtt."""
+        analysis, processing, upload = self._payload_with_skipped_bitmap_sub()
+        hls_manager.register_job("jobsub2", analysis, processing, upload)
+
+        # Sub track has track_index=1 → playlist must reference sub_1
+        playlist = hls_manager.generate_media_playlist("jobsub2", "sub", 1)
+        self.assertIsNotNone(playlist)
+        self.assertIn("sub_1/subtitles.vtt", playlist)
+
+    def test_original_stream_index_stored_for_video_and_audio(self):
+        analysis, processing, upload = self._sample_payload()
+        database.save_job("job_orig_idx", analysis, processing, upload)
+
+        video_tracks = database.get_job_tracks("job_orig_idx", "video")
+        audio_tracks = database.get_job_tracks("job_orig_idx", "audio")
+        self.assertEqual(video_tracks[0]["original_stream_index"], 0)
+        self.assertEqual(audio_tracks[0]["original_stream_index"], 1)
+
+
+class TestTokenPropagation(TestDatabaseBase):
+    """P4a: token is appended to sub-resource URLs in playlists."""
+
+    def test_with_token_appends_query(self):
+        self.assertEqual(
+            hls_manager._with_token("/hls/job/video.m3u8", "abc123"),
+            "/hls/job/video.m3u8?token=abc123",
+        )
+
+    def test_with_token_no_token_returns_url_unchanged(self):
+        url = "/hls/job/video.m3u8"
+        self.assertEqual(hls_manager._with_token(url, None), url)
+        self.assertEqual(hls_manager._with_token(url, ""), url)
+
+    def test_with_token_existing_query_uses_ampersand(self):
+        self.assertEqual(
+            hls_manager._with_token("/segment/x?foo=1", "tok"),
+            "/segment/x?foo=1&token=tok",
+        )
+
+    def test_generate_master_playlist_with_token_includes_token_in_urls(self):
+        analysis, processing, upload = self._sample_payload()
+        hls_manager.register_job("tokjob", analysis, processing, upload)
+
+        playlist = hls_manager.generate_master_playlist("tokjob", "https://cdn.example", token="mytoken")
+        self.assertIn("?token=mytoken", playlist)
+
+    def test_generate_master_playlist_without_token_no_query_param(self):
+        analysis, processing, upload = self._sample_payload()
+        hls_manager.register_job("notokjob", analysis, processing, upload)
+
+        playlist = hls_manager.generate_master_playlist("notokjob", "https://cdn.example")
+        self.assertNotIn("?token=", playlist)
+
+    def test_generate_media_playlist_with_token_in_segment_urls(self):
+        analysis, processing, upload = self._sample_payload()
+        upload.segments["video_0/video_0001.ts"] = SimpleNamespace(
+            file_id="fv0", bot_index=0, file_size=100
+        )
+        hls_manager.register_job("tokjob2", analysis, processing, upload)
+
+        playlist = hls_manager.generate_media_playlist("tokjob2", "video", 0, token="segtoken")
+        self.assertIn("?token=segtoken", playlist)
+
+    def test_generate_subtitle_playlist_with_token(self):
+        analysis, processing, upload = self._sample_payload()
+        hls_manager.register_job("tokjob3", analysis, processing, upload)
+
+        job = database.get_job("tokjob3")
+        playlist = hls_manager._generate_subtitle_playlist("tokjob3", job, 0, token="subtoken")
+        self.assertIn("?token=subtoken", playlist)
 
 
 if __name__ == "__main__":

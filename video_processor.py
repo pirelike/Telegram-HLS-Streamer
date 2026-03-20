@@ -334,7 +334,7 @@ class ProcessingResult:
         self.output_dir = output_dir
         self.video_playlists = []   # list of (playlist_path, tier_dir, width, height, bitrate)
         self.audio_playlists = []   # list of (playlist_path, audio_dir, language, title, channels)
-        self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title)
+        self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title, enum_idx, orig_stream_idx)
         self.segment_durations = {} # maps "video_0/video_0001.ts" -> duration (float)
 
     @property
@@ -351,7 +351,7 @@ class ProcessingResult:
             dirs.append(tier_dir)
         for _, audio_dir, _, _, _ in self.audio_playlists:
             dirs.append(audio_dir)
-        for _, sub_dir, _, _ in self.subtitle_files:
+        for _, sub_dir, _, _, _, _ in self.subtitle_files:
             dirs.append(sub_dir)
         return dirs
 
@@ -484,7 +484,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         cmd, vtt_file, sub_dir = _extract_subtitle(analysis, sub, i, output_dir)
         try:
             _run_ffmpeg(cmd, f"subtitle track {i} ({sub.language}) for {job_id}")
-            result.subtitle_files.append((vtt_file, sub_dir, sub.language, sub.title))
+            result.subtitle_files.append((vtt_file, sub_dir, sub.language, sub.title, i, sub.index))
             report(f"Subtitle track {i} ({sub.language}) extracted")
         except RuntimeError as e:
             logger.warning("Failed to extract subtitle track %d, skipping: %s", i, e)

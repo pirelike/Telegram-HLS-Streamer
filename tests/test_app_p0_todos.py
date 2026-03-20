@@ -696,5 +696,133 @@ class TestP0TodoFixes(unittest.TestCase):
             self.assertIsNotNone(result)
 
 
+class TestPlaybackAuth(unittest.TestCase):
+    """P4a: HMAC playback token generation and route enforcement."""
+
+    def setUp(self):
+        _reset_state()
+        self.client = app_module.app.test_client()
+
+    def test_generate_playback_token_disabled_returns_none(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""):
+            self.assertIsNone(app_module._generate_playback_token("job1"))
+
+    def test_generate_playback_token_returns_hex_string(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "supersecret"):
+            token = app_module._generate_playback_token("job1")
+            self.assertIsNotNone(token)
+            self.assertEqual(len(token), 64)  # SHA-256 hex digest
+            int(token, 16)  # must be valid hex
+
+    def test_generate_playback_token_is_deterministic(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "s3cr3t"):
+            t1 = app_module._generate_playback_token("abc")
+            t2 = app_module._generate_playback_token("abc")
+            self.assertEqual(t1, t2)
+
+    def test_generate_playback_token_differs_per_job(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "s3cr3t"):
+            self.assertNotEqual(
+                app_module._generate_playback_token("job1"),
+                app_module._generate_playback_token("job2"),
+            )
+
+    def test_require_playback_auth_disabled_returns_none(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""):
+            with app_module.app.test_request_context("/?token=whatever"):
+                result = app_module._require_playback_auth("job1")
+        self.assertIsNone(result)
+
+    def test_require_playback_auth_valid_token_returns_none(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "mykey"):
+            token = app_module._generate_playback_token("job1")
+            with app_module.app.test_request_context(f"/?token={token}"):
+                result = app_module._require_playback_auth("job1")
+        self.assertIsNone(result)
+
+    def test_require_playback_auth_missing_token_returns_403(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "mykey"):
+            with app_module.app.test_request_context("/"):
+                response, status = app_module._require_playback_auth("job1")
+        self.assertEqual(status, 403)
+
+    def test_require_playback_auth_wrong_token_returns_403(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "mykey"):
+            with app_module.app.test_request_context("/?token=wrongtoken"):
+                response, status = app_module._require_playback_auth("job1")
+        self.assertEqual(status, 403)
+
+    def test_master_playlist_requires_token_when_secret_set(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "testkey"), \
+             patch("app.generate_master_playlist", return_value="#EXTM3U\n"):
+            r = self.client.get("/hls/job1/master.m3u8")
+            self.assertEqual(r.status_code, 403)
+
+    def test_master_playlist_accessible_without_secret(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""), \
+             patch("app.generate_master_playlist", return_value="#EXTM3U\n"):
+            r = self.client.get("/hls/job1/master.m3u8")
+            self.assertEqual(r.status_code, 200)
+
+    def test_master_playlist_accessible_with_valid_token(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "testkey"), \
+             patch("app.generate_master_playlist", return_value="#EXTM3U\n"):
+            token = app_module._generate_playback_token("job1")
+            r = self.client.get(f"/hls/job1/master.m3u8?token={token}")
+            self.assertEqual(r.status_code, 200)
+
+    def test_token_endpoint_returns_token(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", "testkey"), \
+             patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
+             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""), \
+             patch("app.get_job", return_value={"job_id": "job1"}):
+            r = self.client.get("/api/jobs/job1/token")
+            self.assertEqual(r.status_code, 200)
+            data = r.get_json()
+            self.assertIn("token", data)
+            self.assertEqual(data["token"], app_module._generate_playback_token("job1"))
+
+    def test_token_endpoint_returns_null_when_secret_unset(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""), \
+             patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
+             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""), \
+             patch("app.get_job", return_value={"job_id": "job1"}):
+            r = self.client.get("/api/jobs/job1/token")
+            self.assertEqual(r.status_code, 200)
+            data = r.get_json()
+            self.assertIsNone(data["token"])
+
+    def test_token_endpoint_404_for_missing_job(self):
+        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""), \
+             patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
+             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""), \
+             patch("app.get_job", return_value=None):
+            r = self.client.get("/api/jobs/nosuchjob/token")
+            self.assertEqual(r.status_code, 404)
+
+
+class TestHealthEndpoint(unittest.TestCase):
+    def setUp(self):
+        _reset_state()
+        self.client = app_module.app.test_client()
+
+    def test_health_ok(self):
+        with patch("app.db.get_job", return_value=None):
+            resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["db"])
+        self.assertIn("bots", data)
+
+    def test_health_db_failure(self):
+        with patch("app.db.get_job", side_effect=Exception("db broken")):
+            resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "degraded")
+        self.assertFalse(data["db"])
+
+
 if __name__ == "__main__":
     unittest.main()
