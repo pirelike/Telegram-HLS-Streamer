@@ -268,10 +268,10 @@ Add `BOT_TOKEN_N` and `CHANNEL_ID_N` to `.env` (N = 1–8). `config.py` loads th
 These are documented in `todo.md` with priorities. Key points for contributors:
 
 ### Sync/Async Tension
-Flask is synchronous but Telegram operations are async. Currently `_run_async()` in `app.py` creates a **new event loop per call**. This is expensive — every segment proxy request spins up and tears down a loop. A persistent background event loop or migration to Quart would fix this.
+Flask is synchronous while Telegram operations remain async. `app.py` now bridges that with a persistent background event loop, which removes the earlier per-request event loop churn. The longer-term architectural tradeoff is still that async Telegram I/O and sync Flask request handling live in the same process.
 
-### No Segment Caching
-The segment proxy (`/segment/`) fetches from Telegram on every request with no server-side cache. This is the single biggest performance bottleneck under concurrent viewers.
+### Process-Local Segment Caching
+The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch for Telegram-backed reads. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
 
 ### TELEGRAM_MAX_FILE_SIZE Not Enforced
 `config.py` declares 20MB but `video_processor.py` never checks segment sizes. High-bitrate 4K segments can exceed this and fail at upload time.
@@ -287,8 +287,8 @@ The segment proxy (`/segment/`) fetches from Telegram on every request with no s
 ## Roadmap
 
 See `todo.md` for the full prioritized backlog. Key items for next season:
-1. Enforce `TELEGRAM_MAX_FILE_SIZE` during processing (P0)
-2. Add segment proxy LRU cache (P1)
-3. Persistent async event loop (P1)
-4. Health check endpoint (P5)
-5. Thumbnail generation (P6)
+1. Reduce segment download memory amplification on cache misses (P2)
+2. Add metrics for cache hit rate, Telegram latency, and active jobs (P5)
+3. Add backup/export workflow for `streamer.db` (P5)
+4. Thumbnail generation (P6)
+5. Optional shared cache backend if multi-worker deployment becomes necessary

@@ -361,6 +361,12 @@ If running behind Nginx/Caddy/Traefik:
 - keep `BEHIND_PROXY=true`
 - use `FORCE_HTTPS=true` if TLS is terminated at proxy and you need HTTPS playlist URLs in responses
 
+### Playback cache behavior
+
+The `/segment/...` proxy uses an in-memory LRU cache inside the app process. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
+
+If you run multiple workers or multiple app instances, they will not share cached segments. Playback will still work, but hot segments may be re-downloaded from Telegram by each worker or node.
+
 ---
 
 ## Troubleshooting
