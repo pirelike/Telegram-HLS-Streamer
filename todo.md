@@ -38,20 +38,20 @@
 
 ## P2 — Reliability
 
-- [ ] `app.py:731-739`: **Non-reentrant `threading.Lock` is fragile** — inline comments warn against calling `_is_job_cancelled()` while holding `_job_status_lock`; any future refactor that accidentally nests calls will deadlock silently
+- [x] `app.py:731-739`: **Non-reentrant `threading.Lock` is fragile** — inline comments warn against calling `_is_job_cancelled()` while holding `_job_status_lock`; any future refactor that accidentally nests calls will deadlock silently
   - Fix: switch to `threading.RLock()` (zero downside for this use case)
-- [ ] `hls_manager.py:237`: **HLS segment durations are hardcoded** — every `#EXTINF` uses `Config.HLS_SEGMENT_DURATION` (4s), but actual FFmpeg segments vary (3.8s-4.2s) depending on keyframe placement; causes seek inaccuracies and timeline drift on long videos
+- [x] `hls_manager.py:237`: **HLS segment durations are hardcoded** — every `#EXTINF` uses `Config.HLS_SEGMENT_DURATION` (4s), but actual FFmpeg segments vary (3.8s-4.2s) depending on keyframe placement; causes seek inaccuracies and timeline drift on long videos
   - Fix: parse FFmpeg-generated `.m3u8` to extract actual per-segment durations; store in DB alongside `segment_key`
-- [ ] No disk space checks before upload assembly or FFmpeg processing — processing a 50GB video can require 2-3x disk space for ABR tiers; running out mid-process leaves corrupted partial files
+- [x] No disk space checks before upload assembly or FFmpeg processing — processing a 50GB video can require 2-3x disk space for ABR tiers; running out mid-process leaves corrupted partial files
   - Fix: check available disk space before starting upload assembly and before each FFmpeg invocation; fail fast with clear error
-- [ ] `app.py:937`: **Cloudflared tunnel thread blocks forever** — `proc.wait()` blocks the tunnel thread; if cloudflared exits (network issues), there's no restart logic
+- [x] `app.py:937`: **Cloudflared tunnel thread blocks forever** — `proc.wait()` blocks the tunnel thread; if cloudflared exits (network issues), there's no restart logic
   - Fix: add a restart loop with exponential backoff
 
 ## P3 — Data Model
 
 - [ ] `database.py:192`: **Original stream indices lost for subtitles** — when non-text subtitles are skipped, the `track_index` in DB uses processing-result enumerate index, not the original FFprobe stream index; makes debugging difficult
   - Fix: store original stream index as a separate column in `tracks` table
-- [ ] No per-segment duration stored in DB — prevents accurate HLS playlist generation and makes it impossible to generate correct `#EXTINF` values after the FFmpeg output is cleaned up
+- [x] No per-segment duration stored in DB — prevents accurate HLS playlist generation and makes it impossible to generate correct `#EXTINF` values after the FFmpeg output is cleaned up
   - Fix: add `duration` column to `segments` table; populate from FFmpeg output `.m3u8`
 
 ## P4 — Security Hardening
