@@ -7,6 +7,42 @@ load_dotenv()
 
 _logger = logging.getLogger(__name__)
 
+_BITRATE_RE = re.compile(r"^\d+(\.\d+)?[kKmMgG]$")
+
+
+def _parse_tiers(raw, as_dict=False):
+    """Parse a comma-separated height:bitrate string into ABR tier structures.
+
+    Returns list[dict] when as_dict=False, dict[int, str] when as_dict=True.
+    Returns None on empty/missing input so callers can fall back to defaults.
+    Raises ValueError on malformed input.
+    """
+    if not raw or not raw.strip():
+        return None
+    result_list = []
+    result_dict = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid tier entry {entry!r}: expected height:bitrate")
+        height_str, bitrate = parts[0].strip(), parts[1].strip()
+        try:
+            height = int(height_str)
+        except ValueError:
+            raise ValueError(f"Invalid tier height {height_str!r}: expected positive integer")
+        if height <= 0:
+            raise ValueError(f"Invalid tier height {height}: must be positive")
+        if not _BITRATE_RE.match(bitrate):
+            raise ValueError(f"Invalid bitrate {bitrate!r}: expected format like 10M, 5M, 1200k")
+        result_list.append({"height": height, "bitrate": bitrate})
+        result_dict[height] = bitrate
+    if not result_list:
+        return None
+    return result_dict if as_dict else result_list
+
 
 def _int_env(name, default):
     """Read an integer from an environment variable with a safe fallback."""
@@ -34,12 +70,17 @@ class Config:
     TELEGRAM_MAX_FILE_SIZE = _int_env("TELEGRAM_MAX_FILE_SIZE", 20971520)
     MAX_UPLOAD_SIZE = _int_env("MAX_UPLOAD_SIZE", 107374182400)  # 100GB
     UPLOAD_CHUNK_SIZE = _int_env("UPLOAD_CHUNK_SIZE", 10485760)  # 10MB per chunk
-    SEGMENT_MAX_SIZE = _int_env("SEGMENT_MAX_SIZE", 18874368)  # 18MB — safe margin under 20MB Telegram limit
+    SEGMENT_MAX_SIZE = _int_env("SEGMENT_MAX_SIZE", 15728640)  # 15MB — extra headroom; oversized segments are re-split
     SEGMENT_CACHE_SIZE_MB = _int_env("SEGMENT_CACHE_SIZE_MB", 200)
+    SEGMENT_PREFETCH_COUNT = _int_env("SEGMENT_PREFETCH_COUNT", 2)
+    SEGMENT_PREFETCH_MIN_FREE_BYTES = _int_env("SEGMENT_PREFETCH_MIN_FREE_BYTES", 33554432)
 
     # Hardware acceleration
     ENABLE_HW_ACCEL = os.getenv("ENABLE_HARDWARE_ACCELERATION", "true").lower() == "true"
     PREFERRED_ENCODER = os.getenv("PREFERRED_ENCODER", "vaapi")
+    # VAAPI device path. Leave empty to auto-detect (picks highest renderD* device,
+    # which is typically the discrete GPU on multi-GPU systems).
+    VAAPI_DEVICE = os.getenv("VAAPI_DEVICE", "").strip()
     VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "4M")
     AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "128k")
 
@@ -48,7 +89,7 @@ class Config:
 
     # Adaptive Bitrate Streaming
     ABR_ENABLED = os.getenv("ABR_ENABLED", "true").lower() == "true"
-    ABR_TIERS = [
+    ABR_TIERS = _parse_tiers(os.getenv("ABR_TIERS")) or [
         {"height": 1080, "bitrate": "10M"},
         {"height": 720, "bitrate": "5M"},
         {"height": 480, "bitrate": "2M"},
@@ -56,13 +97,13 @@ class Config:
     ]
 
     # Tier 0 CBR bitrates by source resolution (near-lossless quality)
-    TIER0_BITRATES = {
+    TIER0_BITRATES = _parse_tiers(os.getenv("TIER0_BITRATES"), as_dict=True) or {
         2160: "60M",   # 4K
         1080: "30M",   # 1080p
         720: "15M",    # 720p
         480: "5M",     # 480p
     }
-    TIER0_BITRATE_DEFAULT = "15M"  # fallback for unlisted resolutions
+    TIER0_BITRATE_DEFAULT = os.getenv("TIER0_BITRATE_DEFAULT", "15M").strip()
 
     # Directories
     UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")

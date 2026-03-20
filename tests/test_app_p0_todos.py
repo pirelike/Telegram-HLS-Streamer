@@ -21,6 +21,7 @@ sys.modules.setdefault("telegram", telegram_mod)
 sys.modules.setdefault("telegram.error", telegram_error_mod)
 
 import app as app_module
+import database
 
 
 def _reset_state():
@@ -30,12 +31,17 @@ def _reset_state():
     app_module._upload_locks.clear()
     app_module._rate_limit_hits.clear()
     app_module._pending_uploads_per_ip.clear()
+    app_module._segment_prefetch_inflight.clear()
+    app_module._segment_cache.clear()
 
 
 class TestP0TodoFixes(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         _reset_state()
+        database._close_all_connections()
+        database._local = threading.local()
+        database.init_db()
         self.upload_dir_patch = patch.object(app_module.Config, "UPLOAD_DIR", self.temp.name)
         self.chunk_size_patch = patch.object(app_module.Config, "UPLOAD_CHUNK_SIZE", 4)
         self.max_upload_size_patch = patch.object(app_module.Config, "MAX_UPLOAD_SIZE", 1024 * 1024)
@@ -45,6 +51,7 @@ class TestP0TodoFixes(unittest.TestCase):
         self.client = app_module.app.test_client()
 
     def tearDown(self):
+        database._close_all_connections()
         self.upload_dir_patch.stop()
         self.chunk_size_patch.stop()
         self.max_upload_size_patch.stop()
@@ -163,6 +170,24 @@ class TestP0TodoFixes(unittest.TestCase):
             ):
                 url = app_module._get_base_url()
         self.assertTrue(url.startswith("https://"))
+
+    def test_health_request_teardown_closes_db_connection(self):
+        database.close_conn()
+        self.assertEqual(database.open_connection_count(), 0)
+
+        response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(database.open_connection_count(), 0)
+
+    def test_repeated_health_requests_do_not_accumulate_db_connections(self):
+        database.close_conn()
+        self.assertEqual(database.open_connection_count(), 0)
+
+        for _ in range(5):
+            response = self.client.get("/health")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(database.open_connection_count(), 0)
 
     # ─── _is_upload_authorized ───
 
@@ -601,17 +626,31 @@ class TestP0TodoFixes(unittest.TestCase):
 
     def test_serve_segment_ts_content_type(self):
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
-             patch.object(app_module._segment_cache, "get", return_value=b"fakedata"):
+             patch.object(app_module._segment_cache, "get", return_value=b"fakedata"), \
+             patch("app._schedule_segment_prefetch") as schedule_prefetch:
             resp = self.client.get("/segment/job1/video/seg.ts")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("video/mp2t", resp.content_type)
+        schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
 
     def test_serve_segment_vtt_content_type(self):
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
-             patch.object(app_module._segment_cache, "get", return_value=b"WEBVTT"):
+             patch.object(app_module._segment_cache, "get", return_value=b"WEBVTT"), \
+             patch("app._schedule_segment_prefetch") as schedule_prefetch:
             resp = self.client.get("/segment/job1/sub_0/subs.vtt")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("vtt", resp.content_type)
+        schedule_prefetch.assert_called_once_with("job1", "sub_0/subs.vtt")
+
+    def test_serve_segment_schedules_prefetch_after_download(self):
+        with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch("app._run_async", return_value=b"fakedata"), \
+             patch.object(app_module._segment_cache, "put"), \
+             patch("app._schedule_segment_prefetch") as schedule_prefetch:
+            resp = self.client.get("/segment/job1/video/seg.ts")
+        self.assertEqual(resp.status_code, 200)
+        schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
 
     def test_serve_segment_download_failure(self):
         def _close_coro(coro):
@@ -622,6 +661,64 @@ class TestP0TodoFixes(unittest.TestCase):
              patch("app._run_async", side_effect=_close_coro):
             resp = self.client.get("/segment/job1/video/seg.ts")
         self.assertEqual(resp.status_code, 500)
+
+    def test_schedule_segment_prefetch_skips_when_disabled(self):
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 0), \
+             patch("app.db.get_segments_for_prefix") as get_segments:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        get_segments.assert_not_called()
+
+    def test_schedule_segment_prefetch_schedules_next_uncached_segment(self):
+        segments = [
+            {"segment_key": "video/video_0001.ts", "duration": 4},
+            {"segment_key": "video/video_0002.ts", "duration": 4},
+            {"segment_key": "video/video_0003.ts", "duration": 4},
+        ]
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "get", side_effect=[None, None]), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        self.assertEqual(call_soon.call_count, 2)
+        scheduled_args = [call.args[2] for call in call_soon.call_args_list]
+        self.assertEqual(scheduled_args, ["video/video_0002.ts", "video/video_0003.ts"])
+
+    def test_schedule_segment_prefetch_skips_already_cached_next_segment(self):
+        segments = [
+            {"segment_key": "video/video_0001.ts", "duration": 4},
+            {"segment_key": "video/video_0002.ts", "duration": 4},
+        ]
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 1), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "get", return_value=b"cached"), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        call_soon.assert_not_called()
+
+    def test_schedule_segment_prefetch_dedupes_inflight_segment(self):
+        segments = [
+            {"segment_key": "video/video_0001.ts", "duration": 4},
+            {"segment_key": "video/video_0002.ts", "duration": 4},
+        ]
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 1), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        call_soon.assert_called_once()
+
+    def test_prefetch_segment_failure_does_not_leave_inflight_marker(self):
+        cache_key = "job1/video/video_0002.ts"
+        app_module._segment_prefetch_inflight.add(cache_key)
+        with patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch("app._download_segment_bytes", side_effect=RuntimeError("boom")):
+            app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
+        self.assertNotIn(cache_key, app_module._segment_prefetch_inflight)
 
     # ─── CORS headers ───
 

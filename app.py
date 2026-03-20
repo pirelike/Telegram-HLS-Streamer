@@ -144,6 +144,8 @@ _async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
 _async_loop_thread = None
 _aiohttp_session = None
 _loop_ready = threading.Event()
+_segment_prefetch_inflight = set()
+_segment_prefetch_lock = Lock()
 
 
 def _run_async(coro, timeout=30):
@@ -360,6 +362,7 @@ def _start_queue_workers():
                         _queue_order.remove(job_id)
                 _process_job(job_id, file_path)
             finally:
+                db.close_conn()
                 _job_queue.task_done()
 
     n_workers = max(1, Config.MAX_CONCURRENT_JOBS)
@@ -392,6 +395,8 @@ def _start_retention_cleanup():
                     logger.info("Retention: purged %d old job(s)", count)
             except Exception:
                 logger.exception("Retention cleanup failed")
+            finally:
+                db.close_conn()
 
     Thread(target=cleanup_loop, daemon=True).start()
     logger.info(
@@ -1040,13 +1045,137 @@ class _SegmentCache:
             self._data[key] = data
             self._current_bytes += size
 
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+            self._current_bytes = 0
+
     @property
     def current_bytes(self):
         with self._lock:
             return self._current_bytes
 
+    @property
+    def max_bytes(self):
+        return self._max_bytes
+
+    @property
+    def free_bytes(self):
+        with self._lock:
+            return max(0, self._max_bytes - self._current_bytes)
+
 
 _segment_cache = _SegmentCache(max_bytes=Config.SEGMENT_CACHE_SIZE_MB * 1024 * 1024)
+
+
+def _get_segment_prefix(segment_key):
+    """Extract the HLS stream prefix from a segment key."""
+    if "/" not in segment_key:
+        return None
+    return segment_key.split("/", 1)[0]
+
+
+def _claim_segment_prefetch(cache_key):
+    """Mark a cache key as being prefetched. Returns False if already in-flight."""
+    with _segment_prefetch_lock:
+        if cache_key in _segment_prefetch_inflight:
+            return False
+        _segment_prefetch_inflight.add(cache_key)
+        return True
+
+
+def _release_segment_prefetch(cache_key):
+    """Remove a cache key from the in-flight prefetch registry."""
+    with _segment_prefetch_lock:
+        _segment_prefetch_inflight.discard(cache_key)
+
+
+async def _download_segment_bytes(file_id, bot_index, cache_key):
+    """Download a segment from Telegram and return its bytes."""
+    global _aiohttp_session
+
+    if _aiohttp_session is None or _aiohttp_session.closed:
+        logger.warning("aiohttp session closed, recreating")
+        _aiohttp_session = aiohttp.ClientSession()
+
+    url = await _telegram_uploader.get_file_url(file_id, bot_index)
+    chunks = []
+    async with _aiohttp_session.get(url) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"Telegram HTTP {resp.status}")
+        async for chunk in resp.content.iter_chunked(65536):
+            chunks.append(chunk)
+
+    if not chunks:
+        raise RuntimeError(f"Empty Telegram response for {cache_key}")
+
+    return b"".join(chunks)
+
+
+async def _prefetch_segment(job_id, segment_key):
+    """Best-effort background fetch for a future segment."""
+    cache_key = f"{job_id}/{segment_key}"
+    try:
+        if _segment_cache.get(cache_key) is not None:
+            return
+
+        info = get_segment_info(job_id, segment_key)
+        if not info:
+            return
+
+        segment_bytes = await _download_segment_bytes(
+            info["file_id"], info["bot_index"], cache_key,
+        )
+        _segment_cache.put(cache_key, segment_bytes)
+    except Exception as exc:
+        logger.debug("Segment prefetch failed %s: %s", cache_key, exc)
+    finally:
+        _release_segment_prefetch(cache_key)
+
+
+def _start_prefetch_task(job_id, segment_key):
+    """Create an async task for a single segment prefetch on the persistent loop."""
+    asyncio.create_task(_prefetch_segment(job_id, segment_key))
+
+
+def _schedule_segment_prefetch(job_id, segment_key):
+    """Schedule background prefetch for the next sequential segments."""
+    prefetch_count = max(0, Config.SEGMENT_PREFETCH_COUNT)
+    if prefetch_count <= 0:
+        return
+
+    if _segment_cache.max_bytes <= 0:
+        return
+
+    min_free_bytes = max(0, Config.SEGMENT_PREFETCH_MIN_FREE_BYTES)
+    if _segment_cache.free_bytes < min_free_bytes:
+        return
+
+    prefix = _get_segment_prefix(segment_key)
+    if not prefix:
+        return
+
+    segments = db.get_segments_for_prefix(job_id, prefix)
+    if not segments:
+        return
+
+    current_index = None
+    for index, segment in enumerate(segments):
+        if segment["segment_key"] == segment_key:
+            current_index = index
+            break
+
+    if current_index is None:
+        return
+
+    for segment in segments[current_index + 1: current_index + 1 + prefetch_count]:
+        next_segment_key = segment["segment_key"]
+        next_cache_key = f"{job_id}/{next_segment_key}"
+        if _segment_cache.get(next_cache_key) is not None:
+            continue
+        if not _claim_segment_prefetch(next_cache_key):
+            continue
+        _async_loop.call_soon_threadsafe(_start_prefetch_task, job_id, next_segment_key)
 
 
 # ─── Segment Proxy ───
@@ -1078,38 +1207,23 @@ def serve_segment(job_id, segment_key):
     cached = _segment_cache.get(cache_key)
     if cached is not None:
         logger.debug("Segment cache HIT: %s", cache_key)
+        _schedule_segment_prefetch(job_id, segment_key)
         return Response(cached, content_type=content_type, headers=headers)
 
     logger.debug("Segment cache MISS: %s", cache_key)
 
     # Cache miss — stream from Telegram via aiohttp, accumulate, then cache
-    chunks = []
-    error_holder = [None]
-
-    async def _fetch():
-        global _aiohttp_session
-        try:
-            if _aiohttp_session is None or _aiohttp_session.closed:
-                logger.warning("aiohttp session closed, recreating")
-                _aiohttp_session = aiohttp.ClientSession()
-            url = await _telegram_uploader.get_file_url(file_id, bot_index)
-            async with _aiohttp_session.get(url) as resp:
-                if resp.status != 200:
-                    error_holder[0] = f"Telegram HTTP {resp.status}"
-                    return
-                async for chunk in resp.content.iter_chunked(65536):
-                    chunks.append(chunk)
-        except Exception as exc:
-            error_holder[0] = str(exc)
-            logger.warning("Segment download failed %s: %s", cache_key, exc)
-
-    _run_async(_fetch())
-
-    if error_holder[0] or not chunks:
+    try:
+        segment_bytes = _run_async(_download_segment_bytes(file_id, bot_index, cache_key))
+    except Exception as exc:
+        logger.warning("Segment download failed %s: %s", cache_key, exc)
         return jsonify({"error": "Could not download segment from Telegram"}), 500
 
-    segment_bytes = b"".join(chunks)
+    if not segment_bytes:
+        return jsonify({"error": "Could not download segment from Telegram"}), 500
+
     _segment_cache.put(cache_key, segment_bytes)
+    _schedule_segment_prefetch(job_id, segment_key)
 
     return Response(segment_bytes, content_type=content_type, headers=headers)
 
@@ -1128,6 +1242,12 @@ def add_cors(response):
                 "Content-Type, Authorization, X-API-Key, X-Upload-Id, X-Chunk-Index"
             )
     return response
+
+
+@app.teardown_request
+def close_request_db_conn(_exc):
+    """Release per-request SQLite connections so streaming traffic does not accumulate them."""
+    db.close_conn()
 
 
 def _kill_existing_cloudflared(port: int) -> None:
