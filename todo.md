@@ -12,7 +12,7 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 - [x] `app.py`: segment proxy now uses an in-memory LRU cache for Telegram-backed segment reads.
 - [x] `app.py`: async Telegram fetches now use a persistent background event loop instead of creating a loop per request.
 - [x] `app.py`: sequential segment prefetch is implemented with in-flight de-duplication and cache headroom guards.
-- [ ] `app.py:/segment`: cache is process-local only; a multi-process or multi-instance deployment will still re-download hot segments from Telegram on every worker/node.
+- [x] `app.py:/segment`: process-local caching is sufficient for the intended single-process home deployment; shared cache remains deferred unless multi-worker or multi-node deployment becomes a real requirement.
 
 ## P2 — Reliability
 
