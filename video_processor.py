@@ -180,7 +180,7 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
 
     cmd += [
         "-f", "hls",
-        "-hls_time", str(Config.HLS_SEGMENT_DURATION),
+        "-hls_segment_size", str(Config.SEGMENT_MAX_SIZE),
         "-hls_list_size", "0",
         "-hls_segment_filename", segment_pattern,
         "-hls_segment_type", "mpegts",
@@ -294,6 +294,38 @@ def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_prog
     return proc
 
 
+def _parse_segment_durations(playlist_path):
+    """Get actual durations for HLS segments in the same directory as a playlist.
+
+    FFmpeg's m3u8 output is unreliable with -hls_segment_size (writes default
+    -hls_time instead of actual duration), so we probe each .ts file directly.
+
+    Returns dict mapping filename -> duration (float).
+    """
+    segment_dir = os.path.dirname(playlist_path)
+    durations = {}
+    try:
+        ts_files = sorted(f for f in os.listdir(segment_dir) if f.endswith(".ts"))
+    except OSError as e:
+        logger.warning("Failed to list segments in %s: %s", segment_dir, e)
+        return durations
+
+    for filename in ts_files:
+        filepath = os.path.join(segment_dir, filename)
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", filepath],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                durations[filename] = float(result.stdout.strip())
+        except (subprocess.TimeoutExpired, ValueError, OSError) as e:
+            logger.warning("Failed to probe duration for %s: %s", filepath, e)
+
+    return durations
+
+
 class ProcessingResult:
     """Result of processing a single media file."""
 
@@ -303,6 +335,7 @@ class ProcessingResult:
         self.video_playlists = []   # list of (playlist_path, tier_dir, width, height, bitrate)
         self.audio_playlists = []   # list of (playlist_path, audio_dir, language, title, channels)
         self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title)
+        self.segment_durations = {} # maps "video_0/video_0001.ts" -> duration (float)
 
     @property
     def video_playlist(self):
@@ -394,6 +427,8 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         result.video_playlists.append((
             playlist, tier_dir, source_width, source_height, tier0_bitrate,
         ))
+        for filename, dur in _parse_segment_durations(playlist).items():
+            result.segment_durations[f"video_0/{filename}"] = dur
         report("Video (original) encoded")
 
         # Additional ABR tiers — encoded from tier 0 output, not original source
@@ -416,6 +451,8 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             result.video_playlists.append((
                 playlist, tier_dir, target_w, target_h, tier["bitrate"],
             ))
+            for filename, dur in _parse_segment_durations(playlist).items():
+                result.segment_durations[f"video_{ti}/{filename}"] = dur
             report(f"Video ({target_h}p) encoded")
 
     # 2. Audio streams - each track gets its own HLS stream
@@ -429,6 +466,8 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
         result.audio_playlists.append((
             playlist, audio_dir, audio.language, audio.title, audio.channels,
         ))
+        for filename, dur in _parse_segment_durations(playlist).items():
+            result.segment_durations[f"audio_{i}/{filename}"] = dur
         report(f"Audio track {i} ({audio.language}) extracted")
 
     # 3. Subtitle streams - extract text-based subtitles to WebVTT

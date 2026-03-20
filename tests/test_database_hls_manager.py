@@ -45,6 +45,7 @@ class TestDatabaseBase(unittest.TestCase):
             video_playlists=[("video.m3u8", "/tmp/video", 1280, 720, "2500k")],
             audio_playlists=[("a.m3u8", "/tmp/a", "eng", "English", 2)],
             subtitle_files=[("s.vtt", "/tmp/s", "eng", "English")],
+            segment_durations={},
         )
         upload = SimpleNamespace(
             segments={
@@ -148,8 +149,10 @@ class TestDatabaseCRUD(TestDatabaseBase):
         analysis, processing, upload = self._sample_payload()
         database.save_job("job1", analysis, processing, upload)
 
-        keys = database.get_segments_for_prefix("job1", "audio_0")
-        self.assertEqual(keys, ["audio_0/audio_0001.ts"])
+        segments = database.get_segments_for_prefix("job1", "audio_0")
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["segment_key"], "audio_0/audio_0001.ts")
+        self.assertEqual(segments[0]["duration"], 0)
 
     def test_get_segments_for_prefix_empty(self):
         analysis, processing, upload = self._sample_payload()
@@ -256,6 +259,7 @@ class TestDatabaseCRUD(TestDatabaseBase):
             video_playlists=[],
             audio_playlists=[("a.m3u8", "/tmp/a", "eng", "", 2)],
             subtitle_files=[],
+            segment_durations={},
         )
         upload = SimpleNamespace(
             segments={"audio_0/audio_0001.ts": SimpleNamespace(file_id="fA", bot_index=0, file_size=50)}
@@ -389,7 +393,7 @@ class TestHLSManagerWithDB(TestDatabaseBase):
             subtitle_streams=[],
         )
         # No video playlists → no video tracks in DB
-        processing = SimpleNamespace(video_playlists=[], audio_playlists=[], subtitle_files=[])
+        processing = SimpleNamespace(video_playlists=[], audio_playlists=[], subtitle_files=[], segment_durations={})
         upload = SimpleNamespace(segments={
             "video/video_0001.ts": SimpleNamespace(file_id="fL", bot_index=0, file_size=10)
         })
@@ -412,6 +416,7 @@ class TestHLSManagerWithDB(TestDatabaseBase):
             video_playlists=[("v.m3u8", "/tmp/v", 1280, 720, "2M")],
             audio_playlists=[],
             subtitle_files=[],
+            segment_durations={},
         )
         upload = SimpleNamespace(segments={
             "video_0/video_0001.ts": SimpleNamespace(file_id="fV", bot_index=0, file_size=50)
