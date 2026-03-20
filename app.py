@@ -12,6 +12,7 @@ import asyncio
 import atexit
 import base64
 import collections
+import concurrent.futures
 import hashlib
 import hmac
 import logging
@@ -484,19 +485,42 @@ def index():
 def health():
     """Health check endpoint for load balancers and monitoring."""
     db_ok = False
+    bot_results = []
     try:
         db.get_job("__healthcheck__")
         db_ok = True
     except Exception:
         pass
 
-    status = "ok" if db_ok else "degraded"
-    code = 200 if db_ok else 503
+    try:
+        bot_results = _run_async(_telegram_uploader.probe_health(), timeout=10)
+    except concurrent.futures.TimeoutError:
+        bot_results = [{
+            "index": None,
+            "channel_id": None,
+            "ok": False,
+            "error": "timeout",
+        }]
+    except Exception as exc:
+        bot_results = [{
+            "index": None,
+            "channel_id": None,
+            "ok": False,
+            "error": f"probe_error: {exc.__class__.__name__}",
+        }]
+
+    bots_healthy = sum(1 for bot in bot_results if bot.get("ok"))
+    bots_configured = len(_telegram_uploader.bots)
+    bots_ok = bots_configured > 0 and bots_healthy == bots_configured
+    status = "ok" if db_ok and bots_ok else "degraded"
+    code = 200 if status == "ok" else 503
 
     return jsonify({
         "status": status,
-        "bots": len(Config.BOTS),
         "db": db_ok,
+        "bots_configured": bots_configured,
+        "bots_healthy": bots_healthy,
+        "bots": bot_results,
     }), code
 
 

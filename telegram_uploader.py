@@ -68,6 +68,54 @@ class TelegramUploader:
         # where asyncio.Lock() cannot be created outside a running event loop.
         self._bot_locks: list | None = None
 
+    @staticmethod
+    def _format_health_error(exc):
+        """Collapse Telegram probe failures into short, stable monitoring strings."""
+        if isinstance(exc, Forbidden):
+            return "forbidden"
+        if isinstance(exc, RetryAfter):
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is not None:
+                return f"rate_limited:{retry_after}"
+            return "rate_limited"
+        if isinstance(exc, TimedOut):
+            return "timeout"
+        if isinstance(exc, NetworkError):
+            return "network_error"
+        message = str(exc).strip()
+        if not message:
+            return exc.__class__.__name__.lower()
+        return f"{exc.__class__.__name__.lower()}: {message[:120]}"
+
+    async def probe_health(self):
+        """Verify that every configured bot can access its configured channel."""
+        async def probe_bot(bot_entry):
+            try:
+                await bot_entry["bot"].get_chat(bot_entry["channel_id"])
+                return {
+                    "index": bot_entry["index"],
+                    "channel_id": bot_entry["channel_id"],
+                    "ok": True,
+                    "error": None,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "Health probe failed for bot %d channel %s: %s",
+                    bot_entry["index"], bot_entry["channel_id"], exc,
+                )
+                return {
+                    "index": bot_entry["index"],
+                    "channel_id": bot_entry["channel_id"],
+                    "ok": False,
+                    "error": self._format_health_error(exc),
+                }
+
+        if not self.bots:
+            return []
+
+        results = await asyncio.gather(*(probe_bot(bot_entry) for bot_entry in self.bots))
+        return sorted(results, key=lambda result: result["index"])
+
     def _next_bot(self):
         """Round-robin bot selection (counter is atomic enough for asyncio single-thread,
         but we use modular arithmetic to stay safe even with concurrent coroutines)."""

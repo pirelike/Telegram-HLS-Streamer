@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 # Provide a lightweight telegram stub so tests don't depend on exact library versions.
 telegram_mod = types.ModuleType("telegram")
 telegram_error_mod = types.ModuleType("telegram.error")
+telegram_request_mod = types.ModuleType("telegram.request")
 
 
 class StubRetryAfter(Exception):
@@ -34,6 +35,7 @@ class StubForbidden(Exception):
 
 
 telegram_mod.Bot = Mock
+telegram_request_mod.HTTPXRequest = Mock
 telegram_error_mod.RetryAfter = StubRetryAfter
 telegram_error_mod.NetworkError = StubNetworkError
 telegram_error_mod.TimedOut = StubTimedOut
@@ -41,6 +43,7 @@ telegram_error_mod.BadRequest = StubBadRequest
 telegram_error_mod.Forbidden = StubForbidden
 sys.modules.setdefault("telegram", telegram_mod)
 sys.modules.setdefault("telegram.error", telegram_error_mod)
+sys.modules.setdefault("telegram.request", telegram_request_mod)
 
 import telegram_uploader as tu
 
@@ -104,6 +107,34 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.uploader.bots = self.uploader.bots[:1]
         self.assertEqual(self.uploader._next_bot()["index"], 0)
         self.assertEqual(self.uploader._next_bot()["index"], 0)
+
+    async def test_probe_health_all_bots_healthy(self):
+        self.bot_instances[0].get_chat = AsyncMock(return_value=Mock())
+        self.bot_instances[1].get_chat = AsyncMock(return_value=Mock())
+
+        result = await self.uploader.probe_health()
+
+        self.assertEqual([bot["ok"] for bot in result], [True, True])
+        self.assertEqual([bot["index"] for bot in result], [0, 1])
+
+    async def test_probe_health_mixed_results(self):
+        self.bot_instances[0].get_chat = AsyncMock(return_value=Mock())
+        self.bot_instances[1].get_chat = AsyncMock(side_effect=tu.Forbidden("blocked"))
+
+        result = await self.uploader.probe_health()
+
+        self.assertTrue(result[0]["ok"])
+        self.assertFalse(result[1]["ok"])
+        self.assertEqual(result[1]["error"], "forbidden")
+
+    async def test_probe_health_generic_error_uses_stable_string(self):
+        self.bot_instances[0].get_chat = AsyncMock(side_effect=RuntimeError("bad token"))
+        self.bot_instances[1].get_chat = AsyncMock(return_value=Mock())
+
+        result = await self.uploader.probe_health()
+
+        self.assertFalse(result[0]["ok"])
+        self.assertIn("runtimeerror", result[0]["error"])
 
     # ─── _upload_file success ───
 

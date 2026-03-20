@@ -6,12 +6,26 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 # Provide a lightweight telegram stub so importing app works in test envs.
 telegram_mod = types.ModuleType("telegram")
 telegram_error_mod = types.ModuleType("telegram.error")
-telegram_mod.Bot = object
+telegram_request_mod = types.ModuleType("telegram.request")
+
+
+class StubBot:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+class StubHTTPXRequest:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+telegram_mod.Bot = StubBot
+telegram_request_mod.HTTPXRequest = StubHTTPXRequest
 telegram_error_mod.RetryAfter = Exception
 telegram_error_mod.NetworkError = Exception
 telegram_error_mod.TimedOut = Exception
@@ -19,6 +33,7 @@ telegram_error_mod.BadRequest = Exception
 telegram_error_mod.Forbidden = Exception
 sys.modules.setdefault("telegram", telegram_mod)
 sys.modules.setdefault("telegram.error", telegram_error_mod)
+sys.modules.setdefault("telegram.request", telegram_request_mod)
 
 import app as app_module
 import database
@@ -904,21 +919,83 @@ class TestHealthEndpoint(unittest.TestCase):
         self.client = app_module.app.test_client()
 
     def test_health_ok(self):
-        with patch("app.db.get_job", return_value=None):
+        healthy_bots = [
+            {"index": 0, "channel_id": -1001, "ok": True, "error": None},
+            {"index": 1, "channel_id": -1002, "ok": True, "error": None},
+        ]
+        with patch("app.db.get_job", return_value=None), \
+             patch.object(app_module._telegram_uploader, "bots", [{}, {}]), \
+             patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=healthy_bots)):
             resp = self.client.get("/health")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertEqual(data["status"], "ok")
         self.assertTrue(data["db"])
-        self.assertIn("bots", data)
+        self.assertEqual(data["bots_configured"], 2)
+        self.assertEqual(data["bots_healthy"], 2)
+        self.assertEqual(data["bots"], healthy_bots)
 
     def test_health_db_failure(self):
-        with patch("app.db.get_job", side_effect=Exception("db broken")):
+        healthy_bots = [{"index": 0, "channel_id": -1001, "ok": True, "error": None}]
+        with patch("app.db.get_job", side_effect=Exception("db broken")), \
+             patch.object(app_module._telegram_uploader, "bots", [{}]), \
+             patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=healthy_bots)):
             resp = self.client.get("/health")
         self.assertEqual(resp.status_code, 503)
         data = resp.get_json()
         self.assertEqual(data["status"], "degraded")
         self.assertFalse(data["db"])
+
+    def test_health_degraded_when_any_bot_unhealthy(self):
+        bot_results = [
+            {"index": 0, "channel_id": -1001, "ok": True, "error": None},
+            {"index": 1, "channel_id": -1002, "ok": False, "error": "forbidden"},
+        ]
+        with patch("app.db.get_job", return_value=None), \
+             patch.object(app_module._telegram_uploader, "bots", [{}, {}]), \
+             patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=bot_results)):
+            resp = self.client.get("/health")
+
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "degraded")
+        self.assertEqual(data["bots_healthy"], 1)
+        self.assertEqual(data["bots"], bot_results)
+
+    def test_health_degraded_when_no_bots_configured(self):
+        with patch("app.db.get_job", return_value=None), \
+             patch.object(app_module._telegram_uploader, "bots", []), \
+             patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=[])):
+            resp = self.client.get("/health")
+
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "degraded")
+        self.assertEqual(data["bots_configured"], 0)
+        self.assertEqual(data["bots_healthy"], 0)
+
+    def test_health_degraded_when_probe_times_out(self):
+        with patch("app.db.get_job", return_value=None), \
+             patch.object(app_module._telegram_uploader, "bots", [{}]), \
+             patch("app._run_async", side_effect=app_module.concurrent.futures.TimeoutError):
+            resp = self.client.get("/health")
+
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "degraded")
+        self.assertEqual(data["bots_healthy"], 0)
+        self.assertEqual(data["bots"][0]["error"], "timeout")
+
+    def test_health_degraded_when_probe_raises(self):
+        with patch("app.db.get_job", return_value=None), \
+             patch.object(app_module._telegram_uploader, "bots", [{}]), \
+             patch("app._run_async", side_effect=RuntimeError("boom")):
+            resp = self.client.get("/health")
+
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "degraded")
+        self.assertEqual(data["bots"][0]["error"], "probe_error: RuntimeError")
 
 
 if __name__ == "__main__":
