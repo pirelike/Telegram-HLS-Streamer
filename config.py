@@ -79,10 +79,10 @@ class Config:
     HOST = os.getenv("LOCAL_HOST", "0.0.0.0")
     PORT = _int_env("LOCAL_PORT", 5050)
     FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
-    BEHIND_PROXY = os.getenv("BEHIND_PROXY", "true").lower() == "true"
+    BEHIND_PROXY = os.getenv("BEHIND_PROXY", "false").lower() == "true"
 
     # Cloudflare tunnel
-    CLOUDFLARED_ENABLED = os.getenv("CLOUDFLARED_ENABLED", "true").lower() == "true"
+    CLOUDFLARED_ENABLED = os.getenv("CLOUDFLARED_ENABLED", "false").lower() == "true"
 
     # File handling
     TELEGRAM_MAX_FILE_SIZE = _int_env("TELEGRAM_MAX_FILE_SIZE", 20971520)

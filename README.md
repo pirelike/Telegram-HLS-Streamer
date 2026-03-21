@@ -131,11 +131,11 @@ Notes:
 LOCAL_HOST=0.0.0.0
 LOCAL_PORT=5050
 FORCE_HTTPS=false
-BEHIND_PROXY=true
+BEHIND_PROXY=false
 CORS_ALLOWED_ORIGINS=
 
 # Cloudflare tunnel
-CLOUDFLARED_ENABLED=true
+CLOUDFLARED_ENABLED=false
 
 # File handling
 TELEGRAM_MAX_FILE_SIZE=20971520
@@ -395,7 +395,7 @@ CORS is applied to `/api`, `/hls`, and `/segment` routes. Set `CORS_ALLOWED_ORIG
 ### Reverse proxy
 
 If running behind Nginx/Caddy/Traefik:
-- keep `BEHIND_PROXY=true`
+- set `BEHIND_PROXY=true`
 - use `FORCE_HTTPS=true` if TLS is terminated at proxy and you need HTTPS playlist URLs in responses
 
 ### Playback cache behavior

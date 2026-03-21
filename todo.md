@@ -24,8 +24,8 @@ Policy: application-level authentication is intentionally out of scope and shoul
 
 ## P4 — Security Hardening
 
-- [ ] `config.py:BEHIND_PROXY`: this defaults to `true`, so direct deployments trust spoofed `X-Forwarded-For` / `X-Forwarded-Proto` headers and weaken rate limiting, per-IP pending-upload caps, and generated base URLs unless the app is actually behind a trusted proxy.
-- [ ] `config.py:CLOUDFLARED_ENABLED` + `app.py:__main__`: public quick tunnels are enabled by default and start automatically whenever `cloudflared` is installed, which can expose the service unexpectedly.
+- [x] `config.py:BEHIND_PROXY`: this defaults to `true`, so direct deployments trust spoofed `X-Forwarded-For` / `X-Forwarded-Proto` headers and weaken rate limiting, per-IP pending-upload caps, and generated base URLs unless the app is actually behind a trusted proxy.
+- [x] `config.py:CLOUDFLARED_ENABLED` + `app.py:__main__`: public quick tunnels are enabled by default and start automatically whenever `cloudflared` is installed, which can expose the service unexpectedly.
 
 ## P5 — Operational
 
