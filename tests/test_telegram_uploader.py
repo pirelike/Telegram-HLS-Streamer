@@ -46,6 +46,7 @@ sys.modules.setdefault("telegram.error", telegram_error_mod)
 sys.modules.setdefault("telegram.request", telegram_request_mod)
 
 import telegram_uploader as tu
+from metrics import metrics
 
 
 class FakeRetryAfter(Exception):
@@ -70,6 +71,7 @@ class TestUploadedSegmentAndUploadResult(unittest.IsolatedAsyncioTestCase):
 
 class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        metrics.reset()
         self.bot_cfg_patch = patch.object(tu.Config, "BOTS", [
             {"token": "t1", "channel_id": -1001},
             {"token": "t2", "channel_id": -1002},
@@ -116,6 +118,8 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([bot["ok"] for bot in result], [True, True])
         self.assertEqual([bot["index"] for bot in result], [0, 1])
+        self.assertEqual(metrics.get_timing("telegram.probe_health")["calls"], 2)
+        self.assertEqual(metrics.get_timing("telegram.probe_health")["errors"], 0)
 
     async def test_probe_health_mixed_results(self):
         self.bot_instances[0].get_chat = AsyncMock(return_value=Mock())
@@ -126,6 +130,9 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result[0]["ok"])
         self.assertFalse(result[1]["ok"])
         self.assertEqual(result[1]["error"], "forbidden")
+        self.assertEqual(metrics.get_timing("telegram.probe_health")["calls"], 2)
+        self.assertEqual(metrics.get_timing("telegram.probe_health")["errors"], 1)
+        self.assertEqual(metrics.get_timing("telegram.probe_health")["error_counts"]["stubforbidden"], 1)
 
     async def test_probe_health_generic_error_uses_stable_string(self):
         self.bot_instances[0].get_chat = AsyncMock(side_effect=RuntimeError("bad token"))
@@ -150,6 +157,8 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.file_id, "file123")
             self.assertEqual(result.bot_index, 0)
             self.assertEqual(result.file_size, 3)
+            self.assertEqual(metrics.get_timing("telegram.send_document")["calls"], 1)
+            self.assertEqual(metrics.get_timing("telegram.send_document")["errors"], 0)
         finally:
             os.unlink(path)
 
@@ -223,6 +232,10 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
                 self.bot_instances[0].send_document = AsyncMock(side_effect=FakeRetryAfter(0))
                 with self.assertRaises(RuntimeError):
                     await self.uploader._upload_file(path, self.uploader.bots[0], retries=1)
+                timing = metrics.get_timing("telegram.send_document")
+                self.assertEqual(timing["calls"], 1)
+                self.assertEqual(timing["errors"], 1)
+                self.assertEqual(timing["error_counts"]["fakeretryafter"], 1)
         finally:
             os.unlink(path)
 
@@ -377,6 +390,8 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.bot_instances[0].get_file = AsyncMock(return_value=fake_file)
         url = await self.uploader.get_file_url("A" * 50, 0)
         self.assertEqual(url, "http://file")
+        self.assertEqual(metrics.get_timing("telegram.get_file_url")["calls"], 1)
+        self.assertEqual(metrics.get_timing("telegram.get_file_url")["errors"], 0)
 
     async def test_get_file_bytes(self):
         fake_file = Mock(file_path="http://file")
@@ -388,6 +403,15 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
     async def test_get_file_url_out_of_range_raises(self):
         with self.assertRaisesRegex(RuntimeError, "out of range"):
             await self.uploader.get_file_url("A" * 50, 99)
+
+    async def test_get_file_url_records_error_metrics(self):
+        self.bot_instances[0].get_file = AsyncMock(side_effect=RuntimeError("boom"))
+        with self.assertRaises(RuntimeError):
+            await self.uploader.get_file_url("A" * 50, 0)
+        timing = metrics.get_timing("telegram.get_file_url")
+        self.assertEqual(timing["calls"], 1)
+        self.assertEqual(timing["errors"], 1)
+        self.assertEqual(timing["error_counts"]["runtimeerror"], 1)
 
     async def test_get_file_bytes_negative_index_raises(self):
         with self.assertRaisesRegex(RuntimeError, "out of range"):

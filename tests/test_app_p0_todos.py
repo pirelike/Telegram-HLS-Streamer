@@ -55,6 +55,7 @@ sys.modules.setdefault("dotenv", dotenv_mod)
 
 import app as app_module
 import database
+from metrics import metrics
 
 
 def _reset_state():
@@ -67,6 +68,7 @@ def _reset_state():
     app_module._segment_downloads.clear()
     app_module._segment_cache.clear()
     app_module._scheduled_segment_prefetches.clear()
+    metrics.reset()
 
 
 class _FakeContent:
@@ -252,6 +254,60 @@ class TestP0TodoFixes(unittest.TestCase):
             response = self.client.get("/health")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(database.open_connection_count(), 0)
+
+    def test_metrics_endpoint_reports_job_queue_cache_and_telegram_metrics(self):
+        now = time.time()
+        app_module._active_jobs["queued-job"] = {
+            "status": "queued",
+            "started_ts": now - 5,
+        }
+        app_module._active_jobs["processing-job"] = {
+            "status": "processing",
+            "started_ts": now - 2,
+        }
+        app_module._active_jobs["done-job"] = {
+            "status": "complete",
+            "started_ts": now - 10,
+            "finished_ts": now - 1,
+        }
+        app_module._queue_order[:] = ["queued-job"]
+        app_module._pending_uploads["u1"] = {"filename": "f"}
+        app_module._segment_downloads["job1/video/seg.ts"] = object()
+        app_module._scheduled_segment_prefetches.add("job1/video/seg2.ts")
+        app_module._segment_cache.put("job1/video/seg.ts", b"abc")
+        metrics.increment("segment_cache.requests", 4)
+        metrics.increment("segment_cache.hits", 3)
+        metrics.increment("segment_cache.misses", 1)
+        metrics.increment("telegram.download.calls", 2)
+        metrics.increment("telegram.download.errors", 1)
+        metrics.increment("telegram.download.http_status.200", 1)
+        metrics.increment("telegram.download.http_status.non_200", 1)
+        metrics.record_timing("telegram.download_file", 12.5)
+        metrics.record_timing("telegram.download_file", 20.0, error="runtimeerror")
+        metrics.record_timing("telegram.send_document", 30.0)
+
+        resp = self.client.get("/api/metrics")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["jobs"]["active_total"], 3)
+        self.assertEqual(data["jobs"]["queued"], 1)
+        self.assertEqual(data["jobs"]["processing"], 1)
+        self.assertEqual(data["jobs"]["complete_recent"], 1)
+        self.assertEqual(data["queue"]["depth"], 1)
+        self.assertGreaterEqual(data["queue"]["oldest_wait_seconds"], 0)
+        self.assertEqual(data["uploads"]["pending_uploads_total"], 1)
+        self.assertEqual(data["segment_cache"]["hits"], 3)
+        self.assertEqual(data["segment_cache"]["misses"], 1)
+        self.assertEqual(data["segment_cache"]["requests"], 4)
+        self.assertEqual(data["segment_cache"]["hit_rate"], 0.75)
+        self.assertEqual(data["segment_cache"]["inflight_downloads"], 1)
+        self.assertEqual(data["segment_cache"]["scheduled_prefetches"], 1)
+        self.assertEqual(data["telegram_uploads"]["send_document"]["calls"], 1)
+        self.assertEqual(data["telegram_downloads"]["file_fetch_calls"], 2)
+        self.assertEqual(data["telegram_downloads"]["file_fetch_errors"], 1)
+        self.assertEqual(data["telegram_downloads"]["http_status_counts"]["200"], 1)
+        self.assertEqual(data["telegram_downloads"]["http_status_counts"]["non_200"], 1)
 
     # ─── _is_upload_authorized ───
 
@@ -696,6 +752,9 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("video/mp2t", resp.content_type)
         schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
+        self.assertEqual(metrics.get_counter("segment_cache.requests"), 1)
+        self.assertEqual(metrics.get_counter("segment_cache.hits"), 1)
+        self.assertEqual(metrics.get_counter("segment_cache.misses"), 0)
 
     def test_serve_segment_vtt_content_type(self):
         with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
@@ -719,6 +778,9 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data, b"fakedata")
         schedule_prefetch.assert_called_once_with("job1", "video/seg.ts")
+        self.assertEqual(metrics.get_counter("segment_cache.requests"), 1)
+        self.assertEqual(metrics.get_counter("segment_cache.hits"), 0)
+        self.assertEqual(metrics.get_counter("segment_cache.misses"), 1)
 
     def test_serve_segment_download_failure(self):
         state = app_module._SegmentDownloadState("job1/video/seg.ts", enable_stream=True)
@@ -788,6 +850,9 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertIs(app_module._segment_downloads.get(cache_key), None)
         self.assertIs(state.stream_queue.get(), app_module._STREAM_EOF)
         self.assertIsNone(state.temp_path)
+        self.assertEqual(metrics.get_counter("telegram.download.calls"), 1)
+        self.assertEqual(metrics.get_counter("telegram.download.errors"), 0)
+        self.assertEqual(metrics.get_counter("telegram.download.http_status.200"), 1)
 
     def test_download_segment_to_state_failure_cleans_up_registry(self):
         cache_key = "job1/video/seg.ts"
@@ -802,6 +867,9 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertIsInstance(stream_error, app_module._SegmentStreamError)
         self.assertNotIn(cache_key, app_module._segment_downloads)
         self.assertFalse(state.temp_path and os.path.exists(state.temp_path))
+        self.assertEqual(metrics.get_counter("telegram.download.calls"), 1)
+        self.assertEqual(metrics.get_counter("telegram.download.errors"), 1)
+        self.assertEqual(metrics.get_counter("telegram.download.http_status.non_200"), 1)
 
     def test_schedule_segment_prefetch_skips_when_disabled(self):
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 0), \
@@ -814,6 +882,7 @@ class TestP0TodoFixes(unittest.TestCase):
             {"segment_key": "video/video_0001.ts", "duration": 4},
             {"segment_key": "video/video_0002.ts", "duration": 4},
             {"segment_key": "video/video_0003.ts", "duration": 4},
+            {"segment_key": "video/video_0004.ts", "duration": 4},
         ]
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
              patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
@@ -824,6 +893,26 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertEqual(call_soon.call_count, 2)
         scheduled_args = [call.args[2] for call in call_soon.call_args_list]
         self.assertEqual(scheduled_args, ["video/video_0002.ts", "video/video_0003.ts"])
+
+    def test_schedule_segment_prefetch_extends_farther_ahead_to_keep_target_buffer(self):
+        segments = [
+            {"segment_key": "video/video_0001.ts", "duration": 4},
+            {"segment_key": "video/video_0002.ts", "duration": 4},
+            {"segment_key": "video/video_0003.ts", "duration": 4},
+            {"segment_key": "video/video_0004.ts", "duration": 4},
+            {"segment_key": "video/video_0005.ts", "duration": 4},
+        ]
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 3), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "get", side_effect=[b"cached", None, None, None]), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        scheduled_args = [call.args[2] for call in call_soon.call_args_list]
+        self.assertEqual(
+            scheduled_args,
+            ["video/video_0003.ts", "video/video_0004.ts"],
+        )
 
     def test_schedule_segment_prefetch_skips_already_cached_next_segment(self):
         segments = [
@@ -853,6 +942,34 @@ class TestP0TodoFixes(unittest.TestCase):
         call_soon.assert_called_once()
         self.assertEqual(app_module._segment_downloads, {})
         self.assertEqual(app_module._scheduled_segment_prefetches, {"job1/video/video_0002.ts"})
+
+    def test_schedule_segment_prefetch_counts_inflight_and_scheduled_segments_toward_target(self):
+        segments = [
+            {"segment_key": "video/video_0001.ts", "duration": 4},
+            {"segment_key": "video/video_0002.ts", "duration": 4},
+            {"segment_key": "video/video_0003.ts", "duration": 4},
+            {"segment_key": "video/video_0004.ts", "duration": 4},
+            {"segment_key": "video/video_0005.ts", "duration": 4},
+        ]
+        app_module._segment_downloads["job1/video/video_0002.ts"] = app_module._SegmentDownloadState(
+            "job1/video/video_0002.ts"
+        )
+        app_module._scheduled_segment_prefetches.add("job1/video/video_0003.ts")
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 3), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "get", side_effect=[None, None, None]), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        scheduled_args = [call.args[2] for call in call_soon.call_args_list]
+        self.assertEqual(scheduled_args, ["video/video_0004.ts"])
+
+    def test_schedule_segment_prefetch_skips_non_video_segments(self):
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 3), \
+             patch("app.db.get_segments_for_prefix") as get_segments:
+            app_module._schedule_segment_prefetch("job1", "audio_0/audio_0001.ts")
+            app_module._schedule_segment_prefetch("job1", "sub_0/subtitles.vtt")
+        get_segments.assert_not_called()
 
     def test_schedule_segment_prefetch_skips_when_cache_headroom_too_low(self):
         segments = [
