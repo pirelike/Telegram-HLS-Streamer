@@ -16,9 +16,9 @@ Policy: application-level authentication is intentionally out of scope and shoul
 
 ## P2 — Reliability
 
-- [ ] `app.py:/api/upload/init`: pending-upload deduplication is still keyed only by sanitized basename, so different files with the same name can collide and incorrectly share one resumable session.
-- [ ] `app.py:_finalize_source_file`: upload-mode source files are deleted even after failed or cancelled jobs, which removes the only local copy and makes retry/debug impossible without re-uploading.
-- [ ] `stream_analyzer.py:SubtitleStream.is_text_based`: the subtitle codec whitelist excludes common text codecs such as `mov_text`, so valid subtitles from MP4 sources are silently skipped.
+- [x] `app.py:/api/upload/init`: pending-upload deduplication is still keyed only by sanitized basename, so different files with the same name can collide and incorrectly share one resumable session.
+- [x] `app.py:_finalize_source_file`: upload-mode source files are deleted even after failed or cancelled jobs, which removes the only local copy and makes retry/debug impossible without re-uploading.
+- [x] `stream_analyzer.py:SubtitleStream.is_text_based`: the subtitle codec whitelist excludes common text codecs such as `mov_text`, so valid subtitles from MP4 sources are silently skipped.
 
 ## P3 — Data Model
 

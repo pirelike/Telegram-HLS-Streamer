@@ -304,7 +304,7 @@ class TestP0TodoFixes(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 413)
 
-    def test_upload_init_duplicate_filename_rejected(self):
+    def test_upload_init_duplicate_file_rejected(self):
         self._init_upload("dup.bin", total_size=8, total_chunks=2)
         resp = self.client.post(
             "/api/upload/init",
@@ -312,6 +312,14 @@ class TestP0TodoFixes(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409)
         self.assertIn("already in progress", resp.get_json()["error"])
+
+    def test_upload_init_same_name_different_size_allowed(self):
+        self._init_upload("shared.bin", total_size=100, total_chunks=1)
+        resp = self.client.post(
+            "/api/upload/init",
+            json={"filename": "shared.bin", "total_size": 200, "total_chunks": 2},
+        )
+        self.assertEqual(resp.status_code, 200)
 
     def test_upload_init_invalid_total_size_type(self):
         resp = self.client.post(
@@ -505,7 +513,7 @@ class TestP0TodoFixes(unittest.TestCase):
         resp = self.client.post("/api/upload/finalize", json={"upload_id": upload_id})
         self.assertEqual(resp.status_code, 400)
         self.assertIn(upload_id, app_module._pending_uploads)
-        self.assertEqual(app_module._pending_filenames["sample.bin"], upload_id)
+        self.assertEqual(app_module._pending_filenames[("sample.bin", 8)], upload_id)
 
     def test_upload_finalize_disk_rejection_keeps_pending_state(self):
         upload_id = self._init_upload(total_size=4, total_chunks=1)
@@ -518,7 +526,7 @@ class TestP0TodoFixes(unittest.TestCase):
             resp = self.client.post("/api/upload/finalize", json={"upload_id": upload_id})
         self.assertEqual(resp.status_code, 507)
         self.assertIn(upload_id, app_module._pending_uploads)
-        self.assertEqual(app_module._pending_filenames["sample.bin"], upload_id)
+        self.assertEqual(app_module._pending_filenames[("sample.bin", 4)], upload_id)
 
     def test_upload_finalize_unknown_id(self):
         resp = self.client.post("/api/upload/finalize", json={"upload_id": "nope"})
@@ -1245,6 +1253,22 @@ class TestP0TodoFixes(unittest.TestCase):
             app_module._watch_failed_signatures,
         )
 
+    def test_finalize_source_file_deletes_upload_on_success(self):
+        src = os.path.join(self.temp.name, "upload_ok.mp4")
+        with open(src, "wb") as f:
+            f.write(b"data")
+        app_module._active_jobs["job_ok"] = {"status": "complete"}
+        app_module._finalize_source_file("job_ok", src)
+        self.assertFalse(os.path.exists(src))
+
+    def test_finalize_source_file_preserves_upload_on_failure(self):
+        src = os.path.join(self.temp.name, "upload_fail.mp4")
+        with open(src, "wb") as f:
+            f.write(b"data")
+        app_module._active_jobs["job_fail"] = {"status": "error"}
+        app_module._finalize_source_file("job_fail", src)
+        self.assertTrue(os.path.exists(src))
+
     def test_apply_watch_settings_defaults_done_dir_and_persists(self):
         settings_path = os.path.join(self.temp.name, "watch_settings.json")
         watch_root = os.path.join(self.temp.name, "downloads")
@@ -1309,7 +1333,8 @@ class TestP0TodoFixes(unittest.TestCase):
             "total_chunks": 1,
             "expires_at": time.time() + 3600
         }
-        app_module._pending_filenames["test.mp4"] = "up_123"
+        app_module._pending_filenames[("test.mp4", 1000)] = "up_123"
+        app_module._pending_uploads["up_123"]["dedup_key"] = ("test.mp4", 1000)
         
         with patch.object(app_module._telegram_uploader, "bots", []):
             resp = self.client.post("/api/upload/finalize", json={"upload_id": "up_123"})

@@ -91,6 +91,15 @@ class TestSubtitleStream(unittest.TestCase):
     def test_webvtt_is_text_based(self):
         self.assertTrue(sa.SubtitleStream(index=0, codec_name="webvtt").is_text_based)
 
+    def test_mov_text_is_text_based(self):
+        self.assertTrue(sa.SubtitleStream(index=0, codec_name="mov_text").is_text_based)
+
+    def test_text_is_text_based(self):
+        self.assertTrue(sa.SubtitleStream(index=0, codec_name="text").is_text_based)
+
+    def test_ttml_is_text_based(self):
+        self.assertTrue(sa.SubtitleStream(index=0, codec_name="ttml").is_text_based)
+
     def test_pgs_not_text_based(self):
         self.assertFalse(sa.SubtitleStream(index=0, codec_name="hdmv_pgs_subtitle").is_text_based)
 

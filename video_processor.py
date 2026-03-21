@@ -667,7 +667,7 @@ def process(
         report(f"Audio track {i} ({audio.language}) extracted")
 
     # 3. Subtitle streams - extract text-based subtitles to WebVTT
-    #    Skip bitmap formats (dvd_subtitle, hdmv_pgs_subtitle, mov_text, etc.)
+    #    Skip bitmap formats (dvd_subtitle, hdmv_pgs_subtitle, etc.)
     #    which cannot be converted to WebVTT
     for i, sub in enumerate(analysis.subtitle_streams):
         _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")

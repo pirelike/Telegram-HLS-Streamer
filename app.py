@@ -67,7 +67,7 @@ _job_runtime = {}
 
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
-_pending_filenames = {}  # filename -> upload_id (for O(1) duplicate check)
+_pending_filenames = {}  # (filename, total_size) -> upload_id (for O(1) duplicate check)
 _pending_uploads_lock = Lock()  # protects _pending_uploads, _pending_filenames, _upload_locks
 _upload_locks = {}
 _last_pending_cleanup = 0.0
@@ -331,6 +331,8 @@ _segment_downloads = {}
 _segment_download_lock = Lock()
 _scheduled_segment_prefetches = set()
 _segment_prefetch_lock = Lock()
+_last_player_segment = {}          # (job_id, prefix) -> segment_key
+_last_player_segment_lock = Lock()
 
 _STREAM_EOF = object()
 
@@ -450,7 +452,7 @@ def _cleanup_expired_pending_uploads(force=False):
             info = _pending_uploads.pop(upload_id, None)
             if not info:
                 continue
-            _pending_filenames.pop(info.get("filename"), None)
+            _pending_filenames.pop(info.get("dedup_key"), None)
             _upload_locks.pop(upload_id, None)
             ip = info.get("client_ip", "unknown")
             if _pending_uploads_per_ip[ip] > 0:
@@ -797,10 +799,11 @@ def upload_init():
             "error": f"File too large. Max {Config.MAX_UPLOAD_SIZE // (1024**3)}GB"
         }), 413
 
-    # Reject if there's already a pending upload for this filename
+    # Reject if there's already a pending upload for this filename+size
+    dedup_key = (filename, total_size)
     with _pending_uploads_lock:
-        if filename in _pending_filenames:
-            uid = _pending_filenames[filename]
+        if dedup_key in _pending_filenames:
+            uid = _pending_filenames[dedup_key]
             return jsonify({
                 "error": "An upload for this file is already in progress",
                 "upload_id": uid,
@@ -832,8 +835,9 @@ def upload_init():
             "created_ts": time.time(),
             "last_activity_ts": time.time(),
             "client_ip": ip,
+            "dedup_key": dedup_key,
         }
-        _pending_filenames[filename] = upload_id
+        _pending_filenames[dedup_key] = upload_id
         _upload_locks[upload_id] = Lock()
         _pending_uploads_per_ip[ip] += 1
 
@@ -963,7 +967,7 @@ def _remove_pending_upload(upload_id):
         upload = _pending_uploads.pop(upload_id, None)
         if not upload:
             return None
-        _pending_filenames.pop(upload.get("filename"), None)
+        _pending_filenames.pop(upload.get("dedup_key"), None)
         _upload_locks.pop(upload_id, None)
         ip = upload.get("client_ip", "unknown")
         if _pending_uploads_per_ip[ip] > 0:
@@ -1238,11 +1242,17 @@ def _finalize_source_file(job_id, file_path):
         _release_watch_file(source_path, success=success)
         return
 
-    if os.path.exists(file_path):
-        try:
-            os.remove(file_path)
-        except OSError:
-            logger.warning("Could not remove upload file: %s", file_path)
+    status = _active_jobs.get(job_id, {}).get("status")
+    if status == "complete":
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                logger.warning("Could not remove upload file: %s", file_path)
+    else:
+        if os.path.exists(file_path):
+            logger.info("Preserving upload source for job %s (status=%s): %s",
+                        job_id, status, file_path)
 
 
 def _process_job(job_id, file_path):
@@ -1741,7 +1751,7 @@ async def _prefetch_segment_with_info(job_id, segment_key, file_id, bot_index):
         _release_segment_prefetch(cache_key)
 
 
-async def _batch_prefetch(segments):
+async def _batch_prefetch(segments, allow_chain=False):
     """Run multiple segment prefetches concurrently via asyncio.gather."""
     logger.info(
         "Prefetch batch: %d segments — %s",
@@ -1754,13 +1764,26 @@ async def _batch_prefetch(segments):
         return_exceptions=True,
     )
 
+    if allow_chain:
+        seen = set()
+        for s in segments:
+            job_id = s["job_id"]
+            prefix = _get_segment_prefix(s["segment_key"])
+            if not prefix or (job_id, prefix) in seen:
+                continue
+            seen.add((job_id, prefix))
+            with _last_player_segment_lock:
+                player_seg = _last_player_segment.get((job_id, prefix))
+            if player_seg:
+                _schedule_segment_prefetch(job_id, player_seg, _from_chain=True)
 
-def _start_batch_prefetch(segments):
+
+def _start_batch_prefetch(segments, allow_chain=False):
     """Create a single async task that concurrently fetches all given segments."""
-    asyncio.create_task(_batch_prefetch(segments))
+    asyncio.create_task(_batch_prefetch(segments, allow_chain))
 
 
-def _schedule_segment_prefetch(job_id, segment_key):
+def _schedule_segment_prefetch(job_id, segment_key, *, _from_chain=False):
     """Schedule background prefetch for the next sequential segments."""
     prefetch_count = max(0, Config.SEGMENT_PREFETCH_COUNT)
     if prefetch_count <= 0:
@@ -1794,6 +1817,8 @@ def _schedule_segment_prefetch(job_id, segment_key):
 
     to_prefetch = []
     buffered_ahead = 0
+    n_cached = 0
+    n_inflight = 0
     for segment in segments[current_index + 1:]:
         if buffered_ahead >= prefetch_count:
             break
@@ -1802,14 +1827,17 @@ def _schedule_segment_prefetch(job_id, segment_key):
 
         if _segment_cache.has(next_cache_key):
             buffered_ahead += 1
+            n_cached += 1
             continue
 
         if next_cache_key in _segment_downloads or next_cache_key in _scheduled_segment_prefetches:
             buffered_ahead += 1
+            n_inflight += 1
             continue
 
         if not _claim_segment_prefetch(next_cache_key):
             buffered_ahead += 1
+            n_inflight += 1
             continue
 
         buffered_ahead += 1
@@ -1820,8 +1848,14 @@ def _schedule_segment_prefetch(job_id, segment_key):
             "bot_index": segment["bot_index"],
         })
 
+    logger.info(
+        "Prefetch [%s/%s pos=%s]: ahead=%d (cached=%d inflight=%d) new=%d chain=%s",
+        job_id[:8], prefix, segment_key.rsplit("/", 1)[-1],
+        buffered_ahead, n_cached, n_inflight, len(to_prefetch), _from_chain,
+    )
+
     if to_prefetch:
-        _async_loop.call_soon_threadsafe(_start_batch_prefetch, to_prefetch)
+        _async_loop.call_soon_threadsafe(_start_batch_prefetch, to_prefetch, not _from_chain)
 
 
 # ─── Segment Proxy ───
@@ -1835,6 +1869,11 @@ def serve_segment(job_id, segment_key):
 
     file_id = info["file_id"]
     bot_index = info["bot_index"]
+
+    _prefix = _get_segment_prefix(segment_key)
+    if _prefix and _prefix.startswith("video") and segment_key.endswith(".ts"):
+        with _last_player_segment_lock:
+            _last_player_segment[(job_id, _prefix)] = segment_key
 
     if segment_key.endswith(".vtt"):
         content_type = "text/vtt"
