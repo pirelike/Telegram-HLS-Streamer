@@ -143,7 +143,7 @@ SEGMENT_TARGET_SIZE=15728640
 MAX_UPLOAD_SIZE=107374182400
 UPLOAD_CHUNK_SIZE=10485760
 SEGMENT_CACHE_SIZE_MB=512
-SEGMENT_PREFETCH_COUNT=3
+SEGMENT_PREFETCH_COUNT=2
 SEGMENT_PREFETCH_MIN_FREE_BYTES=134217728
 
 # Processing
@@ -209,7 +209,7 @@ TELEGRAM_CHANNEL_ID_8=
 - `SEGMENT_TARGET_SIZE` is the preferred FFmpeg segment size target. Lower values produce smaller segments.
 - `TELEGRAM_MAX_FILE_SIZE` is the hard upload ceiling. Segment planning clamps under it, and uploads still fail fast if a file exceeds it.
 - `SEGMENT_CACHE_SIZE_MB` is a shared cache budget for the full app process, not per viewer.
-- `SEGMENT_PREFETCH_COUNT` controls how many future video segments the proxy tries to keep ahead of active playback in cache.
+- `SEGMENT_PREFETCH_COUNT` controls how many upcoming segments are warmed per active playback flow.
 - `SEGMENT_PREFETCH_MIN_FREE_BYTES` stops prefetch when the cache is close to full, reducing churn on smaller home servers.
 - `UPLOAD_CHUNK_SIZE` must match frontend expectation if using bundled UI (currently 10MB).
 - `PLAYBACK_SECRET` enables HMAC-signed playlist and segment URLs; tokens are deterministic per job until the secret is rotated.
@@ -325,9 +325,6 @@ Marks an active job as cancelled.
 #### `GET /health`
 Checks SQLite access plus Telegram bot/channel reachability via `get_chat`.
 
-#### `GET /api/metrics`
-Returns process-local operational metrics for queue depth, active jobs, segment cache hit rate, and Telegram upload/download latency and error totals.
-
 ### Playlist APIs
 
 - `GET /hls/<job_id>/master.m3u8`
@@ -402,7 +399,7 @@ If running behind Nginx/Caddy/Traefik:
 
 ### Playback cache behavior
 
-The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. For video `.ts` playback, sequential prefetch tries to keep the next `SEGMENT_PREFETCH_COUNT` future segments ahead of the current request warm in RAM. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
+The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. Sequential prefetch can warm upcoming segments into RAM for faster playback on the next requests. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
 
 If you run multiple workers or multiple app instances, they will not share cached segments. Playback will still work, but hot segments may be re-downloaded from Telegram by each worker or node.
 
@@ -434,7 +431,7 @@ ffmpeg -version
 ### Segment playback times out after the manifest loads
 
 - increase `SEGMENT_CACHE_SIZE_MB` on machines with available RAM
-- keep `SEGMENT_PREFETCH_COUNT` modest (`3` is the default; raise it carefully on small home servers)
+- keep `SEGMENT_PREFETCH_COUNT` modest (`1` or `2` is usually enough for a home server)
 - use `SEGMENT_PREFETCH_MIN_FREE_BYTES` to prevent cache churn when many streams are active
 - if you run multiple workers, remember each worker has its own cache and will re-fetch hot segments independently
 
@@ -448,43 +445,19 @@ Segments are tied to the uploading bot. If you remove or rotate bots, old `bot_i
 
 ### Running tests
 
-Bare-stdlib smoke verification:
+The project has a test suite (~2,300 lines) covering core modules:
 
 ```bash
-python -m unittest tests.test_minimal_runtime
-```
-
-Full test path with declared runtime dependencies installed:
-
-```bash
-pip install -r requirements.txt pytest
-python -m unittest discover -s tests
+pip install pytest
 pytest
 ```
 
 Test files:
-- `tests/test_minimal_runtime.py` — dependency-stubbed import/bootstrap smoke path for bare Python installs
 - `tests/test_app_p0_todos.py` — upload flow, finalization, job lifecycle
 - `tests/test_database_hls_manager.py` — SQLite persistence, playlist generation
 - `tests/test_telegram_uploader.py` — multi-bot upload, retry/backoff logic
 - `tests/test_stream_analyzer.py` — FFprobe parsing, stream detection
 - `tests/test_config_video_processor.py` — configuration loading, FFmpeg command building
-
-### Database backup and export
-
-Create a consistent SQLite snapshot:
-
-```bash
-python -m database backup
-python -m database backup --output backups/manual.sqlite3 --force
-```
-
-Create a logical JSON export:
-
-```bash
-python -m database export
-python -m database export --output backups/manual.json --force
-```
 
 ### Manual verification
 
@@ -500,11 +473,11 @@ See `todo.md` for the prioritized list of known issues, planned improvements, an
 
 - Single-process architecture — no distributed queue/worker support; job state is in-memory and not durable across restarts.
 - Segment caching is process-local only; multiple workers or nodes will still duplicate hot Telegram reads unless a shared cache is added.
-- Metrics are process-local and reset on restart; there is no external time-series backend or Prometheus exposition yet.
+- Metrics for cache hit rate, Telegram latency/error rates, and active jobs are not exposed yet.
 - SQLite is still the only playback metadata store; there is no schema versioning or migration framework beyond ad hoc startup fixes.
 - ABR tiers are static config; no per-title complexity optimization.
 - Playback tokens are deterministic per `job_id` and do not expire until `PLAYBACK_SECRET` is rotated.
-- Backup/export is local CLI-only; there is no restore/import workflow yet.
+- There is still no backup/export workflow for `streamer.db`.
 
 ---
 
