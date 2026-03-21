@@ -786,7 +786,8 @@ class TestUploadSizeGate(unittest.TestCase):
                 f.write(b"x" * 101)
 
             bot_entry = uploader.bots[0]
-            with patch.object(config.Config, "TELEGRAM_MAX_FILE_SIZE", 100):
+            import telegram_uploader
+            with patch.object(telegram_uploader.Config, "TELEGRAM_MAX_FILE_SIZE", 100):
                 with self.assertRaisesRegex(RuntimeError, "exceeds Telegram limit"):
                     asyncio.run(uploader._upload_file(big_file, bot_entry))
 
@@ -813,7 +814,8 @@ class TestUploadSizeGate(unittest.TestCase):
             bot_entry = {"bot": mock_bot, "channel_id": -1001, "index": 0}
             uploader.bots = [bot_entry]
 
-            with patch.object(config.Config, "TELEGRAM_MAX_FILE_SIZE", 100):
+            import telegram_uploader
+            with patch.object(telegram_uploader.Config, "TELEGRAM_MAX_FILE_SIZE", 100):
                 # Should not raise — file is exactly at limit
                 result = asyncio.run(uploader._upload_file(exact_file, bot_entry))
             self.assertEqual(result.file_size, 100)
