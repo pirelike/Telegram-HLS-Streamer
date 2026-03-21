@@ -45,7 +45,6 @@ from hls_manager import (
     get_segment_info, list_jobs, get_job, count_jobs,
 )
 import database as db
-from metrics import metrics
 
 logging.basicConfig(
     level=logging.INFO,
@@ -587,12 +586,6 @@ def health():
     }), code
 
 
-@app.route("/api/metrics")
-def api_metrics():
-    """Return process-local operational metrics as JSON."""
-    return jsonify(_metrics_response())
-
-
 # ─── Chunked Upload API ───
 #
 # Flow:
@@ -1117,6 +1110,10 @@ class _SegmentCache:
         self._data = collections.OrderedDict()
         self._lock = Lock()
 
+    def has(self, key):
+        with self._lock:
+            return key in self._data
+
     def get(self, key):
         with self._lock:
             if key not in self._data:
@@ -1161,104 +1158,11 @@ class _SegmentCache:
 _segment_cache = _SegmentCache(max_bytes=Config.SEGMENT_CACHE_SIZE_MB * 1024 * 1024)
 
 
-def _cache_hit_rate():
-    requests = metrics.get_counter("segment_cache.requests")
-    hits = metrics.get_counter("segment_cache.hits")
-    if requests <= 0:
-        return 0.0
-    return round(hits / requests, 4)
-
-
-def _job_metrics_snapshot():
-    counts = collections.Counter()
-    oldest_wait_seconds = None
-    now = time.time()
-
-    with _job_status_lock:
-        for job in _active_jobs.values():
-            status = job.get("status", "unknown")
-            counts[status] += 1
-            if status in _TERMINAL_JOB_STATES:
-                finished_ts = job.get("finished_ts")
-                if finished_ts and now - finished_ts <= _ACTIVE_JOB_RETENTION:
-                    counts[f"{status}_recent"] += 1
-
-    with _queue_order_lock:
-        queue_depth = len(_queue_order)
-        if _queue_order:
-            waiting_since = [
-                _active_jobs.get(job_id, {}).get("started_ts")
-                for job_id in _queue_order
-                if _active_jobs.get(job_id, {}).get("started_ts")
-            ]
-            if waiting_since:
-                oldest_wait_seconds = round(max(0.0, now - min(waiting_since)), 3)
-
-    return {
-        "jobs": {
-            "active_total": sum(
-                count for key, count in counts.items()
-                if not key.endswith("_recent")
-            ),
-            "queued": counts.get("queued", 0),
-            "analyzing": counts.get("analyzing", 0),
-            "processing": counts.get("processing", 0),
-            "uploading_telegram": counts.get("uploading_telegram", 0),
-            "complete_recent": counts.get("complete_recent", 0),
-            "error_recent": counts.get("error_recent", 0),
-        },
-        "queue": {
-            "depth": queue_depth,
-            "oldest_wait_seconds": oldest_wait_seconds,
-        },
-        "uploads": {
-            "pending_uploads_total": len(_pending_uploads),
-        },
-    }
-
-
-def _metrics_response():
-    snapshot = _job_metrics_snapshot()
-    snapshot["segment_cache"] = {
-        "hits": metrics.get_counter("segment_cache.hits"),
-        "misses": metrics.get_counter("segment_cache.misses"),
-        "requests": metrics.get_counter("segment_cache.requests"),
-        "hit_rate": _cache_hit_rate(),
-        "bytes_used": _segment_cache.current_bytes,
-        "bytes_capacity": _segment_cache.max_bytes,
-        "inflight_downloads": len(_segment_downloads),
-        "scheduled_prefetches": len(_scheduled_segment_prefetches),
-    }
-    snapshot["telegram_uploads"] = {
-        "probe_health": metrics.get_timing("telegram.probe_health"),
-        "send_document": metrics.get_timing("telegram.send_document"),
-        "get_file_url": metrics.get_timing("telegram.get_file_url"),
-    }
-    snapshot["telegram_downloads"] = {
-        "file_fetch_calls": metrics.get_counter("telegram.download.calls"),
-        "file_fetch_errors": metrics.get_counter("telegram.download.errors"),
-        "file_fetch_total_ms": metrics.get_timing("telegram.download_file")["total_ms"],
-        "file_fetch_max_ms": metrics.get_timing("telegram.download_file")["max_ms"],
-        "error_counts": metrics.get_timing("telegram.download_file")["error_counts"],
-        "http_status_counts": {
-            "200": metrics.get_counter("telegram.download.http_status.200"),
-            "non_200": metrics.get_counter("telegram.download.http_status.non_200"),
-        },
-    }
-    return snapshot
-
-
 def _get_segment_prefix(segment_key):
     """Extract the HLS stream prefix from a segment key."""
     if "/" not in segment_key:
         return None
     return segment_key.split("/", 1)[0]
-
-
-def _should_prefetch_segment(segment_key):
-    """Limit maintained prefetch to sequential video transport stream segments."""
-    prefix = _get_segment_prefix(segment_key)
-    return bool(prefix and prefix.startswith("video") and segment_key.endswith(".ts"))
 
 
 def _claim_segment_download(cache_key, *, enable_stream=False):
@@ -1334,16 +1238,10 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
     state.temp_path = temp_path
     wrote_any = False
 
-    started = time.perf_counter()
-    error = None
     try:
-        metrics.increment("telegram.download.calls")
         async with _aiohttp_session.get(url) as resp:
-            metrics.increment(f"telegram.download.http_status.{resp.status}")
             if resp.status != 200:
-                metrics.increment("telegram.download.http_status.non_200")
                 raise RuntimeError(f"Telegram HTTP {resp.status}")
-            metrics.increment("telegram.download.http_status.200")
 
             with open(temp_path, "wb") as handle:
                 async for chunk in resp.content.iter_chunked(65536):
@@ -1364,7 +1262,6 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
 
         state.cached = await asyncio.to_thread(_cache_segment_from_file, cache_key, temp_path)
     except Exception as exc:
-        error = exc
         state.error = exc
         if state.stream_queue is not None:
             await asyncio.to_thread(
@@ -1374,13 +1271,6 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
                 _SegmentStreamError(exc),
             )
     finally:
-        metrics.record_timing(
-            "telegram.download_file",
-            (time.perf_counter() - started) * 1000.0,
-            error=error,
-        )
-        if error is not None:
-            metrics.increment("telegram.download.errors")
         if state.stream_queue is not None and state.error is None:
             await asyncio.to_thread(
                 _enqueue_stream_item,
@@ -1449,8 +1339,10 @@ def _stream_segment_file(state):
 async def _prefetch_segment(job_id, segment_key):
     """Best-effort background fetch for a future segment."""
     cache_key = f"{job_id}/{segment_key}"
+    success = False
     try:
-        if _segment_cache.get(cache_key) is not None:
+        if _segment_cache.has(cache_key):
+            success = True
             return
 
         info = get_segment_info(job_id, segment_key)
@@ -1459,12 +1351,16 @@ async def _prefetch_segment(job_id, segment_key):
 
         state, is_owner = _claim_segment_download(cache_key)
         if not is_owner:
+            success = True  # someone else downloading, chain continues
             return
         await _download_segment_to_state(info["file_id"], info["bot_index"], cache_key, state)
+        success = True
     except Exception as exc:
         logger.debug("Segment prefetch failed %s: %s", cache_key, exc)
     finally:
         _release_segment_prefetch(cache_key)
+        if success:
+            _schedule_segment_prefetch(job_id, segment_key)
 
 
 def _start_prefetch_task(job_id, segment_key):
@@ -1473,21 +1369,16 @@ def _start_prefetch_task(job_id, segment_key):
 
 
 def _schedule_segment_prefetch(job_id, segment_key):
-    """Schedule background prefetch to maintain a future video segment buffer."""
+    """Schedule background prefetch for the next sequential segments."""
     prefetch_count = max(0, Config.SEGMENT_PREFETCH_COUNT)
     if prefetch_count <= 0:
         return
 
-    if not _should_prefetch_segment(segment_key):
-        return
-
     if _segment_cache.max_bytes <= 0:
-        return
-    if _segment_cache.free_bytes < max(0, Config.SEGMENT_PREFETCH_MIN_FREE_BYTES):
         return
 
     prefix = _get_segment_prefix(segment_key)
-    if not prefix:
+    if not prefix or not prefix.startswith("video") or not segment_key.endswith(".ts"):
         return
 
     segments = db.get_segments_for_prefix(job_id, prefix)
@@ -1503,33 +1394,16 @@ def _schedule_segment_prefetch(job_id, segment_key):
     if current_index is None:
         return
 
-    buffered_ahead = 0
-    for segment in segments[current_index + 1:]:
+    for segment in segments[current_index + 1: current_index + 1 + prefetch_count]:
         next_segment_key = segment["segment_key"]
         next_cache_key = f"{job_id}/{next_segment_key}"
-
-        if _segment_cache.get(next_cache_key) is not None:
-            buffered_ahead += 1
-            if buffered_ahead >= prefetch_count:
-                break
+        if _segment_cache.has(next_cache_key):
             continue
-
-        if next_cache_key in _segment_downloads or next_cache_key in _scheduled_segment_prefetches:
-            buffered_ahead += 1
-            if buffered_ahead >= prefetch_count:
-                break
+        if next_cache_key in _segment_downloads:
             continue
-
         if not _claim_segment_prefetch(next_cache_key):
-            buffered_ahead += 1
-            if buffered_ahead >= prefetch_count:
-                break
             continue
-
-        buffered_ahead += 1
         _async_loop.call_soon_threadsafe(_start_prefetch_task, job_id, next_segment_key)
-        if buffered_ahead >= prefetch_count:
-            break
 
 
 # ─── Segment Proxy ───
@@ -1558,28 +1432,24 @@ def serve_segment(job_id, segment_key):
 
     # Cache hit — return immediately
     cache_key = f"{job_id}/{segment_key}"
-    metrics.increment("segment_cache.requests")
     cached = _segment_cache.get(cache_key)
     if cached is not None:
-        metrics.increment("segment_cache.hits")
         logger.debug("Segment cache HIT: %s", cache_key)
         _schedule_segment_prefetch(job_id, segment_key)
         return Response(cached, content_type=content_type, headers=headers)
 
-    metrics.increment("segment_cache.misses")
     logger.debug("Segment cache MISS: %s", cache_key)
 
     state, is_owner = _claim_segment_download(cache_key, enable_stream=True)
 
     if is_owner:
         _start_segment_download(file_id, bot_index, cache_key, state)
+        _schedule_segment_prefetch(job_id, segment_key)
         first_item = state.stream_queue.get()
         if isinstance(first_item, _SegmentStreamError):
             logger.warning("Segment download failed %s: %s", cache_key, first_item.exc)
             _release_segment_download(state)
             return jsonify({"error": "Could not download segment from Telegram"}), 500
-
-        _schedule_segment_prefetch(job_id, segment_key)
         return Response(
             stream_with_context(_stream_segment_owner(state, first_item)),
             content_type=content_type,
@@ -1598,12 +1468,12 @@ def serve_segment(job_id, segment_key):
         with _segment_download_lock:
             _segment_downloads[fallback_key] = fallback_state
         _start_segment_download(file_id, bot_index, cache_key, fallback_state)
+        _schedule_segment_prefetch(job_id, segment_key)
         first_item = fallback_state.stream_queue.get()
         if isinstance(first_item, _SegmentStreamError):
             logger.warning("Segment fallback download failed %s: %s", cache_key, first_item.exc)
             _release_segment_download(fallback_state)
             return jsonify({"error": "Could not download segment from Telegram"}), 500
-        _schedule_segment_prefetch(job_id, segment_key)
         return Response(
             stream_with_context(_stream_segment_owner(fallback_state, first_item)),
             content_type=content_type,

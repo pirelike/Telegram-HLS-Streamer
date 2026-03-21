@@ -131,15 +131,13 @@ def _get_safe_segment_size(bitrate_str):
     """Calculate a safe `-hls_segment_size` from the target and hard limit.
 
     FFmpeg's `-hls_segment_size` writes until the limit, then splits at the next
-    keyframe. In practice the muxer can still overshoot by more than one second,
-    especially on high-bitrate tiers, so we reserve a larger safety margin:
-    two seconds of stream bitrate plus 5% of the hard Telegram limit for TS/mux
-    overhead. We then clamp the configured segment target under the remaining ceiling.
+    keyframe. Since we force keyframes every 1 second, the overshoot can be up to
+    1 second of video plus container overhead. We subtract 1.5 seconds of bitrate
+    from the hard Telegram limit, then clamp the configured segment target under it.
     """
     bytes_per_sec = _parse_bitrate_to_bytes_per_sec(bitrate_str)
-    size_guard = int(bytes_per_sec * 2.0)
-    container_guard = int(Config.TELEGRAM_MAX_FILE_SIZE * 0.05)
-    max_overshoot = size_guard + container_guard
+    # Estimate max overshoot as 1.5 seconds of data (1 sec keyframe interval + 50% overhead margin)
+    max_overshoot = int(bytes_per_sec * 1.5)
 
     # Leave margin under the hard Telegram upload ceiling.
     safe_ceiling = Config.TELEGRAM_MAX_FILE_SIZE - max_overshoot

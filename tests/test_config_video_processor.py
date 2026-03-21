@@ -318,11 +318,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         with patch.object(vp.Config, "SEGMENT_TARGET_SIZE", 19 * 1024 * 1024), \
              patch.object(vp.Config, "TELEGRAM_MAX_FILE_SIZE", 20 * 1024 * 1024):
             size = vp._get_safe_segment_size("8M")
-        expected = (
-            20 * 1024 * 1024
-            - int(vp._parse_bitrate_to_bytes_per_sec("8M") * 2.0)
-            - int(20 * 1024 * 1024 * 0.05)
-        )
+        expected = 20 * 1024 * 1024 - int(vp._parse_bitrate_to_bytes_per_sec("8M") * 1.5)
         self.assertEqual(size, expected)
 
     def test_get_safe_segment_size_has_one_mb_floor(self):
