@@ -91,7 +91,7 @@ Defined in `requirements.txt`:
 ## Installation
 
 ```bash
-git clone <your-fork-or-repo-url>
+git clone <https://github.com/pirelike/Telegram-HLS-Streamer>
 cd Telegram-HLS-Streamer
 python -m venv .venv
 source .venv/bin/activate
