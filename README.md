@@ -32,8 +32,8 @@ The project is designed for self-hosted personal media delivery with:
 
 ## How it works
 
-1. A client uploads a video in chunks using `/api/upload/init` + `/api/upload/chunk`.
-2. The server finalizes the upload (`/api/upload/finalize`) and starts a background job.
+1. A client uploads a video in chunks using `/api/upload/init` + `/api/upload/chunk`, or the optional folder watcher notices a completed local download under `WATCH_ROOT`.
+2. The server finalizes the upload or watcher claim and starts a background job.
 3. The job pipeline performs:
    - media analysis via `ffprobe`
    - video/audio/subtitle extraction and HLS packaging via `ffmpeg`
@@ -169,18 +169,21 @@ PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS=300
 JOB_RETENTION_DAYS=0
 MAX_CONCURRENT_JOBS=1
 
+# Optional watch-folder auto-ingest
+WATCH_ENABLED=false
+WATCH_ROOT=
+WATCH_DONE_DIR=
+WATCH_POLL_SECONDS=5
+WATCH_STABLE_SECONDS=30
+WATCH_VIDEO_EXTENSIONS=mp4,mkv,avi,mov,webm,ts,m4v,flv
+WATCH_IGNORE_SUFFIXES=.part,.crdownload,.tmp,.partial
+
 # Upload rate limiting
 UPLOAD_RATE_LIMIT_WINDOW=60
 UPLOAD_RATE_LIMIT_MAX_REQUESTS=100
 MAX_PENDING_UPLOADS_PER_IP=5
 
-# Upload security (optional)
-UPLOAD_API_KEY=
-UPLOAD_BASIC_USER=
-UPLOAD_BASIC_PASSWORD=
-
-# Playback auth (optional)
-PLAYBACK_SECRET=
+# App-level authentication is intentionally unsupported.
 
 # Telegram upload behavior
 UPLOAD_PARALLELISM=8
@@ -212,7 +215,8 @@ TELEGRAM_CHANNEL_ID_8=
 - `SEGMENT_PREFETCH_COUNT` controls how many upcoming segments are warmed per active playback flow.
 - `SEGMENT_PREFETCH_MIN_FREE_BYTES` stops prefetch when the cache is close to full, reducing churn on smaller home servers.
 - `UPLOAD_CHUNK_SIZE` must match frontend expectation if using bundled UI (currently 10MB).
-- `PLAYBACK_SECRET` enables HMAC-signed playlist and segment URLs; tokens are deterministic per job until the secret is rotated.
+- When `WATCH_ENABLED=true`, the watcher scans `WATCH_ROOT` recursively, ignores the `done/` subtree plus partial-download suffixes, and only queues files whose size/mtime have stayed unchanged for `WATCH_STABLE_SECONDS`.
+- Successful watcher-ingested files are moved into `WATCH_DONE_DIR` after the full pipeline completes; failed files stay in place and will only be retried after they change.
 
 ---
 
@@ -224,9 +228,13 @@ python app.py
 
 By default, the app starts on `0.0.0.0:5050`.
 
+If `WATCH_ENABLED=true`, the same process also polls `WATCH_ROOT` for completed downloads and auto-enqueues supported video files.
+
 Open:
 - UI: `http://localhost:5050/`
 - Jobs API: `http://localhost:5050/api/jobs`
+
+The UI also lets you set the watched folder and finished-folder paths; those values are saved in `watch_settings.json` so they survive restarts.
 
 ---
 
@@ -313,11 +321,8 @@ Returns live/in-memory status for active jobs, or persisted metadata for complet
 #### `GET /api/jobs?page=1&limit=20`
 Returns paginated completed jobs (`limit` max 50).
 
-#### `GET /api/jobs/<job_id>/token`
-Returns the playback token for a completed job when `PLAYBACK_SECRET` is enabled.
-
 #### `DELETE /api/jobs/<job_id>`
-Deletes a completed job and its playback metadata from SQLite.
+Deletes a completed job and its metadata from SQLite.
 
 #### `POST /api/cancel/<job_id>`
 Marks an active job as cancelled.
@@ -369,23 +374,19 @@ When enabled, the processor creates:
 
 - `uploads/`: incoming upload files before processing completes
 - `processing/<job_id>/`: temporary FFmpeg outputs before Telegram upload finalizes
+- `WATCH_DONE_DIR` (default `WATCH_ROOT/done`): successful watch-folder source files, preserving relative subdirectories
 - `streamer.db`: persistent metadata/segment mapping database
 
 ### Cleanup behavior
 
 - completed jobs remove temporary files from `uploads/` and `processing/`
+- watch-folder jobs move successful source files into `WATCH_DONE_DIR` instead of deleting them
 - pending/incomplete uploads are cleaned by TTL (`PENDING_UPLOAD_TTL_SECONDS`)
 - long jobs can be force-marked as timed out via watcher (`JOB_TIMEOUT_SECONDS`)
 
 ---
 
 ## Security and deployment notes
-
-### Auth options for upload endpoints
-
-If configured, upload APIs require either:
-- header API key (`X-API-Key`), or
-- Basic Auth credentials (`UPLOAD_BASIC_USER` / `UPLOAD_BASIC_PASSWORD`)
 
 ### CORS
 
@@ -474,9 +475,8 @@ See `todo.md` for the prioritized list of known issues, planned improvements, an
 - Single-process architecture — no distributed queue/worker support; job state is in-memory and not durable across restarts.
 - Segment caching is process-local only; multiple workers or nodes will still duplicate hot Telegram reads unless a shared cache is added.
 - Metrics for cache hit rate, Telegram latency/error rates, and active jobs are not exposed yet.
-- SQLite is still the only playback metadata store; there is no schema versioning or migration framework beyond ad hoc startup fixes.
+- SQLite is the playback metadata store; it includes a schema versioning and migration framework for upgrades.
 - ABR tiers are static config; no per-title complexity optimization.
-- Playback tokens are deterministic per `job_id` and do not expire until `PLAYBACK_SECRET` is rotated.
 - There is still no backup/export workflow for `streamer.db`.
 
 ---

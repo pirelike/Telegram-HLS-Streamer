@@ -10,19 +10,59 @@ import os
 import re
 import time
 
-from telegram import Bot
-from telegram.request import HTTPXRequest
-from telegram.error import (
-    BadRequest,
-    Forbidden,
-    NetworkError,
-    RetryAfter,
-    TimedOut,
-)
+try:
+    from telegram import Bot
+    from telegram.request import HTTPXRequest
+    from telegram.error import (
+        BadRequest,
+        Forbidden,
+        NetworkError,
+        RetryAfter,
+        TimedOut,
+    )
+except ImportError:  # pragma: no cover - fallback for minimal test environments
+    class Bot:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class HTTPXRequest:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class BadRequest(Exception):  # type: ignore[no-redef]
+        pass
+
+    class Forbidden(Exception):  # type: ignore[no-redef]
+        pass
+
+    class NetworkError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class RetryAfter(Exception):  # type: ignore[no-redef]
+        def __init__(self, retry_after=None):
+            super().__init__(retry_after)
+            self.retry_after = retry_after
+
+    class TimedOut(Exception):  # type: ignore[no-redef]
+        pass
 
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_error_type(exc_type, fallback_name):
+    """Replace broad placeholder stubs with distinct local exception classes."""
+    if isinstance(exc_type, type) and exc_type not in (Exception, BaseException):
+        return exc_type
+    return type(fallback_name, (Exception,), {})
+
+
+BadRequest = _normalize_error_type(BadRequest, "BadRequest")
+Forbidden = _normalize_error_type(Forbidden, "Forbidden")
+NetworkError = _normalize_error_type(NetworkError, "NetworkError")
+RetryAfter = _normalize_error_type(RetryAfter, "RetryAfter")
+TimedOut = _normalize_error_type(TimedOut, "TimedOut")
 
 
 class UploadedSegment:
@@ -126,7 +166,24 @@ class TelegramUploader:
         self._bot_counter = (idx + 1) % len(self.bots)
         return self.bots[idx % len(self.bots)]
 
-    async def _upload_file(self, file_path, bot_entry, retries=3):
+    @staticmethod
+    def _raise_if_cancelled(cancel_event):
+        if cancel_event and cancel_event.is_set():
+            raise asyncio.CancelledError()
+
+    async def _sleep_with_cancel(self, delay, cancel_event):
+        if delay <= 0:
+            self._raise_if_cancelled(cancel_event)
+            return
+        end = time.monotonic() + delay
+        while True:
+            self._raise_if_cancelled(cancel_event)
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.25, remaining))
+
+    async def _upload_file(self, file_path, bot_entry, retries=3, cancel_event=None):
         """Upload a single file to Telegram with retry logic."""
         bot = bot_entry["bot"]
         channel_id = bot_entry["channel_id"]
@@ -139,6 +196,7 @@ class TelegramUploader:
             )
 
         for attempt in range(retries):
+            self._raise_if_cancelled(cancel_event)
             try:
                 with open(file_path, "rb") as f:
                     message = await bot.send_document(
@@ -181,34 +239,34 @@ class TelegramUploader:
             except TimedOut:
                 wait = 2 ** attempt
                 logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)
-                await asyncio.sleep(wait)
+                await self._sleep_with_cancel(wait, cancel_event)
             except NetworkError as e:
                 wait = 2 ** attempt
                 logger.warning("Network error for %s: %s, retry in %ds", file_name, e, wait)
-                await asyncio.sleep(wait)
+                await self._sleep_with_cancel(wait, cancel_event)
             except RetryAfter as e:
                 retry_after = getattr(e, "retry_after", 1)
                 logger.warning("Rate limited, waiting %d seconds", retry_after)
-                await asyncio.sleep(retry_after)
+                await self._sleep_with_cancel(retry_after, cancel_event)
             except Exception as e:
                 if attempt < retries - 1:
                     wait = 2 ** attempt
                     logger.warning("Upload error for %s: %s, retry in %ds", file_name, e, wait)
-                    await asyncio.sleep(wait)
+                    await self._sleep_with_cancel(wait, cancel_event)
                 else:
                     raise
 
         raise RuntimeError(f"Failed to upload {file_path} after {retries} attempts")
 
-    async def _upload_file_with_bot_lock(self, file_path, bot_entry):
+    async def _upload_file_with_bot_lock(self, file_path, bot_entry, cancel_event=None):
         """Upload file while ensuring one in-flight upload per bot."""
         if self._bot_locks is None:
             self._bot_locks = [asyncio.Lock() for _ in self.bots]
         bot_index = bot_entry["index"]
         async with self._bot_locks[bot_index]:
-            return await self._upload_file(file_path, bot_entry)
+            return await self._upload_file(file_path, bot_entry, cancel_event=cancel_event)
 
-    async def upload_files(self, files, progress_callback=None):
+    async def upload_files(self, files, progress_callback=None, cancel_event=None):
         """Upload provided files in parallel with per-bot serialization.
 
         Args:
@@ -234,22 +292,34 @@ class TelegramUploader:
 
         async def worker(key, file_path):
             nonlocal completed
+            self._raise_if_cancelled(cancel_event)
             bot_entry = self._next_bot()
             async with semaphore:
-                segment = await self._upload_file_with_bot_lock(file_path, bot_entry)
+                segment = await self._upload_file_with_bot_lock(
+                    file_path,
+                    bot_entry,
+                    cancel_event=cancel_event,
+                )
             completed += 1
             if progress_callback:
                 progress_callback(completed, total, key)
             return key, segment
 
         tasks = [asyncio.create_task(worker(key, path)) for key, path in files]
-        for task in asyncio.as_completed(tasks):
-            key, segment = await task
-            uploaded[key] = segment
+        try:
+            for task in asyncio.as_completed(tasks):
+                self._raise_if_cancelled(cancel_event)
+                key, segment = await task
+                uploaded[key] = segment
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         return uploaded
 
-    async def upload_job(self, processing_result, progress_callback=None):
+    async def upload_job(self, processing_result, progress_callback=None, cancel_event=None):
         """Upload all segments from a processing result.
 
         Handles video segments, audio track segments, and subtitle files.
@@ -298,9 +368,14 @@ class TelegramUploader:
 
         # Execute uploads using the pre-collected lists
         for category, file_list in all_upload_tasks:
+            self._raise_if_cancelled(cancel_event)
             if not file_list:
                 continue
-            category_segments = await self.upload_files(file_list, on_segment)
+            category_segments = await self.upload_files(
+                file_list,
+                on_segment,
+                cancel_event=cancel_event,
+            )
             result.segments.update(category_segments)
 
         result.total_files = len(result.segments)

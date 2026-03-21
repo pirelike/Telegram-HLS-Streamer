@@ -60,15 +60,17 @@ def get_segment_info(job_id, segment_key):
     return db.get_segment(job_id, segment_key)
 
 
-def _with_token(url, token):
-    """Append ?token=<token> to a URL if token is non-empty."""
-    if not token:
-        return url
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}token={token}"
+def _sanitize_hls_attribute(value):
+    """Sanitize metadata for safe inclusion in HLS quoted attributes."""
+    if not value:
+        return ""
+    val = str(value)
+    val = val.replace("\r", " ").replace("\n", " ").replace(",", " ")
+    val = val.replace("\\", "\\\\").replace('"', '\\"')
+    return val
 
 
-def generate_master_playlist(job_id, base_url, token=None):
+def generate_master_playlist(job_id, base_url):
     """Generate a master M3U8 playlist with multi-audio and subtitle variants."""
     job = db.get_job(job_id)
     if not job:
@@ -85,11 +87,13 @@ def generate_master_playlist(job_id, base_url, token=None):
     for t in audio_tracks:
         i = t["track_index"]
         is_default = "YES" if i == 0 else "NO"
-        name = t["title"] if t["title"] else f"Audio {i + 1} ({t['language']})"
-        uri = _with_token(f"{base_url}/hls/{job_id}/audio_{i}.m3u8", token)
+        raw_name = t["title"] if t["title"] else f"Audio {i + 1} ({t['language']})"
+        name = _sanitize_hls_attribute(raw_name)
+        lang = _sanitize_hls_attribute(t["language"])
+        uri = f"{base_url}/hls/{job_id}/audio_{i}.m3u8"
         lines.append(
             f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="{audio_group}",'
-            f'NAME="{name}",LANGUAGE="{t["language"]}",DEFAULT={is_default},'
+            f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={is_default},'
             f'AUTOSELECT={is_default},CHANNELS="{t["channels"]}",URI="{uri}"'
         )
 
@@ -97,11 +101,13 @@ def generate_master_playlist(job_id, base_url, token=None):
     for t in subtitle_tracks:
         i = t["track_index"]
         is_default = "YES" if i == 0 else "NO"
-        name = t["title"] if t["title"] else f"Subtitle {i + 1} ({t['language']})"
-        uri = _with_token(f"{base_url}/hls/{job_id}/sub_{i}.m3u8", token)
+        raw_name = t["title"] if t["title"] else f"Subtitle {i + 1} ({t['language']})"
+        name = _sanitize_hls_attribute(raw_name)
+        lang = _sanitize_hls_attribute(t["language"])
+        uri = f"{base_url}/hls/{job_id}/sub_{i}.m3u8"
         lines.append(
             f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="{sub_group}",'
-            f'NAME="{name}",LANGUAGE="{t["language"]}",DEFAULT={is_default},'
+            f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={is_default},'
             f'AUTOSELECT={is_default},URI="{uri}"'
         )
 
@@ -115,8 +121,9 @@ def generate_master_playlist(job_id, base_url, token=None):
         for t in video_tracks:
             i = t["track_index"]
             is_default = "YES" if i == 0 else "NO"
-            name = _video_tier_name(t["height"], is_original=(i == 0))
-            uri = _with_token(f"{base_url}/hls/{job_id}/video_{i}.m3u8", token)
+            raw_name = _video_tier_name(t["height"], is_original=(i == 0))
+            name = _sanitize_hls_attribute(raw_name)
+            uri = f"{base_url}/hls/{job_id}/video_{i}.m3u8"
             lines.append(
                 f'#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="{video_group}",'
                 f'NAME="{name}",DEFAULT={is_default},'
@@ -139,7 +146,7 @@ def generate_master_playlist(job_id, base_url, token=None):
                 stream_inf += f',SUBTITLES="{sub_group}"'
 
             lines.append(stream_inf)
-            lines.append(_with_token(f"{base_url}/hls/{job_id}/video_{t['track_index']}.m3u8", token))
+            lines.append(f"{base_url}/hls/{job_id}/video_{t['track_index']}.m3u8")
     else:
         # Legacy: single video stream (no video tracks in DB)
         bandwidth = job["file_size"] * 8
@@ -155,7 +162,7 @@ def generate_master_playlist(job_id, base_url, token=None):
             stream_inf += f',SUBTITLES="{sub_group}"'
 
         lines.append(stream_inf)
-        lines.append(_with_token(f"{base_url}/hls/{job_id}/video.m3u8", token))
+        lines.append(f"{base_url}/hls/{job_id}/video.m3u8")
 
     return "\n".join(lines) + "\n"
 
@@ -193,7 +200,7 @@ def _parse_bitrate(bitrate_str):
         return 0
 
 
-def generate_media_playlist(job_id, stream_type, stream_index=None, token=None):
+def generate_media_playlist(job_id, stream_type, stream_index=None):
     """Generate a media-level M3U8 playlist for a specific stream.
 
     stream_type: "video", "audio", or "sub"
@@ -226,7 +233,7 @@ def generate_media_playlist(job_id, stream_type, stream_index=None, token=None):
         track = _get_track(job_id, "subtitle", stream_index)
         if not track:
             return None
-        return _generate_subtitle_playlist(job_id, job, stream_index, token=token)
+        return _generate_subtitle_playlist(job_id, job, stream_index)
     else:
         return None
 
@@ -248,13 +255,13 @@ def generate_media_playlist(job_id, stream_type, stream_index=None, token=None):
 
     for seg, dur in zip(segments, durations):
         lines.append(f"#EXTINF:{dur:.6f},")
-        lines.append(_with_token(f"/segment/{job_id}/{seg['segment_key']}", token))
+        lines.append(f"/segment/{job_id}/{seg['segment_key']}")
 
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 
 
-def _generate_subtitle_playlist(job_id, job, sub_index, token=None):
+def _generate_subtitle_playlist(job_id, job, sub_index):
     """Generate a playlist for a subtitle track (single VTT file)."""
     duration = job["duration"] or 0
 
@@ -269,7 +276,7 @@ def _generate_subtitle_playlist(job_id, job, sub_index, token=None):
     info = db.get_segment(job_id, key)
     if info:
         lines.append(f"#EXTINF:{duration:.3f},")
-        lines.append(_with_token(f"/segment/{job_id}/{key}", token))
+        lines.append(f"/segment/{job_id}/{key}")
 
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"

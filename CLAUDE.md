@@ -3,6 +3,7 @@
 ## Project Overview
 
 Telegram HLS Streamer converts uploaded videos into HLS (HTTP Live Streaming) format and uses Telegram as unlimited cloud storage. Videos are chunked into segments, uploaded via up to 8 Telegram bots using round-robin distribution, and served back through proxied HLS playlists.
+Application-level authentication is intentionally out of scope; do not propose or reintroduce API key auth, Basic auth, or playback-token auth.
 
 ---
 
@@ -83,6 +84,8 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Segment proxy: `/segment/<job_id>/<segment_key>` — fetches TS/VTT from Telegram
 - CORS headers on HLS endpoints (required for cross-origin HLS playback)
 - Persistent async loop for Telegram reads plus a bounded worker queue for processing jobs
+- Robust job cancellation (terminates FFmpeg processes and cancels upload futures)
+- Memory-aware HLS segment prefetching (enforces `SEGMENT_PREFETCH_MIN_FREE_BYTES`)
 
 ### `config.py`
 - All settings loaded from environment variables (via `python-dotenv`)
@@ -94,11 +97,11 @@ HLS playback: /hls/<job_id>/master.m3u8
 
 ### `database.py`
 - SQLite via standard `sqlite3`, thread-safe with connection pooling
-- Tables: `jobs`, `tracks`, `segments`
+- Tables: `jobs`, `tracks`, `segments`, `schema_migrations`
 - `tracks` stores video tiers (with width, height, bitrate), audio tracks, and subtitle tracks
 - `segments` stores `(job_id, segment_key, file_id, bot_index)` — maps HLS keys to Telegram file_ids
 - Indexed for fast lookup; cascade delete on job removal
-- Auto-migrates schema on startup (adds new columns if missing)
+- Schema migration framework with `schema_migrations` tracking (revisions 1-3 implemented)
 
 ### `stream_analyzer.py`
 - Runs `ffprobe -v quiet -print_format json -show_streams`
@@ -108,7 +111,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 
 ### `video_processor.py`
 - `process(analysis, job_id, progress_callback)` → `ProcessingResult`
-- `_detect_hw_encoder()` probes for VAAPI, NVENC, QSV in that order; falls back to libx264
+- `_detect_hw_encoder()` performs test encodes for VAAPI, NVENC, QSV in that order; falls back to libx264
 - Adaptive bitrate: tier 0 is always re-encoded at a high CBR chosen from source resolution; additional tiers re-encode at lower resolutions (1080p, 720p, 480p, 360p) — only tiers ≤ source height are produced
 - Audio is always re-encoded to AAC at `AUDIO_BITRATE` (default 128k) for HLS compatibility
 - `_run_ffmpeg_with_progress()` reports within-step FFmpeg progress via `-progress pipe:1`
@@ -176,11 +179,7 @@ ABR_ENABLED=true               # source-res tier 0 + re-encoded lower tiers
 # TIER0_BITRATES=2160:60M,1080:30M,720:15M,480:5M
 # TIER0_BITRATE_DEFAULT=15M
 
-# Upload / playback auth
-UPLOAD_API_KEY=
-UPLOAD_BASIC_USER=
-UPLOAD_BASIC_PASSWORD=
-PLAYBACK_SECRET=
+# App-level authentication is intentionally unsupported.
 ```
 
 ---

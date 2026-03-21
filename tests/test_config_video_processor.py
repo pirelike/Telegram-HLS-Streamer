@@ -1,5 +1,8 @@
+import importlib
 import os
+import subprocess
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -170,6 +173,41 @@ class TestSegmentTargetConfig(unittest.TestCase):
         self.assertEqual(val, 8388608)
 
 
+class TestWatchConfig(unittest.TestCase):
+    def test_watch_config_defaults_done_dir_under_root(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch.dict(
+                os.environ,
+                {
+                    "WATCH_ENABLED": "true",
+                    "WATCH_ROOT": tempdir,
+                },
+                clear=True,
+            ):
+                reloaded = importlib.reload(config)
+                self.addCleanup(importlib.reload, config)
+                self.assertTrue(reloaded.Config.WATCH_ENABLED)
+                self.assertEqual(reloaded.Config.WATCH_ROOT, tempdir)
+                self.assertEqual(reloaded.Config.WATCH_DONE_DIR, os.path.join(tempdir, "done"))
+
+    def test_watch_config_normalizes_extensions_and_suffixes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch.dict(
+                os.environ,
+                {
+                    "WATCH_ENABLED": "true",
+                    "WATCH_ROOT": tempdir,
+                    "WATCH_VIDEO_EXTENSIONS": "mp4,.MKV",
+                    "WATCH_IGNORE_SUFFIXES": ".part,.CRDOWNLOAD",
+                },
+                clear=True,
+            ):
+                reloaded = importlib.reload(config)
+                self.addCleanup(importlib.reload, config)
+                self.assertEqual(reloaded.Config.WATCH_VIDEO_EXTENSIONS, (".mp4", ".mkv"))
+                self.assertEqual(reloaded.Config.WATCH_IGNORE_SUFFIXES, (".part", ".crdownload"))
+
+
 class TestVideoProcessorHelpers(unittest.TestCase):
     def setUp(self):
         vp._hw_encoder_probed = False
@@ -199,7 +237,10 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_success_vaapi(self, mock_run):
-        mock_run.return_value = Mock(stdout="h264_vaapi other stuff", returncode=0)
+        mock_run.side_effect = [
+            Mock(stdout="h264_vaapi other stuff", returncode=0),
+            Mock(returncode=0, stderr=""),
+        ]
         with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
              patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
             enc = vp._detect_hw_encoder()
@@ -216,13 +257,27 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_result_is_cached(self, mock_run):
-        mock_run.return_value = Mock(stdout="h264_vaapi", returncode=0)
+        mock_run.side_effect = [
+            Mock(stdout="h264_vaapi", returncode=0),
+            Mock(returncode=0, stderr=""),
+        ]
         with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
              patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
             r1 = vp._detect_hw_encoder()
             r2 = vp._detect_hw_encoder()  # second call uses cache
         self.assertIs(r1, r2)
-        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("video_processor.subprocess.run")
+    def test_detect_hw_encoder_probe_failure_falls_back_to_software(self, mock_run):
+        mock_run.side_effect = [
+            Mock(stdout="h264_vaapi", returncode=0),
+            Mock(returncode=1, stderr="device init failed"),
+        ]
+        with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
+             patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
+            result = vp._detect_hw_encoder()
+        self.assertIsNone(result)
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_unknown_preferred_returns_none(self, mock_run):
@@ -459,12 +514,30 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "FFmpeg failed"):
             vp._run_ffmpeg(["ffmpeg"], "desc")
 
-    @patch("video_processor.subprocess.run")
-    def test_run_ffmpeg_timeout_raises(self, mock_run):
-        import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=1)
-        with self.assertRaisesRegex(RuntimeError, "FFmpeg timed out"):
-            vp._run_ffmpeg(["ffmpeg"], "desc")
+    @patch("video_processor.subprocess.Popen")
+    def test_run_ffmpeg_timeout_raises(self, mock_popen):
+        proc = Mock()
+        proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=0.2)
+        proc.kill.return_value = None
+        mock_popen.return_value = proc
+        with patch("video_processor.time.time", side_effect=[0, 7201]):
+            with self.assertRaisesRegex(RuntimeError, "FFmpeg timed out"):
+                vp._run_ffmpeg(["ffmpeg"], "desc")
+
+    @patch("video_processor.subprocess.Popen")
+    def test_run_ffmpeg_cancelled_terminates_process(self, mock_popen):
+        proc = Mock()
+        proc.communicate.side_effect = [subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=0.2)]
+        proc.wait.return_value = 0
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        with self.assertRaisesRegex(RuntimeError, "FFmpeg cancelled"):
+            vp._run_ffmpeg(["ffmpeg"], "desc", cancel_event=cancel_event)
+
+        proc.terminate.assert_called_once_with()
 
     # ─── _run_ffmpeg_with_progress ───
 
@@ -480,6 +553,32 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         callback = Mock()
         vp._run_ffmpeg_with_progress(["ffmpeg"], "desc", duration_seconds=0, step_progress_cb=callback)
         mock_run_ffmpeg.assert_called_once()
+
+    @patch("video_processor.subprocess.Popen")
+    def test_run_ffmpeg_with_progress_cancelled_terminates_process(self, mock_popen):
+        class _Pipe:
+            def __iter__(self_inner):
+                return iter(())
+
+        proc = Mock()
+        proc.stdout = _Pipe()
+        proc.stderr = _Pipe()
+        proc.poll.side_effect = [None, None]
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        with self.assertRaisesRegex(RuntimeError, "FFmpeg cancelled"):
+            vp._run_ffmpeg_with_progress(
+                ["ffmpeg"],
+                "desc",
+                duration_seconds=10,
+                step_progress_cb=Mock(),
+                cancel_event=cancel_event,
+            )
+
+        proc.terminate.assert_called_once_with()
 
     # ─── ProcessingResult ───
 

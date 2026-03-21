@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 import threading
 
 from config import Config
@@ -63,21 +64,67 @@ def _detect_hw_encoder():
         encoders["vaapi"] = ("h264_vaapi", ["-vaapi_device", vaapi_device])
 
     if preferred in encoders:
-        enc_name, _ = encoders[preferred]
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if enc_name in result.stdout:
-                logger.info("Using hardware encoder: %s", enc_name)
-                _hw_encoder_cache = encoders[preferred]
-                return _hw_encoder_cache
-        except Exception:
-            pass
+        enc_name, enc_flags = encoders[preferred]
+        if _encoder_list_contains(enc_name) and _probe_hw_encoder(enc_name, enc_flags):
+            logger.info("Using hardware encoder: %s", enc_name)
+            _hw_encoder_cache = encoders[preferred]
+            return _hw_encoder_cache
 
     _hw_encoder_cache = None
     return None
+
+
+def _encoder_list_contains(enc_name):
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.warning("Failed to list FFmpeg encoders while probing %s: %s", enc_name, exc)
+        return False
+    return result.returncode == 0 and enc_name in result.stdout
+
+
+def _probe_hw_encoder(enc_name, enc_flags):
+    probe_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=64x64:d=0.1",
+        "-frames:v",
+        "1",
+    ]
+    probe_cmd += enc_flags
+    if enc_name == "h264_vaapi":
+        probe_cmd += ["-vf", "format=nv12,hwupload"]
+    probe_cmd += ["-an", "-c:v", enc_name, "-f", "null", "-"]
+
+    try:
+        result = subprocess.run(
+            probe_cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("Hardware encoder probe failed for %s: %s", enc_name, exc)
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "Hardware encoder %s failed probe encode and will be disabled: %s",
+            enc_name,
+            (result.stderr or "").strip()[-400:],
+        )
+        return False
+    return True
 
 
 def _get_tier0_bitrate(source_height):
@@ -268,33 +315,77 @@ def _extract_subtitle(analysis: MediaAnalysis, sub_stream, sub_index: int, outpu
     return cmd, output_file, sub_dir
 
 
-def _run_ffmpeg(cmd, description=""):
+def _stop_ffmpeg_process(proc, description):
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    raise RuntimeError(f"FFmpeg cancelled: {description}")
+
+
+def _run_ffmpeg(cmd, description="", cancel_event=None, on_process_start=None, on_process_end=None):
     """Run an FFmpeg command with logging."""
     logger.info("Running FFmpeg: %s", description)
     logger.debug("Command: %s", " ".join(cmd))
 
+    proc = None
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=7200,
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
+        if on_process_start:
+            on_process_start(proc)
+        deadline = time.time() + 7200
+        while True:
+            if cancel_event and cancel_event.is_set():
+                _stop_ffmpeg_process(proc, description)
+            if time.time() > deadline:
+                proc.kill()
+                raise RuntimeError(f"FFmpeg timed out: {description}")
+            try:
+                stdout, stderr = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
     except subprocess.TimeoutExpired as e:
         logger.error("FFmpeg timed out for %s:\n%s", description, e.stderr[-2000:] if e.stderr else "")
         raise RuntimeError(f"FFmpeg timed out: {description}") from e
+    finally:
+        if proc is not None and on_process_end:
+            on_process_end(proc)
 
     if proc.returncode != 0:
-        logger.error("FFmpeg failed for %s:\n%s", description, proc.stderr[-2000:])
-        raise RuntimeError(f"FFmpeg failed: {description}\n{proc.stderr[-2000:]}")
+        logger.error("FFmpeg failed for %s:\n%s", description, stderr[-2000:])
+        raise RuntimeError(f"FFmpeg failed: {description}\n{stderr[-2000:]}")
     return proc
 
 
-def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_progress_cb=None):
+def _run_ffmpeg_with_progress(
+    cmd,
+    description="",
+    duration_seconds=0,
+    step_progress_cb=None,
+    cancel_event=None,
+    on_process_start=None,
+    on_process_end=None,
+):
     """Run an FFmpeg command, reporting within-step progress via step_progress_cb(pct).
 
     Falls back to _run_ffmpeg when no callback or duration is provided.
     Uses FFmpeg's -progress pipe:1 to emit progress key=value pairs to stdout.
     """
     if not step_progress_cb or duration_seconds <= 0:
-        return _run_ffmpeg(cmd, description)
+        return _run_ffmpeg(
+            cmd,
+            description,
+            cancel_event=cancel_event,
+            on_process_start=on_process_start,
+            on_process_end=on_process_end,
+        )
 
     logger.info("Running FFmpeg with progress: %s", description)
     logger.debug("Command: %s", " ".join(cmd))
@@ -308,10 +399,13 @@ def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_prog
         stderr=subprocess.PIPE,
         text=True,
     )
+    if on_process_start:
+        on_process_start(proc)
 
     # Cap stderr to last 200 lines to prevent unbounded memory growth
     _STDERR_MAX_LINES = 200
     stderr_chunks = []
+    stdout_exception = []
 
     def _read_stderr():
         for line in proc.stderr:
@@ -319,36 +413,50 @@ def _run_ffmpeg_with_progress(cmd, description="", duration_seconds=0, step_prog
             if len(stderr_chunks) > _STDERR_MAX_LINES:
                 stderr_chunks.pop(0)
 
+    def _read_stdout():
+        try:
+            for line in proc.stdout:
+                if line.startswith("out_time="):
+                    time_str = line.split("=", 1)[1].strip()
+                    if time_str.startswith("N/A"):
+                        continue
+                    try:
+                        parts = time_str.split(":")
+                        secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                        if secs >= 0:
+                            pct = min(99, int(secs / duration_seconds * 100))
+                            step_progress_cb(pct)
+                    except (ValueError, IndexError):
+                        pass
+        except Exception as exc:
+            stdout_exception.append(exc)
+
     stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
     stderr_thread.start()
+    stdout_thread.start()
 
     try:
-        for line in proc.stdout:
-            if line.startswith("out_time="):
-                time_str = line.split("=", 1)[1].strip()
-                if time_str.startswith("N/A"):
-                    continue
-                try:
-                    parts = time_str.split(":")
-                    secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                    if secs >= 0:
-                        pct = min(99, int(secs / duration_seconds * 100))
-                        step_progress_cb(pct)
-                except (ValueError, IndexError):
-                    pass
-    except Exception as e:
-        logger.warning("Error reading FFmpeg progress: %s", e)
+        deadline = time.time() + 7200
+        while True:
+            if cancel_event and cancel_event.is_set():
+                _stop_ffmpeg_process(proc, description)
+            if proc.poll() is not None:
+                break
+            if time.time() > deadline:
+                proc.kill()
+                stderr_output = "".join(stderr_chunks)
+                logger.error("FFmpeg with progress timed out for %s:\n%s", description, stderr_output[-2000:])
+                raise RuntimeError(f"FFmpeg timed out: {description}")
+            time.sleep(0.1)
+    finally:
+        stderr_thread.join(timeout=5)
+        stdout_thread.join(timeout=5)
+        if on_process_end:
+            on_process_end(proc)
 
-    try:
-        # Popen doesn't have a direct timeout in wait(), but we can use wait(timeout)
-        proc.wait(timeout=7200)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        stderr_output = "".join(stderr_chunks)
-        logger.error("FFmpeg with progress timed out for %s:\n%s", description, stderr_output[-2000:])
-        raise RuntimeError(f"FFmpeg timed out: {description}")
-
-    stderr_thread.join(timeout=5)
+    if stdout_exception:
+        logger.warning("Error reading FFmpeg progress: %s", stdout_exception[0])
 
     if proc.returncode != 0:
         stderr_output = "".join(stderr_chunks)
@@ -420,7 +528,19 @@ class ProcessingResult:
         return dirs
 
 
-def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> ProcessingResult:
+def _raise_if_cancelled(cancel_event, description):
+    if cancel_event and cancel_event.is_set():
+        raise RuntimeError(description)
+
+
+def process(
+    analysis: MediaAnalysis,
+    job_id: str,
+    progress_callback=None,
+    cancel_event=None,
+    on_process_start=None,
+    on_process_end=None,
+) -> ProcessingResult:
     """Process a media file into separate HLS streams.
 
     Splits the input into:
@@ -475,6 +595,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
 
     # 1. Video streams (tier 0 CBR + ABR tiers from tier 0 output)
     if analysis.has_video:
+        _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
         # Tier 0: high-quality CBR re-encode at source resolution
         tier0_bitrate = _get_tier0_bitrate(source_height)
         cmd, playlist = _build_video_cmd(
@@ -485,6 +606,9 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             cmd, f"video tier 0 (original CBR {tier0_bitrate}) for {job_id}",
             duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb("Encoding video (original)"),
+            cancel_event=cancel_event,
+            on_process_start=on_process_start,
+            on_process_end=on_process_end,
         )
         tier0_playlist = playlist
         tier_dir = os.path.dirname(playlist)
@@ -497,6 +621,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
 
         # Additional ABR tiers — encoded from tier 0 output, not original source
         for ti, tier in enumerate(abr_tiers, start=1):
+            _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
             target_h = tier["height"]
             # Calculate proportional width (even number)
             target_w = int(source_width * target_h / source_height)
@@ -510,6 +635,9 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
                 cmd, f"video tier {ti} ({target_h}p) for {job_id}",
                 duration_seconds=media_duration,
                 step_progress_cb=make_step_progress_cb(f"Encoding video ({target_h}p)"),
+                cancel_event=cancel_event,
+                on_process_start=on_process_start,
+                on_process_end=on_process_end,
             )
             tier_dir = os.path.dirname(playlist)
             result.video_playlists.append((
@@ -521,11 +649,15 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
 
     # 2. Audio streams - each track gets its own HLS stream
     for i, audio in enumerate(analysis.audio_streams):
+        _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
         cmd, playlist, audio_dir = _build_audio_cmd(analysis, audio, i, output_dir)
         _run_ffmpeg_with_progress(
             cmd, f"audio track {i} ({audio.language}) for {job_id}",
             duration_seconds=media_duration,
             step_progress_cb=make_step_progress_cb(f"Encoding audio {i}"),
+            cancel_event=cancel_event,
+            on_process_start=on_process_start,
+            on_process_end=on_process_end,
         )
         result.audio_playlists.append((
             playlist, audio_dir, audio.language, audio.title, audio.channels,
@@ -538,6 +670,7 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
     #    Skip bitmap formats (dvd_subtitle, hdmv_pgs_subtitle, mov_text, etc.)
     #    which cannot be converted to WebVTT
     for i, sub in enumerate(analysis.subtitle_streams):
+        _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
         if not sub.is_text_based:
             logger.info(
                 "Skipping subtitle track %d (%s): codec %s is not text-based",
@@ -547,7 +680,13 @@ def process(analysis: MediaAnalysis, job_id: str, progress_callback=None) -> Pro
             continue
         cmd, vtt_file, sub_dir = _extract_subtitle(analysis, sub, i, output_dir)
         try:
-            _run_ffmpeg(cmd, f"subtitle track {i} ({sub.language}) for {job_id}")
+            _run_ffmpeg(
+                cmd,
+                f"subtitle track {i} ({sub.language}) for {job_id}",
+                cancel_event=cancel_event,
+                on_process_start=on_process_start,
+                on_process_end=on_process_end,
+            )
             result.subtitle_files.append((vtt_file, sub_dir, sub.language, sub.title, i, sub.index))
             report(f"Subtitle track {i} ({sub.language}) extracted")
         except RuntimeError as e:

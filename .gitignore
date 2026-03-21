@@ -1,4 +1,5 @@
 .env
+watch_settings.json
 streamer.db
 streamer.db-shm
 streamer.db-wal

@@ -10,11 +10,9 @@ Web server that handles:
 
 import asyncio
 import atexit
-import base64
 import collections
 import concurrent.futures
-import hashlib
-import hmac
+import json
 import logging
 import os
 import queue
@@ -30,7 +28,12 @@ import uuid
 from threading import Lock, RLock, Thread
 
 import aiohttp
-from werkzeug.utils import secure_filename
+try:
+    from werkzeug.utils import secure_filename
+except ImportError:  # pragma: no cover - fallback for minimal test environments
+    def secure_filename(filename):
+        cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(filename or "")).strip("._")
+        return cleaned[:255]
 
 from flask import (
     Flask, jsonify, render_template, request, Response, stream_with_context,
@@ -55,9 +58,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 # Per-chunk limit only — the full file is assembled from many chunks
 app.config["MAX_CONTENT_LENGTH"] = Config.UPLOAD_CHUNK_SIZE * 2
+_WATCH_SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "watch_settings.json")
 
 # Track active jobs: job_id -> {status, progress, ...}
 _active_jobs = {}
+_job_source_info = {}
+_job_runtime = {}
 
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
@@ -66,6 +72,11 @@ _pending_uploads_lock = Lock()  # protects _pending_uploads, _pending_filenames,
 _upload_locks = {}
 _last_pending_cleanup = 0.0
 _watcher_started = False
+_folder_watcher_started = False
+_watch_state_lock = Lock()
+_watch_candidates = {}
+_watch_claimed_paths = set()
+_watch_failed_signatures = {}
 
 # ─── Upload Rate Limiting ───
 # Per-IP sliding window: maps IP -> deque of request timestamps
@@ -73,6 +84,92 @@ _rate_limit_hits = collections.defaultdict(collections.deque)
 _rate_limit_lock = Lock()
 # Per-IP pending upload count (incremented on init, decremented on finalize/expiry)
 _pending_uploads_per_ip = collections.Counter()
+
+
+class _JobRuntime:
+    def __init__(self):
+        self.cancel_event = threading.Event()
+        self.lock = Lock()
+        self.current_process = None
+        self.upload_future = None
+
+
+def _get_job_runtime(job_id):
+    runtime = _job_runtime.get(job_id)
+    if runtime is None:
+        runtime = _JobRuntime()
+        _job_runtime[job_id] = runtime
+    return runtime
+
+
+def _set_job_process(job_id, proc):
+    runtime = _job_runtime.get(job_id)
+    if runtime is None:
+        return
+    with runtime.lock:
+        runtime.current_process = proc
+
+
+def _clear_job_process(job_id, proc):
+    runtime = _job_runtime.get(job_id)
+    if runtime is None:
+        return
+    with runtime.lock:
+        if runtime.current_process is proc:
+            runtime.current_process = None
+
+
+def _set_job_upload_future(job_id, future):
+    runtime = _job_runtime.get(job_id)
+    if runtime is None:
+        return
+    with runtime.lock:
+        runtime.upload_future = future
+
+
+def _clear_job_upload_future(job_id, future):
+    runtime = _job_runtime.get(job_id)
+    if runtime is None:
+        return
+    with runtime.lock:
+        if runtime.upload_future is future:
+            runtime.upload_future = None
+
+
+def _terminate_process(proc, job_id):
+    if proc is None or proc.poll() is not None:
+        return
+
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+        logger.info("Job %s: terminated FFmpeg process %s", job_id, proc.pid)
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning("Job %s: FFmpeg process %s did not exit after terminate()", job_id, proc.pid)
+    except Exception as exc:
+        logger.debug("Job %s: terminate() failed for process %s: %s", job_id, getattr(proc, "pid", "?"), exc)
+
+    try:
+        proc.kill()
+        logger.info("Job %s: killed FFmpeg process %s", job_id, proc.pid)
+    except Exception as exc:
+        logger.debug("Job %s: kill() failed for process %s: %s", job_id, getattr(proc, "pid", "?"), exc)
+
+
+def _request_job_stop(job_id):
+    runtime = _job_runtime.get(job_id)
+    if runtime is None:
+        return
+
+    runtime.cancel_event.set()
+    with runtime.lock:
+        proc = runtime.current_process
+        future = runtime.upload_future
+
+    _terminate_process(proc, job_id)
+    if future and not future.done():
+        future.cancel()
 
 
 def _get_client_ip():
@@ -141,6 +238,89 @@ def _is_origin_allowed(origin: str) -> bool:
     if "*" in Config.CORS_ALLOWED_ORIGINS:
         return True
     return origin in Config.CORS_ALLOWED_ORIGINS
+
+
+def _normalize_watch_settings(data=None):
+    """Validate and normalize mutable watcher settings."""
+    data = data or {}
+    watch_enabled = data.get("watch_enabled", Config.WATCH_ENABLED)
+    if isinstance(watch_enabled, str):
+        watch_enabled = watch_enabled.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        watch_enabled = bool(watch_enabled)
+
+    watch_root_raw = str(data.get("watch_root", Config.WATCH_ROOT or "") or "").strip()
+    watch_done_raw = str(data.get("watch_done_dir", Config.WATCH_DONE_DIR or "") or "").strip()
+
+    watch_root = (
+        os.path.abspath(os.path.expanduser(watch_root_raw))
+        if watch_root_raw
+        else ""
+    )
+    if watch_enabled and not watch_root:
+        raise ValueError("watch_root is required when watch_enabled is true")
+
+    watch_done_dir = (
+        os.path.abspath(os.path.expanduser(watch_done_raw))
+        if watch_done_raw
+        else (os.path.join(watch_root, "done") if watch_root else "")
+    )
+
+    return {
+        "watch_enabled": watch_enabled,
+        "watch_root": watch_root,
+        "watch_done_dir": watch_done_dir,
+    }
+
+
+def _current_watch_settings():
+    settings = _normalize_watch_settings()
+    settings["watch_running"] = bool(_folder_watcher_started and Config.WATCH_ENABLED)
+    return settings
+
+
+def _persist_watch_settings(settings):
+    with open(_WATCH_SETTINGS_PATH, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2, sort_keys=True)
+
+
+def _apply_watch_settings(data=None, *, persist=False):
+    """Apply watcher settings to the live process and optionally persist them."""
+    settings = _normalize_watch_settings(data)
+    previous_root = Config.WATCH_ROOT
+    previous_done = Config.WATCH_DONE_DIR
+
+    Config.WATCH_ENABLED = settings["watch_enabled"]
+    Config.WATCH_ROOT = settings["watch_root"]
+    Config.WATCH_DONE_DIR = settings["watch_done_dir"]
+
+    if Config.WATCH_ROOT:
+        os.makedirs(Config.WATCH_ROOT, exist_ok=True)
+    if Config.WATCH_DONE_DIR:
+        os.makedirs(Config.WATCH_DONE_DIR, exist_ok=True)
+
+    if previous_root != Config.WATCH_ROOT or previous_done != Config.WATCH_DONE_DIR:
+        with _watch_state_lock:
+            _watch_candidates.clear()
+            _watch_claimed_paths.clear()
+            _watch_failed_signatures.clear()
+
+    if persist:
+        _persist_watch_settings(settings)
+
+    return _current_watch_settings()
+
+
+def _load_persisted_watch_settings():
+    if not os.path.exists(_WATCH_SETTINGS_PATH):
+        return
+    try:
+        with open(_WATCH_SETTINGS_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        _apply_watch_settings(payload, persist=False)
+        logger.info("Loaded persisted watch settings from %s", _WATCH_SETTINGS_PATH)
+    except Exception as exc:
+        logger.warning("Could not load persisted watch settings: %s", exc)
 
 
 _async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
@@ -249,65 +429,6 @@ def _shutdown_persistent_loop():
 atexit.register(_shutdown_persistent_loop)
 
 
-def _is_upload_authorized():
-    """Validate optional API key / basic auth for upload APIs."""
-    if not (Config.UPLOAD_API_KEY or Config.UPLOAD_BASIC_USER):
-        return True
-
-    if Config.UPLOAD_API_KEY:
-        api_key = request.headers.get("X-API-Key", "").strip()
-        if api_key and api_key == Config.UPLOAD_API_KEY:
-            return True
-
-    if Config.UPLOAD_BASIC_USER:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Basic "):
-            b64 = auth_header.split(" ", 1)[1]
-            try:
-                decoded = base64.b64decode(b64).decode("utf-8")
-                username, password = decoded.split(":", 1)
-            except Exception:
-                return False
-            if (
-                username == Config.UPLOAD_BASIC_USER
-                and password == Config.UPLOAD_BASIC_PASSWORD
-            ):
-                return True
-
-    return False
-
-
-def _require_upload_auth():
-    """Return auth response tuple if unauthorized, otherwise None."""
-    if request.method == "OPTIONS":
-        return None
-    if _is_upload_authorized():
-        return None
-    return jsonify({"error": "Unauthorized"}), 401
-
-
-def _generate_playback_token(job_id):
-    """Generate a deterministic HMAC-SHA256 token for a job. Returns None if auth is disabled."""
-    if not Config.PLAYBACK_SECRET:
-        return None
-    return hmac.new(
-        Config.PLAYBACK_SECRET.encode(),
-        job_id.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-
-
-def _require_playback_auth(job_id):
-    """Return a 403 response if playback auth is enabled and the token is missing or invalid."""
-    if not Config.PLAYBACK_SECRET:
-        return None
-    token = request.args.get("token", "")
-    expected = _generate_playback_token(job_id)
-    if not token or not hmac.compare_digest(token, expected):
-        return jsonify({"error": "Unauthorized"}), 403
-    return None
-
-
 def _cleanup_expired_pending_uploads(force=False):
     """Delete stale pending uploads from memory + disk."""
     global _last_pending_cleanup
@@ -384,6 +505,7 @@ def _start_timeout_watcher():
                         )
                         job["step"] = "Timed out"
                         job["finished_ts"] = time.time()
+                    _request_job_stop(job_id)
                     logger.error("Job %s timed out at %s", job_id, step)
 
             # Evict finished jobs from _active_jobs to prevent unbounded memory growth.
@@ -399,6 +521,31 @@ def _start_timeout_watcher():
                 _active_jobs.pop(jid, None)
 
     Thread(target=watch, daemon=True).start()
+
+
+def _start_folder_watcher():
+    """Start the background polling watcher for local auto-ingest."""
+    global _folder_watcher_started
+    if _folder_watcher_started or not Config.WATCH_ENABLED:
+        return
+    _folder_watcher_started = True
+
+    def watch():
+        logger.info(
+            "Folder watcher enabled: root=%s done=%s poll=%ss stable=%ss",
+            Config.WATCH_ROOT,
+            Config.WATCH_DONE_DIR,
+            Config.WATCH_POLL_SECONDS,
+            Config.WATCH_STABLE_SECONDS,
+        )
+        while True:
+            try:
+                _watch_scan_once()
+            except Exception:
+                logger.exception("Watch-folder scan failed")
+            time.sleep(Config.WATCH_POLL_SECONDS)
+
+    Thread(target=watch, daemon=True, name="folder-watcher").start()
 
 
 def _is_job_cancelled(job_id):
@@ -471,10 +618,6 @@ def _start_retention_cleanup():
 @app.route("/api/cancel/<job_id>", methods=["POST"])
 def cancel_job(job_id):
     """Cancel a running job."""
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
-
     job = _active_jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found or already finished"}), 404
@@ -489,28 +632,14 @@ def cancel_job(job_id):
         job["step"] = "Cancelled"
         job["finished_ts"] = time.time()
 
+    _request_job_stop(job_id)
     logger.info("Job %s cancelled by user", job_id)
     return jsonify({"message": "Job cancellation requested"})
-
-
-@app.route("/api/jobs/<job_id>/token")
-def get_playback_token(job_id):
-    """Return the HMAC playback token for a job (requires upload auth if configured)."""
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
-    if not get_job(job_id):
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify({"token": _generate_playback_token(job_id)})
 
 
 @app.route("/api/jobs/<job_id>", methods=["DELETE"])
 def delete_job_endpoint(job_id):
     """Delete a completed job from the database."""
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
-
     if job_id in _active_jobs:
         status = _active_jobs[job_id].get("status")
         if status not in _TERMINAL_JOB_STATES:
@@ -526,11 +655,13 @@ def delete_job_endpoint(job_id):
 
 # Shared TelegramUploader singleton — avoids creating fresh Bot objects on every
 # segment proxy request or processing job.
+_load_persisted_watch_settings()
 _telegram_uploader = TelegramUploader()
 _start_persistent_loop()
 
 _start_timeout_watcher()
 _start_queue_workers()
+_start_folder_watcher()
 _start_retention_cleanup()
 
 
@@ -586,6 +717,30 @@ def health():
     }), code
 
 
+@app.route("/api/watch-settings", methods=["GET", "POST"])
+def watch_settings():
+    """Read or update mutable watch-folder settings for the UI."""
+    if request.method == "GET":
+        return jsonify(_current_watch_settings())
+
+    data = request.get_json() or {}
+    try:
+        settings = _apply_watch_settings(data, persist=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        logger.warning("Failed to save watch settings: %s", exc)
+        return jsonify({"error": f"Could not save watch settings: {exc}"}), 500
+
+    if settings["watch_enabled"]:
+        _start_folder_watcher()
+        try:
+            _watch_scan_once()
+        except Exception:
+            logger.exception("Initial watch-folder scan failed after settings update")
+    return jsonify(settings)
+
+
 # ─── Chunked Upload API ───
 #
 # Flow:
@@ -597,12 +752,16 @@ def health():
 # successful chunk. Only the failed 10MB chunk needs to be re-sent,
 # not the entire 50GB+ file.
 
+def _bots_configured():
+    """Return True if at least one Telegram bot is configured."""
+    return len(_telegram_uploader.bots) > 0
+
 @app.route("/api/upload/init", methods=["POST"])
 def upload_init():
     """Initialize a chunked upload session."""
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
+    if not _bots_configured():
+        return jsonify({"error": "No Telegram bots configured."}), 503
+
     rate_limited = _check_rate_limit()
     if rate_limited:
         return rate_limited
@@ -698,9 +857,6 @@ def upload_chunk():
       X-Chunk-Index: 0-based chunk number
     Body: raw binary chunk data
     """
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
     rate_limited = _check_rate_limit()
     if rate_limited:
         return rate_limited
@@ -801,12 +957,208 @@ def _check_disk_space(file_size):
     return True, ""
 
 
+def _remove_pending_upload(upload_id):
+    """Remove a finalized pending upload from memory and per-IP tracking."""
+    with _pending_uploads_lock:
+        upload = _pending_uploads.pop(upload_id, None)
+        if not upload:
+            return None
+        _pending_filenames.pop(upload.get("filename"), None)
+        _upload_locks.pop(upload_id, None)
+        ip = upload.get("client_ip", "unknown")
+        if _pending_uploads_per_ip[ip] > 0:
+            _pending_uploads_per_ip[ip] -= 1
+        return upload
+
+
+def _queue_local_file(file_path, *, filename=None, source_mode="upload", skip_disk_check=False):
+    """Queue an existing local file for processing via the shared job pipeline."""
+    actual_size = os.path.getsize(file_path)
+    if not skip_disk_check:
+        ok, msg = _check_disk_space(actual_size)
+        if not ok:
+            raise RuntimeError(msg)
+
+    job_id = uuid.uuid4().hex[:12]
+    _active_jobs[job_id] = {
+        "status": "queued",
+        "filename": filename or os.path.basename(file_path),
+        "file_size": actual_size,
+        "progress": 0,
+        "step": "Queued for processing...",
+        "started_ts": time.time(),
+        "queue_position": None,
+    }
+    _job_source_info[job_id] = {
+        "mode": source_mode,
+        "path": file_path,
+    }
+    _get_job_runtime(job_id)
+    _enqueue_job(job_id, file_path)
+    return job_id, actual_size
+
+
+def _normalize_watch_path(path):
+    return os.path.realpath(os.path.abspath(path))
+
+
+def _path_is_within(path, root):
+    if not path or not root:
+        return False
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def _watch_file_signature(path):
+    stat_result = os.stat(path)
+    return stat_result.st_size, stat_result.st_mtime_ns
+
+
+def _is_supported_watch_video(path):
+    return os.path.splitext(path)[1].lower() in Config.WATCH_VIDEO_EXTENSIONS
+
+
+def _is_ignored_watch_path(path):
+    name = os.path.basename(path).lower()
+    if name.startswith("."):
+        return True
+    return any(name.endswith(suffix) for suffix in Config.WATCH_IGNORE_SUFFIXES)
+
+
+def _iter_watch_video_files():
+    """Yield supported video files under the watched root, excluding done/ and temp files."""
+    root = _normalize_watch_path(Config.WATCH_ROOT)
+    done_dir = _normalize_watch_path(Config.WATCH_DONE_DIR)
+    for dirpath, dirnames, filenames in os.walk(root):
+        norm_dir = _normalize_watch_path(dirpath)
+        if _path_is_within(norm_dir, done_dir):
+            continue
+
+        kept_dirs = []
+        for dirname in dirnames:
+            child_path = _normalize_watch_path(os.path.join(dirpath, dirname))
+            if _path_is_within(child_path, done_dir):
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            if _is_ignored_watch_path(path):
+                continue
+            if not os.path.isfile(path):
+                continue
+            if not _is_supported_watch_video(path):
+                continue
+            yield _normalize_watch_path(path)
+
+
+def _claim_watch_file_if_stable(path):
+    """Claim a watched file once it has stopped changing for the quiet period."""
+    now = time.time()
+    signature = _watch_file_signature(path)
+    with _watch_state_lock:
+        if path in _watch_claimed_paths:
+            return False
+        if _watch_failed_signatures.get(path) == signature:
+            return False
+
+        entry = _watch_candidates.get(path)
+        if not entry or entry["signature"] != signature:
+            _watch_candidates[path] = {
+                "signature": signature,
+                "stable_since": now,
+            }
+            return False
+
+        if now - entry["stable_since"] < Config.WATCH_STABLE_SECONDS:
+            return False
+
+        _watch_claimed_paths.add(path)
+        _watch_candidates.pop(path, None)
+        _watch_failed_signatures.pop(path, None)
+        return True
+
+
+def _release_watch_file(path, *, success):
+    """Release watcher state after a queued file succeeds or fails."""
+    norm_path = _normalize_watch_path(path)
+    with _watch_state_lock:
+        _watch_claimed_paths.discard(norm_path)
+        _watch_candidates.pop(norm_path, None)
+        if success:
+            _watch_failed_signatures.pop(norm_path, None)
+            return
+        try:
+            _watch_failed_signatures[norm_path] = _watch_file_signature(norm_path)
+        except OSError:
+            _watch_failed_signatures.pop(norm_path, None)
+
+
+def _build_done_destination(path):
+    root = _normalize_watch_path(Config.WATCH_ROOT)
+    done_dir = _normalize_watch_path(Config.WATCH_DONE_DIR)
+    rel_path = os.path.relpath(path, root)
+    if rel_path.startswith(".."):
+        rel_path = os.path.basename(path)
+
+    destination = os.path.join(done_dir, rel_path)
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    if not os.path.exists(destination):
+        return destination
+
+    base, ext = os.path.splitext(destination)
+    counter = 1
+    while True:
+        candidate = f"{base}_{counter}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
+
+
+def _move_watched_file_to_done(path):
+    destination = _build_done_destination(path)
+    shutil.move(path, destination)
+    return destination
+
+
+def _watch_scan_once():
+    """Scan the watched root once and queue any stable video files."""
+    if not Config.WATCH_ENABLED:
+        return []
+
+    queued = []
+    for path in _iter_watch_video_files():
+        try:
+            if not _claim_watch_file_if_stable(path):
+                continue
+        except OSError:
+            continue
+
+        try:
+            job_id, _ = _queue_local_file(
+                path,
+                filename=os.path.basename(path),
+                source_mode="watch",
+            )
+        except Exception as exc:
+            logger.warning("Watcher could not queue %s: %s", path, exc)
+            _release_watch_file(path, success=False)
+            continue
+
+        queued.append(job_id)
+        logger.info("Watcher queued %s as job %s", path, job_id)
+    return queued
+
+
 @app.route("/api/upload/finalize", methods=["POST"])
 def upload_finalize():
     """Finalize a chunked upload and start processing."""
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
+    if not _bots_configured():
+        return jsonify({"error": "No Telegram bots configured."}), 503
+
     _cleanup_expired_pending_uploads()
     data = request.get_json()
     upload_id = data.get("upload_id") if data else None
@@ -814,43 +1166,33 @@ def upload_finalize():
     with _pending_uploads_lock:
         if not upload_id or upload_id not in _pending_uploads:
             return jsonify({"error": "Unknown upload_id"}), 404
+        upload_lock = _upload_locks.setdefault(upload_id, Lock())
+        upload = dict(_pending_uploads[upload_id])
 
-        upload = _pending_uploads.pop(upload_id)
-        _pending_filenames.pop(upload["filename"], None)
-        _upload_locks.pop(upload_id, None)
-        ip = upload.get("client_ip", "unknown")
-        if _pending_uploads_per_ip[ip] > 0:
-            _pending_uploads_per_ip[ip] -= 1
     file_path = upload["path"]
     filename = upload["filename"]
+    with upload_lock:
+        actual_size = os.path.getsize(file_path)
+        expected_size = upload["total_size"]
+        if actual_size != expected_size:
+            return jsonify({
+                "error": f"Incomplete upload: got {actual_size} bytes, expected {expected_size}",
+            }), 400
 
-    # Verify file size
-    actual_size = os.path.getsize(file_path)
-    expected_size = upload["total_size"]
-    if actual_size != expected_size:
-        return jsonify({
-            "error": f"Incomplete upload: got {actual_size} bytes, expected {expected_size}",
-        }), 400
+        ok, msg = _check_disk_space(actual_size)
+        if not ok:
+            logger.warning("Job rejected due to disk space: %s", msg)
+            return jsonify({"error": msg}), 507
 
-    # Check disk space before queuing (needs ~2x file size for ABR processing)
-    ok, msg = _check_disk_space(actual_size)
-    if not ok:
-        logger.warning("Job rejected due to disk space: %s", msg)
-        return jsonify({"error": msg}), 507
-
-    # Create job and enqueue for processing
-    job_id = uuid.uuid4().hex[:12]
-    _active_jobs[job_id] = {
-        "status": "queued",
-        "filename": filename,
-        "file_size": actual_size,
-        "progress": 0,
-        "step": "Queued for processing...",
-        "started_ts": time.time(),
-        "queue_position": None,
-    }
-
-    _enqueue_job(job_id, file_path)
+        removed = _remove_pending_upload(upload_id)
+        if removed is None:
+            return jsonify({"error": "Unknown upload_id"}), 404
+        job_id, actual_size = _queue_local_file(
+            file_path,
+            filename=filename,
+            source_mode="upload",
+            skip_disk_check=True,
+        )
 
     logger.info("Upload finalized: %s -> job %s (%d bytes)", upload_id, job_id, actual_size)
     return jsonify({"job_id": job_id, "status": "queued"})
@@ -859,9 +1201,6 @@ def upload_finalize():
 @app.route("/api/upload/status/<upload_id>")
 def upload_status(upload_id):
     """Check how many chunks have been received for a pending upload."""
-    unauthorized = _require_upload_auth()
-    if unauthorized:
-        return unauthorized
     _cleanup_expired_pending_uploads()
     if upload_id not in _pending_uploads:
         return jsonify({"error": "Unknown upload_id"}), 404
@@ -876,11 +1215,54 @@ def upload_status(upload_id):
 
 # ─── Processing Pipeline ───
 
+
+def _finalize_source_file(job_id, file_path):
+    """Clean up the original source according to how the job entered the system."""
+    _job_runtime.pop(job_id, None)
+    source = _job_source_info.pop(job_id, {"mode": "upload", "path": file_path})
+    source_mode = source.get("mode", "upload")
+    source_path = source.get("path", file_path)
+
+    if source_mode == "watch":
+        success = False
+        if _active_jobs.get(job_id, {}).get("status") == "complete":
+            if not os.path.exists(source_path):
+                success = True
+            else:
+                try:
+                    moved_to = _move_watched_file_to_done(source_path)
+                    logger.info("Moved watched source to done/: %s -> %s", source_path, moved_to)
+                    success = True
+                except OSError as exc:
+                    logger.warning("Could not move watched source to done/: %s", exc)
+        _release_watch_file(source_path, success=success)
+        return
+
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except OSError:
+            logger.warning("Could not remove upload file: %s", file_path)
+
+
 def _process_job(job_id, file_path):
     """Full pipeline: analyze -> process -> upload -> register."""
+    runtime = _get_job_runtime(job_id)
     try:
         if _is_job_cancelled(job_id):
             return
+
+        if not _bots_configured():
+            msg = "No Telegram bots configured"
+            logger.warning("Job %s aborted: %s", job_id, msg)
+            with _job_status_lock:
+                job = _active_jobs.get(job_id)
+                if job and not job.get("timed_out") and not job.get("cancelled"):
+                    job["status"] = "error"
+                    job["error"] = msg
+                    job["finished_ts"] = time.time()
+            return
+
         # Disk space check (space may have dropped since finalize if queue was long)
         file_size = _active_jobs.get(job_id, {}).get("file_size", 0)
         ok, msg = _check_disk_space(file_size)
@@ -914,7 +1296,14 @@ def _process_job(job_id, file_path):
                 _active_jobs[job_id]["progress"] = int(current / total * 50) if total else 0
                 _active_jobs[job_id]["step"] = step_name
 
-        result = process(analysis, job_id, progress_callback=on_process_progress)
+        result = process(
+            analysis,
+            job_id,
+            progress_callback=on_process_progress,
+            cancel_event=runtime.cancel_event,
+            on_process_start=lambda proc: _set_job_process(job_id, proc),
+            on_process_end=lambda proc: _clear_job_process(job_id, proc),
+        )
         if _is_job_cancelled(job_id):
             return
 
@@ -931,10 +1320,17 @@ def _process_job(job_id, file_path):
                 _active_jobs[job_id]["upload_current"] = current
                 _active_jobs[job_id]["upload_total"] = total
 
-        upload_result = _run_async(
-            _telegram_uploader.upload_job(result, progress_callback=on_upload_progress),
-            timeout=None,
+        upload_coro = _telegram_uploader.upload_job(
+            result,
+            progress_callback=on_upload_progress,
+            cancel_event=runtime.cancel_event,
         )
+        upload_future = asyncio.run_coroutine_threadsafe(upload_coro, _async_loop)
+        _set_job_upload_future(job_id, upload_future)
+        try:
+            upload_result = upload_future.result(timeout=None)
+        finally:
+            _clear_job_upload_future(job_id, upload_future)
         if _is_job_cancelled(job_id):
             return
 
@@ -973,16 +1369,22 @@ def _process_job(job_id, file_path):
                 job["status"] = "error"
                 job["error"] = str(e)
                 job["finished_ts"] = time.time()
+    except BaseException as e:
+        if _is_job_cancelled(job_id):
+            return
+        logger.exception("Job %s failed with non-standard exception", job_id)
+        with _job_status_lock:
+            job = _active_jobs.get(job_id)
+            if job and not job.get("timed_out") and not job.get("cancelled"):
+                job["status"] = "error"
+                job["error"] = str(e)
+                job["finished_ts"] = time.time()
 
     finally:
         # Always clean up processing artifacts and the source upload file,
         # regardless of whether the job succeeded, failed, or was cancelled.
         cleanup(job_id)
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                logger.warning("Could not remove upload file: %s", file_path)
+        _finalize_source_file(job_id, file_path)
 
 
 # ─── Job Status ───
@@ -1038,12 +1440,8 @@ def jobs_list():
 @app.route("/hls/<job_id>/master.m3u8")
 def master_playlist(job_id):
     """Serve master M3U8 playlist with multi-audio and subtitle variants."""
-    auth_error = _require_playback_auth(job_id)
-    if auth_error:
-        return auth_error
     base_url = _get_base_url()
-    token = request.args.get("token")
-    playlist = generate_master_playlist(job_id, base_url, token=token)
+    playlist = generate_master_playlist(job_id, base_url)
     if not playlist:
         return jsonify({"error": "Job not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -1052,11 +1450,7 @@ def master_playlist(job_id):
 @app.route("/hls/<job_id>/video.m3u8")
 def video_playlist(job_id):
     """Serve video-only media playlist (legacy, single-tier)."""
-    auth_error = _require_playback_auth(job_id)
-    if auth_error:
-        return auth_error
-    token = request.args.get("token")
-    playlist = generate_media_playlist(job_id, "video", token=token)
+    playlist = generate_media_playlist(job_id, "video")
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -1065,11 +1459,7 @@ def video_playlist(job_id):
 @app.route("/hls/<job_id>/video_<int:index>.m3u8")
 def video_tier_playlist(job_id, index):
     """Serve video media playlist for a specific quality tier."""
-    auth_error = _require_playback_auth(job_id)
-    if auth_error:
-        return auth_error
-    token = request.args.get("token")
-    playlist = generate_media_playlist(job_id, "video", index, token=token)
+    playlist = generate_media_playlist(job_id, "video", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -1078,11 +1468,7 @@ def video_tier_playlist(job_id, index):
 @app.route("/hls/<job_id>/audio_<int:index>.m3u8")
 def audio_playlist(job_id, index):
     """Serve audio track media playlist."""
-    auth_error = _require_playback_auth(job_id)
-    if auth_error:
-        return auth_error
-    token = request.args.get("token")
-    playlist = generate_media_playlist(job_id, "audio", index, token=token)
+    playlist = generate_media_playlist(job_id, "audio", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -1091,11 +1477,7 @@ def audio_playlist(job_id, index):
 @app.route("/hls/<job_id>/sub_<int:index>.m3u8")
 def subtitle_playlist(job_id, index):
     """Serve subtitle track playlist."""
-    auth_error = _require_playback_auth(job_id)
-    if auth_error:
-        return auth_error
-    token = request.args.get("token")
-    playlist = generate_media_playlist(job_id, "sub", index, token=token)
+    playlist = generate_media_playlist(job_id, "sub", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
@@ -1256,6 +1638,10 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
                             state.stream_abandoned,
                             chunk,
                         )
+                    else:
+                        # Yield to event loop between chunks so concurrent prefetch
+                        # downloads can interleave fairly on the same asyncio loop.
+                        await asyncio.sleep(0)
 
         if not wrote_any:
             raise RuntimeError(f"Empty Telegram response for {cache_key}")
@@ -1336,30 +1722,42 @@ def _stream_segment_file(state):
         _release_segment_download(state)
 
 
-async def _prefetch_segment(job_id, segment_key):
-    """Best-effort background fetch for a future segment."""
+async def _prefetch_segment_with_info(job_id, segment_key, file_id, bot_index):
+    """Best-effort background fetch for a future segment with pre-resolved Telegram info."""
     cache_key = f"{job_id}/{segment_key}"
     try:
         if _segment_cache.has(cache_key):
             return
 
-        info = get_segment_info(job_id, segment_key)
-        if not info:
-            return
-
         state, is_owner = _claim_segment_download(cache_key)
         if not is_owner:
             return
-        await _download_segment_to_state(info["file_id"], info["bot_index"], cache_key, state)
+        logger.debug("Prefetch start: %s (bot %d)", segment_key, bot_index)
+        await _download_segment_to_state(file_id, bot_index, cache_key, state)
+        logger.debug("Prefetch done:  %s", segment_key)
     except Exception as exc:
         logger.debug("Segment prefetch failed %s: %s", cache_key, exc)
     finally:
         _release_segment_prefetch(cache_key)
 
 
-def _start_prefetch_task(job_id, segment_key):
-    """Create an async task for a single segment prefetch on the persistent loop."""
-    asyncio.create_task(_prefetch_segment(job_id, segment_key))
+async def _batch_prefetch(segments):
+    """Run multiple segment prefetches concurrently via asyncio.gather."""
+    logger.info(
+        "Prefetch batch: %d segments — %s",
+        len(segments),
+        ", ".join(s["segment_key"].rsplit("/", 1)[-1] for s in segments),
+    )
+    await asyncio.gather(
+        *[_prefetch_segment_with_info(s["job_id"], s["segment_key"], s["file_id"], s["bot_index"])
+          for s in segments],
+        return_exceptions=True,
+    )
+
+
+def _start_batch_prefetch(segments):
+    """Create a single async task that concurrently fetches all given segments."""
+    asyncio.create_task(_batch_prefetch(segments))
 
 
 def _schedule_segment_prefetch(job_id, segment_key):
@@ -1369,6 +1767,12 @@ def _schedule_segment_prefetch(job_id, segment_key):
         return
 
     if _segment_cache.max_bytes <= 0:
+        return
+
+    if (
+        Config.SEGMENT_PREFETCH_MIN_FREE_BYTES > 0
+        and _segment_cache.free_bytes < Config.SEGMENT_PREFETCH_MIN_FREE_BYTES
+    ):
         return
 
     prefix = _get_segment_prefix(segment_key)
@@ -1388,6 +1792,7 @@ def _schedule_segment_prefetch(job_id, segment_key):
     if current_index is None:
         return
 
+    to_prefetch = []
     buffered_ahead = 0
     for segment in segments[current_index + 1:]:
         if buffered_ahead >= prefetch_count:
@@ -1408,7 +1813,15 @@ def _schedule_segment_prefetch(job_id, segment_key):
             continue
 
         buffered_ahead += 1
-        _async_loop.call_soon_threadsafe(_start_prefetch_task, job_id, next_segment_key)
+        to_prefetch.append({
+            "job_id": job_id,
+            "segment_key": next_segment_key,
+            "file_id": segment["file_id"],
+            "bot_index": segment["bot_index"],
+        })
+
+    if to_prefetch:
+        _async_loop.call_soon_threadsafe(_start_batch_prefetch, to_prefetch)
 
 
 # ─── Segment Proxy ───
@@ -1416,9 +1829,6 @@ def _schedule_segment_prefetch(job_id, segment_key):
 @app.route("/segment/<job_id>/<path:segment_key>")
 def serve_segment(job_id, segment_key):
     """Proxy a segment from Telegram."""
-    auth_error = _require_playback_auth(job_id)
-    if auth_error:
-        return auth_error
     info = get_segment_info(job_id, segment_key)
     if not info:
         return jsonify({"error": "Segment not found"}), 404
@@ -1524,7 +1934,7 @@ def add_cors(response):
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = (
-                "Content-Type, Authorization, X-API-Key, X-Upload-Id, X-Chunk-Index"
+                "Content-Type, X-Upload-Id, X-Chunk-Index"
             )
     return response
 
@@ -1675,6 +2085,8 @@ if __name__ == "__main__":
     logger.info("Configured bots: %d", len(Config.BOTS))
     logger.info("Max upload size: %d GB", Config.MAX_UPLOAD_SIZE // (1024**3))
     logger.info("Chunk size: %d MB", Config.UPLOAD_CHUNK_SIZE // (1024**2))
+    if Config.WATCH_ENABLED:
+        logger.info("Watch root: %s -> done: %s", Config.WATCH_ROOT, Config.WATCH_DONE_DIR)
     if Config.CLOUDFLARED_ENABLED:
         tunnel_thread = Thread(target=_start_cloudflared_tunnel, args=(Config.PORT,), daemon=True)
         tunnel_thread.start()

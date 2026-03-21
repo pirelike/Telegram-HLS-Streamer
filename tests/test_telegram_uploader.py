@@ -230,7 +230,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         """Retry logic: patching _upload_file_with_bot_lock to succeed on 2nd call."""
         call_count = 0
 
-        async def upload_side_effect(path, bot_entry):
+        async def upload_side_effect(path, bot_entry, cancel_event=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -246,7 +246,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         # Reset and test that success on first call works
         call_count = 0
 
-        async def success_side_effect(path, bot_entry):
+        async def success_side_effect(path, bot_entry, cancel_event=None):
             return tu.UploadedSegment("ok", 0, "f.ts", 5)
 
         with patch.object(self.uploader, "_upload_file_with_bot_lock",
@@ -269,7 +269,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.uploader.upload_files([]), {})
 
     async def test_upload_files_calls_progress_callback(self):
-        async def fake_upload(path, bot_entry):
+        async def fake_upload(path, bot_entry, cancel_event=None):
             return tu.UploadedSegment(f"fid-{os.path.basename(path)}", bot_entry["index"],
                                       os.path.basename(path), 5)
 
@@ -283,7 +283,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress[-1][0], 2)  # current == total at end
 
     async def test_upload_files_maps_keys_to_segments(self):
-        async def fake_upload(path, bot_entry):
+        async def fake_upload(path, bot_entry, cancel_event=None):
             return tu.UploadedSegment(f"id-{os.path.basename(path)}", 0,
                                       os.path.basename(path), 10)
 
@@ -296,12 +296,33 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.assertIn("audio_0/seg2.ts", out)
 
     async def test_upload_files_no_callback(self):
-        async def fake_upload(path, bot_entry):
+        async def fake_upload(path, bot_entry, cancel_event=None):
             return tu.UploadedSegment("fid", 0, "f.ts", 1)
 
         with patch.object(self.uploader, "_upload_file_with_bot_lock", side_effect=fake_upload):
             out = await self.uploader.upload_files([("k/f.ts", "/tmp/f.ts")])
         self.assertEqual(len(out), 1)
+
+    async def test_upload_file_cancel_event_aborts_before_attempt(self):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"abc")
+            path = f.name
+        try:
+            cancel_event = asyncio.Event()
+            cancel_event.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await self.uploader._upload_file(path, self.uploader.bots[0], cancel_event=cancel_event)
+        finally:
+            os.unlink(path)
+
+    async def test_upload_files_cancelled_cleans_up_tasks(self):
+        async def fake_upload(path, bot_entry, cancel_event=None):
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError()
+
+        with patch.object(self.uploader, "_upload_file_with_bot_lock", side_effect=fake_upload):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.uploader.upload_files([("video/a.ts", "/tmp/a.ts")], cancel_event=asyncio.Event())
 
     # ─── upload_job ───
 
@@ -330,7 +351,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
                 subtitle_files=[(vtt, os.path.dirname(vtt), "eng", "English", 0, 3)],
             )
 
-            async def fake_upload_files(files, cb=None):
+            async def fake_upload_files(files, cb=None, cancel_event=None):
                 result = {}
                 for idx, (k, p) in enumerate(files, start=1):
                     if cb:
@@ -362,7 +383,7 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
                 subtitle_files=[],
             )
 
-            async def fake_upload_files(files, cb=None):
+            async def fake_upload_files(files, cb=None, cancel_event=None):
                 return {k: tu.UploadedSegment("id", 0, "f", 1) for k, _ in files}
 
             with patch.object(self.uploader, "upload_files", side_effect=fake_upload_files):

@@ -258,6 +258,38 @@ class TestAnalyze(unittest.TestCase):
 
         self.assertFalse(result.has_video)
         self.assertFalse(result.has_audio)
+
+    @patch("stream_analyzer.subprocess.run")
+    def test_analyze_tolerates_na_numeric_fields(self, mock_run):
+        payload = {
+            "format": {"duration": "N/A", "size": ""},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "disposition": {"attached_pic": 0},
+                    "tags": {},
+                },
+                {
+                    "index": 1,
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "channels": 2,
+                    "sample_rate": "N/A",
+                    "tags": {},
+                },
+            ],
+        }
+        mock_run.return_value = Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        result = sa.analyze("na_fields.mp4")
+
+        self.assertEqual(result.duration, 0.0)
+        self.assertEqual(result.file_size, 0)
+        self.assertEqual(result.audio_streams[0].sample_rate, 48000)
         self.assertFalse(result.has_subtitles)
 
     @patch("stream_analyzer.subprocess.run", side_effect=FileNotFoundError)

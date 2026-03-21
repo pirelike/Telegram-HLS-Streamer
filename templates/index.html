@@ -52,6 +52,24 @@
         .copy-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; white-space: nowrap; }
         .copy-btn:hover { background: #30363d; }
 
+        .settings-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; margin-bottom: 2rem; }
+        .settings-card h2 { font-size: 1.05rem; margin-bottom: 0.4rem; }
+        .settings-note { color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem; }
+        .settings-grid { display: grid; grid-template-columns: 1fr; gap: 0.8rem; }
+        .settings-row { display: flex; flex-direction: column; gap: 0.35rem; }
+        .settings-row label { font-size: 0.85rem; color: #c9d1d9; }
+        .settings-row input[type="text"] { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; padding: 0.7rem 0.8rem; font-size: 0.9rem; }
+        .settings-row input[type="text"]:focus { outline: none; border-color: #58a6ff; }
+        .settings-inline { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+        .settings-inline label { margin: 0; }
+        .settings-actions { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin-top: 0.6rem; }
+        .settings-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.55rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+        .settings-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+        .settings-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .settings-status { font-size: 0.85rem; color: #8b949e; }
+        .settings-status.error { color: #f85149; }
+        .settings-status.ok { color: #56d364; }
+
         .jobs-section { margin-top: 2rem; }
         .jobs-section h2 { font-size: 1.2rem; margin-bottom: 1rem; color: #c9d1d9; }
         .job-item { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; }
@@ -121,6 +139,29 @@
             </div>
         </div>
 
+        <div class="settings-card">
+            <h2>Watch Folder</h2>
+            <p class="settings-note">Set the folder to scan for finished downloads. Leave the done folder blank to use <code>&lt;watch root&gt;/done</code>.</p>
+            <div class="settings-grid">
+                <div class="settings-inline">
+                    <input type="checkbox" id="watchEnabled">
+                    <label for="watchEnabled">Enable automatic watch-folder uploads</label>
+                </div>
+                <div class="settings-row">
+                    <label for="watchRoot">Folder to watch</label>
+                    <input type="text" id="watchRoot" placeholder="/home/you/Downloads">
+                </div>
+                <div class="settings-row">
+                    <label for="watchDoneDir">Finished folder</label>
+                    <input type="text" id="watchDoneDir" placeholder="/home/you/Downloads/done">
+                </div>
+            </div>
+            <div class="settings-actions">
+                <button class="settings-btn" id="saveWatchSettingsBtn" onclick="saveWatchSettings()">Save watch settings</button>
+                <span class="settings-status" id="watchSettingsStatus">Loading current settings...</span>
+            </div>
+        </div>
+
         <div class="jobs-section">
             <h2>Previous Uploads</h2>
             <div id="jobsList"><p style="color:#8b949e;">Loading...</p></div>
@@ -149,6 +190,11 @@
     const errorMsg = document.getElementById('errorMsg');
     const resumeBanner = document.getElementById('resumeBanner');
     const resumeBannerText = document.getElementById('resumeBannerText');
+    const watchEnabled = document.getElementById('watchEnabled');
+    const watchRoot = document.getElementById('watchRoot');
+    const watchDoneDir = document.getElementById('watchDoneDir');
+    const saveWatchSettingsBtn = document.getElementById('saveWatchSettingsBtn');
+    const watchSettingsStatus = document.getElementById('watchSettingsStatus');
 
     let isCancelled = false;
     let currentJobId = null;
@@ -476,6 +522,61 @@
         return h + 'h ' + m + 'm';
     }
 
+    function setWatchSettingsStatus(message, kind = '') {
+        watchSettingsStatus.textContent = message;
+        watchSettingsStatus.className = `settings-status${kind ? ' ' + kind : ''}`;
+    }
+
+    function applyWatchSettings(data) {
+        watchEnabled.checked = !!data.watch_enabled;
+        watchRoot.value = data.watch_root || '';
+        watchDoneDir.value = data.watch_done_dir || '';
+        if (data.watch_enabled) {
+            const state = data.watch_running ? 'watcher active' : 'watcher pending';
+            setWatchSettingsStatus(`Saved. ${state}.`, 'ok');
+        } else {
+            setWatchSettingsStatus('Watcher disabled.', '');
+        }
+    }
+
+    function loadWatchSettings() {
+        fetch('/api/watch-settings')
+            .then(r => r.json())
+            .then(data => {
+                applyWatchSettings(data);
+            })
+            .catch(() => {
+                setWatchSettingsStatus('Could not load watch settings.', 'error');
+            });
+    }
+
+    function saveWatchSettings() {
+        saveWatchSettingsBtn.disabled = true;
+        setWatchSettingsStatus('Saving...', '');
+        fetch('/api/watch-settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                watch_enabled: watchEnabled.checked,
+                watch_root: watchRoot.value.trim(),
+                watch_done_dir: watchDoneDir.value.trim(),
+            }),
+        })
+            .then(async r => {
+                const data = await r.json();
+                if (!r.ok) {
+                    throw new Error(data.error || 'Could not save watch settings.');
+                }
+                applyWatchSettings(data);
+            })
+            .catch(err => {
+                setWatchSettingsStatus(err.message, 'error');
+            })
+            .finally(() => {
+                saveWatchSettingsBtn.disabled = false;
+            });
+    }
+
     // ── Job list with pagination ───────────────────────────────────────────────
     function loadJobs() {
         const container = document.getElementById('jobsList');
@@ -493,7 +594,6 @@
                     return;
                 }
                 container.innerHTML = ids.map(id => renderJobItem(id, jobs[id])).join('');
-                applyTokensToJobLinks(ids);
                 const loadMoreBtn = document.getElementById('loadMoreBtn');
                 if (data.has_more) {
                     loadMoreBtn.classList.add('visible');
@@ -516,7 +616,6 @@
                 if (ids.length === 0) return;
                 const container = document.getElementById('jobsList');
                 container.insertAdjacentHTML('beforeend', ids.map(id => renderJobItem(id, jobs[id])).join(''));
-                applyTokensToJobLinks(ids);
                 const loadMoreBtn = document.getElementById('loadMoreBtn');
                 if (data.has_more) {
                     loadMoreBtn.classList.add('visible');
@@ -613,19 +712,7 @@
         deleteJob(btn.dataset.jobId);
     });
 
-    function applyTokensToJobLinks(ids) {
-        ids.forEach(function(id) {
-            fetch('/api/jobs/' + id + '/token')
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    if (!data.token) return;
-                    var link = document.querySelector('#job-' + id + ' .job-link');
-                    if (link) link.href += '?token=' + data.token;
-                })
-                .catch(function() {});
-        });
-    }
-
+    loadWatchSettings();
     loadJobs();
     </script>
 </body>
