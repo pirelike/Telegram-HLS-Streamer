@@ -5,7 +5,7 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 # Provide a lightweight telegram stub so importing app works in test envs.
 telegram_mod = types.ModuleType("telegram")
@@ -68,6 +68,7 @@ def _reset_state():
     app_module._segment_downloads.clear()
     app_module._segment_cache.clear()
     app_module._scheduled_segment_prefetches.clear()
+    app_module._last_player_segment.clear()
     app_module._watch_candidates.clear()
     app_module._watch_claimed_paths.clear()
     app_module._watch_failed_signatures.clear()
@@ -116,6 +117,8 @@ class TestP0TodoFixes(unittest.TestCase):
         self.upload_dir_patch.start()
         self.chunk_size_patch.start()
         self.max_upload_size_patch.start()
+        self.bots_patch = patch.object(app_module._telegram_uploader, "bots", [{"bot": StubBot(), "index": 0, "channel_id": -1001}])
+        self.bots_patch.start()
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -123,6 +126,7 @@ class TestP0TodoFixes(unittest.TestCase):
         self.upload_dir_patch.stop()
         self.chunk_size_patch.stop()
         self.max_upload_size_patch.stop()
+        self.bots_patch.stop()
         self.temp.cleanup()
 
     def _init_upload(self, filename="sample.bin", total_size=8, total_chunks=2):
@@ -833,7 +837,7 @@ class TestP0TodoFixes(unittest.TestCase):
     def test_schedule_segment_prefetch_respects_min_free_bytes_guard(self):
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
              patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 128), \
-             patch.object(app_module._segment_cache, "free_bytes", 64), \
+             patch.object(type(app_module._segment_cache), "free_bytes", new_callable=PropertyMock, return_value=64), \
              patch("app.db.get_segments_for_prefix") as get_segments:
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
         get_segments.assert_not_called()
@@ -958,6 +962,81 @@ class TestP0TodoFixes(unittest.TestCase):
             app_module._run_async(app_module._prefetch_segment_with_info("job1", "video/video_0002.ts", "fid", 0))
         download_to_state.assert_not_called()
         self.assertNotIn(cache_key, app_module._scheduled_segment_prefetches)
+
+    # ─── Bounded prefetch chain ───
+
+    def test_serve_segment_updates_last_player_segment(self):
+        with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch.object(app_module._segment_cache, "get", return_value=b"data"), \
+             patch("app._schedule_segment_prefetch"):
+            self.client.get("/segment/job1/video_0/video_0001.ts")
+        with app_module._last_player_segment_lock:
+            val = app_module._last_player_segment.get(("job1", "video_0"))
+        self.assertEqual(val, "video_0/video_0001.ts")
+
+    def test_serve_segment_does_not_update_last_player_segment_for_audio(self):
+        with patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
+             patch.object(app_module._segment_cache, "get", return_value=b"data"), \
+             patch("app._schedule_segment_prefetch"):
+            self.client.get("/segment/job1/audio_0/audio_0001.ts")
+        with app_module._last_player_segment_lock:
+            val = app_module._last_player_segment.get(("job1", "audio_0"))
+        self.assertIsNone(val)
+
+    def test_batch_prefetch_chains_from_player_position(self):
+        segments = [
+            {"job_id": "job1", "segment_key": "video_0/video_0002.ts", "file_id": "fid2", "bot_index": 0},
+        ]
+        with app_module._last_player_segment_lock:
+            app_module._last_player_segment[("job1", "video_0")] = "video_0/video_0001.ts"
+
+        with patch("app._schedule_segment_prefetch") as mock_sched, \
+             patch("app._prefetch_segment_with_info", new=AsyncMock()):
+            app_module._run_async(app_module._batch_prefetch(segments, allow_chain=True))
+
+        mock_sched.assert_called_once_with("job1", "video_0/video_0001.ts", _from_chain=True)
+
+    def test_batch_prefetch_no_chain_when_disallowed(self):
+        segments = [
+            {"job_id": "job1", "segment_key": "video_0/video_0002.ts", "file_id": "fid2", "bot_index": 0},
+        ]
+        with app_module._last_player_segment_lock:
+            app_module._last_player_segment[("job1", "video_0")] = "video_0/video_0001.ts"
+
+        with patch("app._schedule_segment_prefetch") as mock_sched, \
+             patch("app._prefetch_segment_with_info", new=AsyncMock()):
+            app_module._run_async(app_module._batch_prefetch(segments, allow_chain=False))
+
+        mock_sched.assert_not_called()
+
+    def test_chain_depth_limited_to_one(self):
+        """Player-triggered batch gets allow_chain=True; chained batch gets allow_chain=False."""
+        segments = [
+            {"segment_key": "video_0/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video_0/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
+        ]
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "has", return_value=False), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            # Player-triggered (not from chain)
+            app_module._schedule_segment_prefetch("job1", "video_0/video_0001.ts", _from_chain=False)
+        call_soon.assert_called_once()
+        allow_chain_arg = call_soon.call_args[0][2]
+        self.assertTrue(allow_chain_arg)
+
+        app_module._scheduled_segment_prefetches.clear()
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "has", return_value=False), \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            # Chain-triggered
+            app_module._schedule_segment_prefetch("job1", "video_0/video_0001.ts", _from_chain=True)
+        call_soon.assert_called_once()
+        allow_chain_arg = call_soon.call_args[0][2]
+        self.assertFalse(allow_chain_arg)
 
     # ─── CORS headers ───
 
