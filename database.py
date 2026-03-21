@@ -383,10 +383,11 @@ def get_segments_for_prefix(job_id, prefix):
     """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT segment_key, duration FROM segments WHERE job_id = ? AND segment_key LIKE ? ORDER BY segment_key",
+        "SELECT segment_key, duration, file_id, bot_index FROM segments WHERE job_id = ? AND segment_key LIKE ? ORDER BY segment_key",
         (job_id, f"{prefix}/%"),
     ).fetchall()
-    return [{"segment_key": r["segment_key"], "duration": r["duration"] or 0} for r in rows]
+    return [{"segment_key": r["segment_key"], "duration": r["duration"] or 0,
+             "file_id": r["file_id"], "bot_index": r["bot_index"]} for r in rows]
 
 
 def list_jobs(limit=50, offset=0):

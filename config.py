@@ -61,6 +61,19 @@ def _int_env(name, default):
         return default
 
 
+def _csv_env(name, default):
+    """Read a comma-separated env var into a normalized list of strings."""
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    values = []
+    for entry in raw.split(","):
+        item = entry.strip()
+        if item:
+            values.append(item)
+    return values
+
+
 class Config:
     # Server
     HOST = os.getenv("LOCAL_HOST", "0.0.0.0")
@@ -113,6 +126,23 @@ class Config:
     # Directories
     UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
     PROCESSING_DIR = os.path.join(os.path.dirname(__file__), "processing")
+    WATCH_ENABLED = os.getenv("WATCH_ENABLED", "false").lower() == "true"
+    WATCH_ROOT = os.path.abspath(os.path.expanduser(os.getenv("WATCH_ROOT", "").strip()))
+    _watch_done_dir = os.getenv("WATCH_DONE_DIR", "").strip()
+    WATCH_DONE_DIR = (
+        os.path.abspath(os.path.expanduser(_watch_done_dir))
+        if _watch_done_dir
+        else (os.path.join(WATCH_ROOT, "done") if WATCH_ROOT else "")
+    )
+    WATCH_POLL_SECONDS = max(1, _int_env("WATCH_POLL_SECONDS", 5))
+    WATCH_STABLE_SECONDS = max(1, _int_env("WATCH_STABLE_SECONDS", 30))
+    WATCH_VIDEO_EXTENSIONS = tuple(
+        ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+        for ext in _csv_env("WATCH_VIDEO_EXTENSIONS", "mp4,mkv,avi,mov,webm,ts,m4v,flv")
+    )
+    WATCH_IGNORE_SUFFIXES = tuple(
+        suffix.lower() for suffix in _csv_env("WATCH_IGNORE_SUFFIXES", ".part,.crdownload,.tmp,.partial")
+    )
 
     # Reliability / cleanup
     JOB_TIMEOUT_SECONDS = _int_env("JOB_TIMEOUT_SECONDS", 7200)  # 2h
@@ -136,14 +166,6 @@ class Config:
     UPLOAD_RATE_LIMIT_MAX_REQUESTS = _int_env("UPLOAD_RATE_LIMIT_MAX_REQUESTS", 100)
     # Max concurrent pending uploads per IP (0 = unlimited)
     MAX_PENDING_UPLOADS_PER_IP = _int_env("MAX_PENDING_UPLOADS_PER_IP", 5)
-
-    # Optional auth for upload endpoints
-    UPLOAD_API_KEY = os.getenv("UPLOAD_API_KEY", "").strip()
-    UPLOAD_BASIC_USER = os.getenv("UPLOAD_BASIC_USER", "").strip()
-    UPLOAD_BASIC_PASSWORD = os.getenv("UPLOAD_BASIC_PASSWORD", "").strip()
-
-    # Optional auth for HLS playback endpoints (HMAC-signed per-job tokens)
-    PLAYBACK_SECRET = os.getenv("PLAYBACK_SECRET", "").strip()
 
     # Telegram bots
     BOTS = []
@@ -176,3 +198,8 @@ class Config:
 Config.load_bots()
 os.makedirs(Config.UPLOAD_DIR, exist_ok=True)
 os.makedirs(Config.PROCESSING_DIR, exist_ok=True)
+if Config.WATCH_ENABLED:
+    if not Config.WATCH_ROOT:
+        raise ValueError("WATCH_ROOT must be configured when WATCH_ENABLED=true")
+    os.makedirs(Config.WATCH_ROOT, exist_ok=True)
+    os.makedirs(Config.WATCH_DONE_DIR, exist_ok=True)

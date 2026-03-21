@@ -1,4 +1,3 @@
-import base64
 import os
 import sys
 import tempfile
@@ -6,7 +5,7 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 # Provide a lightweight telegram stub so importing app works in test envs.
 telegram_mod = types.ModuleType("telegram")
@@ -61,12 +60,17 @@ def _reset_state():
     app_module._pending_uploads.clear()
     app_module._pending_filenames.clear()
     app_module._active_jobs.clear()
+    app_module._job_runtime.clear()
+    app_module._job_source_info.clear()
     app_module._upload_locks.clear()
     app_module._rate_limit_hits.clear()
     app_module._pending_uploads_per_ip.clear()
     app_module._segment_downloads.clear()
     app_module._segment_cache.clear()
     app_module._scheduled_segment_prefetches.clear()
+    app_module._watch_candidates.clear()
+    app_module._watch_claimed_paths.clear()
+    app_module._watch_failed_signatures.clear()
 
 
 class _FakeContent:
@@ -259,55 +263,6 @@ class TestP0TodoFixes(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(database.open_connection_count(), 0)
 
-    # ─── _is_upload_authorized ───
-
-    def test_is_upload_authorized_no_auth_config(self):
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""):
-            with app_module.app.test_request_context("/"):
-                self.assertTrue(app_module._is_upload_authorized())
-
-    def test_is_upload_authorized_api_key_success(self):
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", "secret"), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""):
-            with app_module.app.test_request_context("/", headers={"X-API-Key": "secret"}):
-                self.assertTrue(app_module._is_upload_authorized())
-
-    def test_is_upload_authorized_api_key_wrong(self):
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", "secret"), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""):
-            with app_module.app.test_request_context("/", headers={"X-API-Key": "wrong"}):
-                self.assertFalse(app_module._is_upload_authorized())
-
-    def test_is_upload_authorized_basic_auth_success(self):
-        creds = base64.b64encode(b"user:pass").decode()
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", "user"), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_PASSWORD", "pass"):
-            with app_module.app.test_request_context(
-                "/", headers={"Authorization": f"Basic {creds}"}
-            ):
-                self.assertTrue(app_module._is_upload_authorized())
-
-    def test_is_upload_authorized_basic_auth_wrong_password(self):
-        creds = base64.b64encode(b"user:wrongpass").decode()
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", "user"), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_PASSWORD", "pass"):
-            with app_module.app.test_request_context(
-                "/", headers={"Authorization": f"Basic {creds}"}
-            ):
-                self.assertFalse(app_module._is_upload_authorized())
-
-    def test_is_upload_authorized_malformed_basic_auth(self):
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", "user"), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_PASSWORD", "pass"):
-            with app_module.app.test_request_context(
-                "/", headers={"Authorization": "Basic notbase64!!!"}
-            ):
-                self.assertFalse(app_module._is_upload_authorized())
-
     # ─── /api/upload/init ───
 
     def test_upload_init_success(self):
@@ -360,15 +315,6 @@ class TestP0TodoFixes(unittest.TestCase):
             json={"filename": "x.mp4", "total_size": "big"},
         )
         self.assertEqual(resp.status_code, 400)
-
-    def test_upload_init_requires_upload_auth_when_configured(self):
-        with patch.object(app_module.Config, "UPLOAD_API_KEY", "key123"), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""):
-            resp = self.client.post(
-                "/api/upload/init",
-                json={"filename": "x.mp4", "total_size": 10},
-            )
-        self.assertEqual(resp.status_code, 401)
 
     # ─── /api/upload/chunk ───
 
@@ -545,6 +491,31 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Incomplete upload", resp.get_json()["error"])
 
+    def test_upload_finalize_size_mismatch_keeps_pending_state(self):
+        upload_id = self._init_upload(total_size=8, total_chunks=2)
+        self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"AAAA",
+        )
+        resp = self.client.post("/api/upload/finalize", json={"upload_id": upload_id})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn(upload_id, app_module._pending_uploads)
+        self.assertEqual(app_module._pending_filenames["sample.bin"], upload_id)
+
+    def test_upload_finalize_disk_rejection_keeps_pending_state(self):
+        upload_id = self._init_upload(total_size=4, total_chunks=1)
+        self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"DATA",
+        )
+        with patch("app._check_disk_space", return_value=(False, "disk full")):
+            resp = self.client.post("/api/upload/finalize", json={"upload_id": upload_id})
+        self.assertEqual(resp.status_code, 507)
+        self.assertIn(upload_id, app_module._pending_uploads)
+        self.assertEqual(app_module._pending_filenames["sample.bin"], upload_id)
+
     def test_upload_finalize_unknown_id(self):
         resp = self.client.post("/api/upload/finalize", json={"upload_id": "nope"})
         self.assertEqual(resp.status_code, 404)
@@ -623,6 +594,16 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertEqual(app_module._active_jobs["cjob"]["status"], "error")
         self.assertTrue(app_module._active_jobs["cjob"]["cancelled"])
 
+    def test_cancel_active_job_requests_runtime_stop(self):
+        runtime = app_module._get_job_runtime("cjob")
+        runtime.current_process = type("Proc", (), {"poll": lambda self: 0})()
+        runtime.upload_future = Mock(done=Mock(return_value=True))
+        app_module._active_jobs["cjob"] = {"status": "processing"}
+        with patch("app._request_job_stop") as request_stop:
+            resp = self.client.post("/api/cancel/cjob")
+        self.assertEqual(resp.status_code, 200)
+        request_stop.assert_called_once_with("cjob")
+
     def test_cancel_finished_job_rejected(self):
         app_module._active_jobs["fjob"] = {
             "status": "complete",
@@ -631,6 +612,20 @@ class TestP0TodoFixes(unittest.TestCase):
         resp = self.client.post("/api/cancel/fjob")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Cannot cancel", resp.get_json()["error"])
+
+    def test_request_job_stop_sets_cancel_event_and_cancels_future(self):
+        runtime = app_module._get_job_runtime("jobstop")
+        future = Mock()
+        future.done.return_value = False
+        runtime.upload_future = future
+        proc = Mock()
+        proc.poll.return_value = 0
+        runtime.current_process = proc
+
+        app_module._request_job_stop("jobstop")
+
+        self.assertTrue(runtime.cancel_event.is_set())
+        future.cancel.assert_called_once_with()
 
     # ─── /api/jobs/<job_id> DELETE ───
 
@@ -653,6 +648,10 @@ class TestP0TodoFixes(unittest.TestCase):
             resp = self.client.delete("/api/jobs/donejob")
         self.assertEqual(resp.status_code, 200)
         mock_delete.assert_called_once_with("donejob")
+
+    def test_removed_token_endpoint_returns_404(self):
+        resp = self.client.get("/api/jobs/job1/token")
+        self.assertEqual(resp.status_code, 404)
 
     # ─── HLS playlist endpoints ───
 
@@ -817,9 +816,9 @@ class TestP0TodoFixes(unittest.TestCase):
 
     def test_schedule_segment_prefetch_schedules_next_uncached_segment(self):
         segments = [
-            {"segment_key": "video/video_0001.ts", "duration": 4},
-            {"segment_key": "video/video_0002.ts", "duration": 4},
-            {"segment_key": "video/video_0003.ts", "duration": 4},
+            {"segment_key": "video/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
+            {"segment_key": "video/video_0003.ts", "duration": 4, "file_id": "fid3", "bot_index": 2},
         ]
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
              patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
@@ -827,18 +826,26 @@ class TestP0TodoFixes(unittest.TestCase):
              patch.object(app_module._segment_cache, "has", side_effect=[False, False]), \
              patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
-        self.assertEqual(call_soon.call_count, 2)
-        scheduled_args = [call.args[2] for call in call_soon.call_args_list]
-        self.assertEqual(scheduled_args, ["video/video_0002.ts", "video/video_0003.ts"])
+        call_soon.assert_called_once()
+        batch = call_soon.call_args[0][1]
+        self.assertEqual([s["segment_key"] for s in batch], ["video/video_0002.ts", "video/video_0003.ts"])
+
+    def test_schedule_segment_prefetch_respects_min_free_bytes_guard(self):
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 128), \
+             patch.object(app_module._segment_cache, "free_bytes", 64), \
+             patch("app.db.get_segments_for_prefix") as get_segments:
+            app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
+        get_segments.assert_not_called()
 
 
     def test_schedule_segment_prefetch_extends_farther_ahead_to_keep_target_buffer(self):
         segments = [
-            {"segment_key": "video/video_0001.ts", "duration": 4},
-            {"segment_key": "video/video_0002.ts", "duration": 4},
-            {"segment_key": "video/video_0003.ts", "duration": 4},
-            {"segment_key": "video/video_0004.ts", "duration": 4},
-            {"segment_key": "video/video_0005.ts", "duration": 4},
+            {"segment_key": "video/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
+            {"segment_key": "video/video_0003.ts", "duration": 4, "file_id": "fid3", "bot_index": 2},
+            {"segment_key": "video/video_0004.ts", "duration": 4, "file_id": "fid4", "bot_index": 3},
+            {"segment_key": "video/video_0005.ts", "duration": 4, "file_id": "fid5", "bot_index": 4},
         ]
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 3), \
              patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
@@ -846,17 +853,18 @@ class TestP0TodoFixes(unittest.TestCase):
              patch.object(app_module._segment_cache, "has", side_effect=[True, False, False, False]), \
              patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
-        scheduled_args = [call.args[2] for call in call_soon.call_args_list]
+        call_soon.assert_called_once()
+        batch = call_soon.call_args[0][1]
         self.assertEqual(
-            scheduled_args,
+            [s["segment_key"] for s in batch],
             ["video/video_0003.ts", "video/video_0004.ts"],
         )
 
 
     def test_schedule_segment_prefetch_skips_already_cached_next_segment(self):
         segments = [
-            {"segment_key": "video/video_0001.ts", "duration": 4},
-            {"segment_key": "video/video_0002.ts", "duration": 4},
+            {"segment_key": "video/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
         ]
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 1), \
              patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
@@ -868,8 +876,8 @@ class TestP0TodoFixes(unittest.TestCase):
 
     def test_schedule_segment_prefetch_dedupes_inflight_segment(self):
         segments = [
-            {"segment_key": "video/video_0001.ts", "duration": 4},
-            {"segment_key": "video/video_0002.ts", "duration": 4},
+            {"segment_key": "video/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
         ]
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 1), \
              patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
@@ -884,11 +892,11 @@ class TestP0TodoFixes(unittest.TestCase):
 
     def test_schedule_segment_prefetch_counts_inflight_and_scheduled_segments_toward_target(self):
         segments = [
-            {"segment_key": "video/video_0001.ts", "duration": 4},
-            {"segment_key": "video/video_0002.ts", "duration": 4},
-            {"segment_key": "video/video_0003.ts", "duration": 4},
-            {"segment_key": "video/video_0004.ts", "duration": 4},
-            {"segment_key": "video/video_0005.ts", "duration": 4},
+            {"segment_key": "video/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
+            {"segment_key": "video/video_0003.ts", "duration": 4, "file_id": "fid3", "bot_index": 2},
+            {"segment_key": "video/video_0004.ts", "duration": 4, "file_id": "fid4", "bot_index": 3},
+            {"segment_key": "video/video_0005.ts", "duration": 4, "file_id": "fid5", "bot_index": 4},
         ]
         app_module._segment_downloads["job1/video/video_0002.ts"] = app_module._SegmentDownloadState(
             "job1/video/video_0002.ts"
@@ -900,8 +908,9 @@ class TestP0TodoFixes(unittest.TestCase):
              patch.object(app_module._segment_cache, "has", side_effect=[False, False, False]), \
              patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
             app_module._schedule_segment_prefetch("job1", "video/video_0001.ts")
-        scheduled_args = [call.args[2] for call in call_soon.call_args_list]
-        self.assertEqual(scheduled_args, ["video/video_0004.ts"])
+        call_soon.assert_called_once()
+        batch = call_soon.call_args[0][1]
+        self.assertEqual([s["segment_key"] for s in batch], ["video/video_0004.ts"])
 
     def test_schedule_segment_prefetch_skips_non_video_segments(self):
         with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 3), \
@@ -920,11 +929,10 @@ class TestP0TodoFixes(unittest.TestCase):
             app_module._release_segment_download(s)
 
         with patch.object(app_module._segment_cache, "has", return_value=False), \
-             patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
              patch("app._claim_segment_download", return_value=(state, True)), \
              patch("app._download_segment_to_state", new=AsyncMock(side_effect=fake_download)) as download_to_state, \
              patch("app._schedule_segment_prefetch") as schedule_prefetch:
-            app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
+            app_module._run_async(app_module._prefetch_segment_with_info("job1", "video/video_0002.ts", "fid", 0))
         download_to_state.assert_awaited_once()
         self.assertNotIn(cache_key, app_module._scheduled_segment_prefetches)
         self.assertNotIn(cache_key, app_module._segment_downloads)
@@ -935,10 +943,9 @@ class TestP0TodoFixes(unittest.TestCase):
         app_module._segment_downloads[cache_key] = app_module._SegmentDownloadState(cache_key)
         app_module._scheduled_segment_prefetches.add(cache_key)
         with patch.object(app_module._segment_cache, "has", return_value=False), \
-             patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
              patch("app._download_segment_to_state") as download_to_state, \
              patch("app._schedule_segment_prefetch") as schedule_prefetch:
-            app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
+            app_module._run_async(app_module._prefetch_segment_with_info("job1", "video/video_0002.ts", "fid", 0))
         download_to_state.assert_not_called()
         schedule_prefetch.assert_not_called()
 
@@ -947,9 +954,8 @@ class TestP0TodoFixes(unittest.TestCase):
         app_module._segment_downloads[cache_key] = app_module._SegmentDownloadState(cache_key)
         app_module._scheduled_segment_prefetches.add(cache_key)
         with patch.object(app_module._segment_cache, "has", return_value=False), \
-             patch("app.get_segment_info", return_value={"file_id": "fid", "bot_index": 0}), \
              patch("app._download_segment_to_state") as download_to_state:
-            app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
+            app_module._run_async(app_module._prefetch_segment_with_info("job1", "video/video_0002.ts", "fid", 0))
         download_to_state.assert_not_called()
         self.assertNotIn(cache_key, app_module._scheduled_segment_prefetches)
 
@@ -1023,113 +1029,225 @@ class TestP0TodoFixes(unittest.TestCase):
                 "/", environ_base={"REMOTE_ADDR": "6.6.6.6"}
             ):
                 result = app_module._check_rate_limit()
-            self.assertIsNotNone(result)
+        self.assertIsNotNone(result)
 
+    # ─── Watch-folder ingest ───
 
-class TestPlaybackAuth(unittest.TestCase):
-    """P4a: HMAC playback token generation and route enforcement."""
+    def test_watch_scan_queues_nested_videos_after_stability_window(self):
+        watch_root = tempfile.mkdtemp(dir=self.temp.name)
+        done_dir = os.path.join(watch_root, "done")
+        nested_dir = os.path.join(watch_root, "series", "episode1")
+        os.makedirs(nested_dir, exist_ok=True)
+        video_path = os.path.join(nested_dir, "clip.mp4")
+        with open(video_path, "wb") as handle:
+            handle.write(b"video")
 
-    def setUp(self):
-        _reset_state()
-        self.client = app_module.app.test_client()
+        with patch.object(app_module.Config, "WATCH_ENABLED", True), \
+             patch.object(app_module.Config, "WATCH_ROOT", watch_root), \
+             patch.object(app_module.Config, "WATCH_DONE_DIR", done_dir), \
+             patch.object(app_module.Config, "WATCH_STABLE_SECONDS", 10), \
+             patch.object(app_module.Config, "WATCH_VIDEO_EXTENSIONS", (".mp4",)), \
+             patch.object(app_module.Config, "WATCH_IGNORE_SUFFIXES", (".part",)), \
+             patch("app._queue_local_file", return_value=("job1", 5)) as queue_local, \
+             patch("app.time.time", side_effect=[100, 111]):
+            self.assertEqual(app_module._watch_scan_once(), [])
+            queued = app_module._watch_scan_once()
 
-    def test_generate_playback_token_disabled_returns_none(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""):
-            self.assertIsNone(app_module._generate_playback_token("job1"))
+        self.assertEqual(queued, ["job1"])
+        queue_local.assert_called_once_with(
+            app_module._normalize_watch_path(video_path),
+            filename="clip.mp4",
+            source_mode="watch",
+        )
 
-    def test_generate_playback_token_returns_hex_string(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "supersecret"):
-            token = app_module._generate_playback_token("job1")
-            self.assertIsNotNone(token)
-            self.assertEqual(len(token), 64)  # SHA-256 hex digest
-            int(token, 16)  # must be valid hex
+    def test_watch_scan_queues_all_videos_and_ignores_done_and_partial_files(self):
+        watch_root = tempfile.mkdtemp(dir=self.temp.name)
+        done_dir = os.path.join(watch_root, "done")
+        nested_dir = os.path.join(watch_root, "batch")
+        os.makedirs(done_dir, exist_ok=True)
+        os.makedirs(nested_dir, exist_ok=True)
 
-    def test_generate_playback_token_is_deterministic(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "s3cr3t"):
-            t1 = app_module._generate_playback_token("abc")
-            t2 = app_module._generate_playback_token("abc")
-            self.assertEqual(t1, t2)
+        paths = [
+            os.path.join(watch_root, "one.mp4"),
+            os.path.join(nested_dir, "two.mkv"),
+        ]
+        for path in paths:
+            with open(path, "wb") as handle:
+                handle.write(b"video")
+        with open(os.path.join(done_dir, "already.mp4"), "wb") as handle:
+            handle.write(b"done")
+        with open(os.path.join(watch_root, "skip.mp4.part"), "wb") as handle:
+            handle.write(b"partial")
 
-    def test_generate_playback_token_differs_per_job(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "s3cr3t"):
-            self.assertNotEqual(
-                app_module._generate_playback_token("job1"),
-                app_module._generate_playback_token("job2"),
+        with patch.object(app_module.Config, "WATCH_ENABLED", True), \
+             patch.object(app_module.Config, "WATCH_ROOT", watch_root), \
+             patch.object(app_module.Config, "WATCH_DONE_DIR", done_dir), \
+             patch.object(app_module.Config, "WATCH_STABLE_SECONDS", 0), \
+             patch.object(app_module.Config, "WATCH_VIDEO_EXTENSIONS", (".mp4", ".mkv")), \
+             patch.object(app_module.Config, "WATCH_IGNORE_SUFFIXES", (".part",)), \
+             patch("app._queue_local_file", side_effect=[("job1", 5), ("job2", 5)]) as queue_local, \
+             patch("app.time.time", side_effect=[100, 100, 101, 101]):
+            app_module._watch_scan_once()
+            queued = app_module._watch_scan_once()
+
+        self.assertEqual(queued, ["job1", "job2"])
+        queued_paths = [call.args[0] for call in queue_local.call_args_list]
+        self.assertEqual(
+            sorted(queued_paths),
+            sorted(app_module._normalize_watch_path(path) for path in paths),
+        )
+
+    def test_watch_scan_failure_waits_for_file_change_before_retry(self):
+        watch_root = tempfile.mkdtemp(dir=self.temp.name)
+        done_dir = os.path.join(watch_root, "done")
+        video_path = os.path.join(watch_root, "clip.mp4")
+        with open(video_path, "wb") as handle:
+            handle.write(b"video")
+
+        with patch.object(app_module.Config, "WATCH_ENABLED", True), \
+             patch.object(app_module.Config, "WATCH_ROOT", watch_root), \
+             patch.object(app_module.Config, "WATCH_DONE_DIR", done_dir), \
+             patch.object(app_module.Config, "WATCH_STABLE_SECONDS", 5), \
+             patch.object(app_module.Config, "WATCH_VIDEO_EXTENSIONS", (".mp4",)), \
+             patch.object(app_module.Config, "WATCH_IGNORE_SUFFIXES", (".part",)), \
+             patch("app._queue_local_file", side_effect=[RuntimeError("boom"), ("job2", 7)]) as queue_local, \
+             patch("app.time.time", side_effect=[100, 106, 120, 130, 140]):
+            app_module._watch_scan_once()
+            self.assertEqual(app_module._watch_scan_once(), [])
+            self.assertEqual(app_module._watch_scan_once(), [])
+            with open(video_path, "ab") as handle:
+                handle.write(b"more")
+            self.assertEqual(app_module._watch_scan_once(), [])
+            queued = app_module._watch_scan_once()
+
+        self.assertEqual(queued, ["job2"])
+        self.assertEqual(queue_local.call_count, 2)
+
+    def test_finalize_source_file_moves_watched_success_to_done(self):
+        watch_root = tempfile.mkdtemp(dir=self.temp.name)
+        done_dir = os.path.join(watch_root, "done")
+        source_path = os.path.join(watch_root, "nested", "clip.mp4")
+        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+        with open(source_path, "wb") as handle:
+            handle.write(b"video")
+
+        app_module._active_jobs["job1"] = {"status": "complete"}
+        app_module._job_source_info["job1"] = {"mode": "watch", "path": source_path}
+        app_module._watch_claimed_paths.add(app_module._normalize_watch_path(source_path))
+
+        with patch.object(app_module.Config, "WATCH_ROOT", watch_root), \
+             patch.object(app_module.Config, "WATCH_DONE_DIR", done_dir):
+            app_module._finalize_source_file("job1", source_path)
+
+        moved_path = os.path.join(done_dir, "nested", "clip.mp4")
+        self.assertFalse(os.path.exists(source_path))
+        self.assertTrue(os.path.exists(moved_path))
+        self.assertNotIn(app_module._normalize_watch_path(source_path), app_module._watch_claimed_paths)
+
+    def test_finalize_source_file_leaves_failed_watched_source_in_place(self):
+        watch_root = tempfile.mkdtemp(dir=self.temp.name)
+        done_dir = os.path.join(watch_root, "done")
+        source_path = os.path.join(watch_root, "clip.mp4")
+        with open(source_path, "wb") as handle:
+            handle.write(b"video")
+
+        app_module._active_jobs["job1"] = {"status": "error"}
+        app_module._job_source_info["job1"] = {"mode": "watch", "path": source_path}
+        app_module._watch_claimed_paths.add(app_module._normalize_watch_path(source_path))
+
+        with patch.object(app_module.Config, "WATCH_ROOT", watch_root), \
+             patch.object(app_module.Config, "WATCH_DONE_DIR", done_dir):
+            app_module._finalize_source_file("job1", source_path)
+
+        self.assertTrue(os.path.exists(source_path))
+        self.assertFalse(os.path.exists(os.path.join(done_dir, "clip.mp4")))
+        self.assertIn(
+            app_module._normalize_watch_path(source_path),
+            app_module._watch_failed_signatures,
+        )
+
+    def test_apply_watch_settings_defaults_done_dir_and_persists(self):
+        settings_path = os.path.join(self.temp.name, "watch_settings.json")
+        watch_root = os.path.join(self.temp.name, "downloads")
+        with patch.object(app_module, "_WATCH_SETTINGS_PATH", settings_path):
+            settings = app_module._apply_watch_settings(
+                {"watch_enabled": True, "watch_root": watch_root, "watch_done_dir": ""},
+                persist=True,
             )
+        self.assertTrue(settings["watch_enabled"])
+        self.assertEqual(settings["watch_root"], watch_root)
+        self.assertEqual(settings["watch_done_dir"], os.path.join(watch_root, "done"))
+        self.assertTrue(os.path.exists(settings_path))
 
-    def test_require_playback_auth_disabled_returns_none(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""):
-            with app_module.app.test_request_context("/?token=whatever"):
-                result = app_module._require_playback_auth("job1")
-        self.assertIsNone(result)
+    def test_watch_settings_get_returns_current_values(self):
+        with patch.object(app_module.Config, "WATCH_ENABLED", True), \
+             patch.object(app_module.Config, "WATCH_ROOT", "/tmp/watch"), \
+             patch.object(app_module.Config, "WATCH_DONE_DIR", "/tmp/watch/done"):
+            resp = self.client.get("/api/watch-settings")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["watch_enabled"])
+        self.assertEqual(data["watch_root"], "/tmp/watch")
+        self.assertEqual(data["watch_done_dir"], "/tmp/watch/done")
 
-    def test_require_playback_auth_valid_token_returns_none(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "mykey"):
-            token = app_module._generate_playback_token("job1")
-            with app_module.app.test_request_context(f"/?token={token}"):
-                result = app_module._require_playback_auth("job1")
-        self.assertIsNone(result)
+    def test_watch_settings_post_updates_runtime_and_persists(self):
+        settings_path = os.path.join(self.temp.name, "watch_settings.json")
+        watch_root = os.path.join(self.temp.name, "downloads")
+        done_dir = os.path.join(self.temp.name, "finished")
+        with patch.object(app_module, "_WATCH_SETTINGS_PATH", settings_path), \
+             patch("app._start_folder_watcher") as start_watcher, \
+             patch("app._watch_scan_once", return_value=[]):
+            resp = self.client.post(
+                "/api/watch-settings",
+                json={
+                    "watch_enabled": True,
+                    "watch_root": watch_root,
+                    "watch_done_dir": done_dir,
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(app_module.Config.WATCH_ROOT, watch_root)
+        self.assertEqual(app_module.Config.WATCH_DONE_DIR, done_dir)
+        start_watcher.assert_called_once()
+        self.assertTrue(os.path.exists(settings_path))
 
-    def test_require_playback_auth_missing_token_returns_403(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "mykey"):
-            with app_module.app.test_request_context("/"):
-                response, status = app_module._require_playback_auth("job1")
-        self.assertEqual(status, 403)
+    def test_upload_init_fails_without_bots(self):
+        with patch.object(app_module._telegram_uploader, "bots", []):
+            resp = self.client.post("/api/upload/init", json={
+                "filename": "test.mp4",
+                "total_size": 1000
+            })
+            self.assertEqual(resp.status_code, 503)
+            self.assertIn("No Telegram bots configured", resp.json["error"])
 
-    def test_require_playback_auth_wrong_token_returns_403(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "mykey"):
-            with app_module.app.test_request_context("/?token=wrongtoken"):
-                response, status = app_module._require_playback_auth("job1")
-        self.assertEqual(status, 403)
+    def test_upload_finalize_fails_without_bots_keeps_pending(self):
+        app_module._pending_uploads["up_123"] = {
+            "path": "some/path",
+            "filename": "test.mp4",
+            "total_size": 1000,
+            "received_bytes": 1000,
+            "received_chunks": 1,
+            "total_chunks": 1,
+            "expires_at": time.time() + 3600
+        }
+        app_module._pending_filenames["test.mp4"] = "up_123"
+        
+        with patch.object(app_module._telegram_uploader, "bots", []):
+            resp = self.client.post("/api/upload/finalize", json={"upload_id": "up_123"})
+            self.assertEqual(resp.status_code, 503)
+            self.assertIn("up_123", app_module._pending_uploads)
 
-    def test_master_playlist_requires_token_when_secret_set(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "testkey"), \
-             patch("app.generate_master_playlist", return_value="#EXTM3U\n"):
-            r = self.client.get("/hls/job1/master.m3u8")
-            self.assertEqual(r.status_code, 403)
-
-    def test_master_playlist_accessible_without_secret(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""), \
-             patch("app.generate_master_playlist", return_value="#EXTM3U\n"):
-            r = self.client.get("/hls/job1/master.m3u8")
-            self.assertEqual(r.status_code, 200)
-
-    def test_master_playlist_accessible_with_valid_token(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "testkey"), \
-             patch("app.generate_master_playlist", return_value="#EXTM3U\n"):
-            token = app_module._generate_playback_token("job1")
-            r = self.client.get(f"/hls/job1/master.m3u8?token={token}")
-            self.assertEqual(r.status_code, 200)
-
-    def test_token_endpoint_returns_token(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", "testkey"), \
-             patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""), \
-             patch("app.get_job", return_value={"job_id": "job1"}):
-            r = self.client.get("/api/jobs/job1/token")
-            self.assertEqual(r.status_code, 200)
-            data = r.get_json()
-            self.assertIn("token", data)
-            self.assertEqual(data["token"], app_module._generate_playback_token("job1"))
-
-    def test_token_endpoint_returns_null_when_secret_unset(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""), \
-             patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""), \
-             patch("app.get_job", return_value={"job_id": "job1"}):
-            r = self.client.get("/api/jobs/job1/token")
-            self.assertEqual(r.status_code, 200)
-            data = r.get_json()
-            self.assertIsNone(data["token"])
-
-    def test_token_endpoint_404_for_missing_job(self):
-        with patch.object(app_module.Config, "PLAYBACK_SECRET", ""), \
-             patch.object(app_module.Config, "UPLOAD_API_KEY", ""), \
-             patch.object(app_module.Config, "UPLOAD_BASIC_USER", ""), \
-             patch("app.get_job", return_value=None):
-            r = self.client.get("/api/jobs/nosuchjob/token")
-            self.assertEqual(r.status_code, 404)
-
+    def test_process_job_fails_fast_without_bots(self):
+        app_module._active_jobs["job_abc"] = {
+            "status": "queued",
+            "file_size": 1000
+        }
+        with patch.object(app_module._telegram_uploader, "bots", []):
+            app_module._process_job("job_abc", "fake/path")
+            job = app_module._active_jobs["job_abc"]
+            self.assertEqual(job["status"], "error")
+            self.assertIn("No Telegram bots configured", job["error"])
+            self.assertIn("finished_ts", job)
 
 class TestHealthEndpoint(unittest.TestCase):
     def setUp(self):

@@ -9,6 +9,26 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 
+def _safe_int(value, default=0):
+    """Parse an integer-ish value from ffprobe, tolerating blanks and N/A."""
+    try:
+        if value in (None, "", "N/A"):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default=0.0):
+    """Parse a float-ish value from ffprobe, tolerating blanks and N/A."""
+    try:
+        if value in (None, "", "N/A"):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class StreamInfo:
     def __init__(self, index, codec_type, codec_name, language=None, title=None, **extra):
         self.index = index
@@ -116,8 +136,8 @@ def analyze(file_path: str) -> MediaAnalysis:
         raise RuntimeError(f"ffprobe returned invalid JSON for {file_path}")
 
     fmt = data.get("format", {})
-    duration = float(fmt.get("duration", 0))
-    file_size = int(fmt.get("size", 0))
+    duration = _safe_float(fmt.get("duration", 0))
+    file_size = _safe_int(fmt.get("size", 0))
 
     analysis = MediaAnalysis(file_path, duration, file_size)
 
@@ -145,8 +165,8 @@ def analyze(file_path: str) -> MediaAnalysis:
 
         elif codec_type == "audio":
             aus = AudioStream(
-                channels=stream.get("channels", 2),
-                sample_rate=int(stream.get("sample_rate", 48000)),
+                channels=_safe_int(stream.get("channels", 2), 2),
+                sample_rate=_safe_int(stream.get("sample_rate", 48000), 48000),
                 bit_rate=stream.get("bit_rate"),
                 **common,
             )

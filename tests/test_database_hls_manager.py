@@ -660,6 +660,28 @@ class TestHLSManagerWithDB(TestDatabaseBase):
         playlist = hls_manager.generate_media_playlist("job5b", "video", 0)
         self.assertIn("/segment/job5b/video_0/video_0001.ts", playlist)
 
+    def test_master_playlist_sanitizes_malicious_metadata(self):
+        analysis, processing, upload = self._sample_payload("job_malicious")
+        
+        # Inject malicious metadata
+        processing.audio_playlists = [
+            ("a.m3u8", "/tmp/a", 'eng",DEFAULT=YES\n#EXT-X-INJECTED', 'Malicious\r\nTitle, with "quotes"', 2)
+        ]
+        processing.subtitle_files = [
+            ("s.vtt", "/tmp/s", 'und', 'Sub\nTitle, "test"', 0, 3)
+        ]
+        
+        hls_manager.register_job("job_malicious", analysis, processing, upload)
+        playlist = hls_manager.generate_master_playlist("job_malicious", "http://localhost")
+        
+        # Verify sanitization in audio
+        self.assertNotIn("\n#EXT-X-INJECTED", playlist)
+        self.assertNotIn("\r", playlist)
+        self.assertIn('LANGUAGE="eng\\" DEFAULT=YES #EXT-X-INJECTED"', playlist)
+        self.assertIn('NAME="Malicious  Title  with \\"quotes\\""', playlist)
+        
+        # Verify sanitization in subtitle
+        self.assertIn('NAME="Sub Title  \\"test\\""', playlist)
 
 class TestSubtitleTrackIndexMismatch(TestDatabaseBase):
     """P3: subtitle track_index must match the enumerate index (including skipped bitmaps)."""
@@ -740,59 +762,6 @@ class TestSubtitleTrackIndexMismatch(TestDatabaseBase):
         audio_tracks = database.get_job_tracks("job_orig_idx", "audio")
         self.assertEqual(video_tracks[0]["original_stream_index"], 0)
         self.assertEqual(audio_tracks[0]["original_stream_index"], 1)
-
-
-class TestTokenPropagation(TestDatabaseBase):
-    """P4a: token is appended to sub-resource URLs in playlists."""
-
-    def test_with_token_appends_query(self):
-        self.assertEqual(
-            hls_manager._with_token("/hls/job/video.m3u8", "abc123"),
-            "/hls/job/video.m3u8?token=abc123",
-        )
-
-    def test_with_token_no_token_returns_url_unchanged(self):
-        url = "/hls/job/video.m3u8"
-        self.assertEqual(hls_manager._with_token(url, None), url)
-        self.assertEqual(hls_manager._with_token(url, ""), url)
-
-    def test_with_token_existing_query_uses_ampersand(self):
-        self.assertEqual(
-            hls_manager._with_token("/segment/x?foo=1", "tok"),
-            "/segment/x?foo=1&token=tok",
-        )
-
-    def test_generate_master_playlist_with_token_includes_token_in_urls(self):
-        analysis, processing, upload = self._sample_payload()
-        hls_manager.register_job("tokjob", analysis, processing, upload)
-
-        playlist = hls_manager.generate_master_playlist("tokjob", "https://cdn.example", token="mytoken")
-        self.assertIn("?token=mytoken", playlist)
-
-    def test_generate_master_playlist_without_token_no_query_param(self):
-        analysis, processing, upload = self._sample_payload()
-        hls_manager.register_job("notokjob", analysis, processing, upload)
-
-        playlist = hls_manager.generate_master_playlist("notokjob", "https://cdn.example")
-        self.assertNotIn("?token=", playlist)
-
-    def test_generate_media_playlist_with_token_in_segment_urls(self):
-        analysis, processing, upload = self._sample_payload()
-        upload.segments["video_0/video_0001.ts"] = SimpleNamespace(
-            file_id="fv0", bot_index=0, file_size=100
-        )
-        hls_manager.register_job("tokjob2", analysis, processing, upload)
-
-        playlist = hls_manager.generate_media_playlist("tokjob2", "video", 0, token="segtoken")
-        self.assertIn("?token=segtoken", playlist)
-
-    def test_generate_subtitle_playlist_with_token(self):
-        analysis, processing, upload = self._sample_payload()
-        hls_manager.register_job("tokjob3", analysis, processing, upload)
-
-        job = database.get_job("tokjob3")
-        playlist = hls_manager._generate_subtitle_playlist("tokjob3", job, 0, token="subtoken")
-        self.assertIn("?token=subtoken", playlist)
 
 
 if __name__ == "__main__":
