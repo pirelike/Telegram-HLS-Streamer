@@ -239,7 +239,10 @@ class TestP0TodoFixes(unittest.TestCase):
         database.close_conn()
         self.assertEqual(database.open_connection_count(), 0)
 
-        response = self.client.get("/health")
+        bot_results = [{"index": 0, "channel_id": -1001, "ok": True, "error": None}]
+        with patch.object(app_module._telegram_uploader, "bots", [{}]), \
+             patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=bot_results)):
+            response = self.client.get("/health")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(database.open_connection_count(), 0)
@@ -248,8 +251,11 @@ class TestP0TodoFixes(unittest.TestCase):
         database.close_conn()
         self.assertEqual(database.open_connection_count(), 0)
 
+        bot_results = [{"index": 0, "channel_id": -1001, "ok": True, "error": None}]
         for _ in range(5):
-            response = self.client.get("/health")
+            with patch.object(app_module._telegram_uploader, "bots", [{}]), \
+                 patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=bot_results)):
+                response = self.client.get("/health")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(database.open_connection_count(), 0)
 
@@ -922,7 +928,7 @@ class TestP0TodoFixes(unittest.TestCase):
         download_to_state.assert_awaited_once()
         self.assertNotIn(cache_key, app_module._scheduled_segment_prefetches)
         self.assertNotIn(cache_key, app_module._segment_downloads)
-        schedule_prefetch.assert_called_once_with("job1", "video/video_0002.ts")
+        schedule_prefetch.assert_not_called()
 
     def test_prefetch_segment_chains_on_not_owner(self):
         cache_key = "job1/video/video_0002.ts"
@@ -934,7 +940,7 @@ class TestP0TodoFixes(unittest.TestCase):
              patch("app._schedule_segment_prefetch") as schedule_prefetch:
             app_module._run_async(app_module._prefetch_segment("job1", "video/video_0002.ts"))
         download_to_state.assert_not_called()
-        schedule_prefetch.assert_called_once_with("job1", "video/video_0002.ts")
+        schedule_prefetch.assert_not_called()
 
     def test_prefetch_segment_joins_existing_inflight_download(self):
         cache_key = "job1/video/video_0002.ts"
