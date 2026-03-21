@@ -1339,10 +1339,8 @@ def _stream_segment_file(state):
 async def _prefetch_segment(job_id, segment_key):
     """Best-effort background fetch for a future segment."""
     cache_key = f"{job_id}/{segment_key}"
-    success = False
     try:
         if _segment_cache.has(cache_key):
-            success = True
             return
 
         info = get_segment_info(job_id, segment_key)
@@ -1351,16 +1349,12 @@ async def _prefetch_segment(job_id, segment_key):
 
         state, is_owner = _claim_segment_download(cache_key)
         if not is_owner:
-            success = True  # someone else downloading, chain continues
             return
         await _download_segment_to_state(info["file_id"], info["bot_index"], cache_key, state)
-        success = True
     except Exception as exc:
         logger.debug("Segment prefetch failed %s: %s", cache_key, exc)
     finally:
         _release_segment_prefetch(cache_key)
-        if success:
-            _schedule_segment_prefetch(job_id, segment_key)
 
 
 def _start_prefetch_task(job_id, segment_key):
@@ -1394,15 +1388,26 @@ def _schedule_segment_prefetch(job_id, segment_key):
     if current_index is None:
         return
 
-    for segment in segments[current_index + 1: current_index + 1 + prefetch_count]:
+    buffered_ahead = 0
+    for segment in segments[current_index + 1:]:
+        if buffered_ahead >= prefetch_count:
+            break
         next_segment_key = segment["segment_key"]
         next_cache_key = f"{job_id}/{next_segment_key}"
+
         if _segment_cache.has(next_cache_key):
+            buffered_ahead += 1
             continue
-        if next_cache_key in _segment_downloads:
+
+        if next_cache_key in _segment_downloads or next_cache_key in _scheduled_segment_prefetches:
+            buffered_ahead += 1
             continue
+
         if not _claim_segment_prefetch(next_cache_key):
+            buffered_ahead += 1
             continue
+
+        buffered_ahead += 1
         _async_loop.call_soon_threadsafe(_start_prefetch_task, job_id, next_segment_key)
 
 
