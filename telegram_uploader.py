@@ -21,6 +21,7 @@ from telegram.error import (
 )
 
 from config import Config
+from metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,13 @@ class TelegramUploader:
     async def probe_health(self):
         """Verify that every configured bot can access its configured channel."""
         async def probe_bot(bot_entry):
+            started = time.perf_counter()
             try:
                 await bot_entry["bot"].get_chat(bot_entry["channel_id"])
+                metrics.record_timing(
+                    "telegram.probe_health",
+                    (time.perf_counter() - started) * 1000.0,
+                )
                 return {
                     "index": bot_entry["index"],
                     "channel_id": bot_entry["channel_id"],
@@ -99,6 +105,11 @@ class TelegramUploader:
                     "error": None,
                 }
             except Exception as exc:
+                metrics.record_timing(
+                    "telegram.probe_health",
+                    (time.perf_counter() - started) * 1000.0,
+                    error=exc,
+                )
                 logger.warning(
                     "Health probe failed for bot %d channel %s: %s",
                     bot_entry["index"], bot_entry["channel_id"], exc,
@@ -135,10 +146,12 @@ class TelegramUploader:
 
         if file_size > Config.TELEGRAM_MAX_FILE_SIZE:
             raise RuntimeError(
-                f"Segment {file_name} is {file_size} bytes, exceeds Telegram limit of {Config.TELEGRAM_MAX_FILE_SIZE}"
+                f"Segment {file_name} is {file_size} bytes, exceeds Telegram limit of "
+                f"{Config.TELEGRAM_MAX_FILE_SIZE}. Lower SEGMENT_TARGET_SIZE or the tier bitrate."
             )
 
         for attempt in range(retries):
+            started = time.perf_counter()
             try:
                 with open(file_path, "rb") as f:
                     message = await bot.send_document(
@@ -159,12 +172,26 @@ class TelegramUploader:
                     "Uploaded %s via bot %d -> file_id=%s",
                     file_name, bot_entry["index"], file_id[:20],
                 )
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                )
                 return UploadedSegment(file_id, bot_entry["index"], file_name, file_size)
 
             except BadRequest as e:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error=e,
+                )
                 logger.error("Bad request for %s (not retrying): %s", file_name, e)
                 raise RuntimeError(f"Telegram rejected upload for {file_name}: {e}") from e
             except Forbidden as e:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error=e,
+                )
                 logger.error(
                     "Forbidden while uploading %s via bot %d",
                     file_name, bot_entry["index"],
@@ -173,24 +200,49 @@ class TelegramUploader:
                     f"Bot {bot_entry['index']} is forbidden from channel {channel_id}"
                 ) from e
             except UploadIntegrityError:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error="uploadintegrityerror",
+                )
                 logger.error(
                     "Size mismatch after uploading %s — not retrying (corrupted transfer)",
                     file_name,
                 )
                 raise
             except TimedOut:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error="timedout",
+                )
                 wait = 2 ** attempt
                 logger.warning("Upload timeout for %s, retry in %ds", file_name, wait)
                 await asyncio.sleep(wait)
             except NetworkError as e:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error=e,
+                )
                 wait = 2 ** attempt
                 logger.warning("Network error for %s: %s, retry in %ds", file_name, e, wait)
                 await asyncio.sleep(wait)
             except RetryAfter as e:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error=e,
+                )
                 retry_after = getattr(e, "retry_after", 1)
                 logger.warning("Rate limited, waiting %d seconds", retry_after)
                 await asyncio.sleep(retry_after)
             except Exception as e:
+                metrics.record_timing(
+                    "telegram.send_document",
+                    (time.perf_counter() - started) * 1000.0,
+                    error=e,
+                )
                 if attempt < retries - 1:
                     wait = 2 ** attempt
                     logger.warning("Upload error for %s: %s, retry in %ds", file_name, e, wait)
@@ -328,7 +380,20 @@ class TelegramUploader:
                 f"The segment was uploaded by a bot that is no longer available."
             )
         bot = self.bots[bot_index]["bot"]
-        file = await bot.get_file(file_id)
+        started = time.perf_counter()
+        try:
+            file = await bot.get_file(file_id)
+        except Exception as exc:
+            metrics.record_timing(
+                "telegram.get_file_url",
+                (time.perf_counter() - started) * 1000.0,
+                error=exc,
+            )
+            raise
+        metrics.record_timing(
+            "telegram.get_file_url",
+            (time.perf_counter() - started) * 1000.0,
+        )
         return file.file_path
 
     async def get_file_bytes(self, file_id, bot_index, retries=3):

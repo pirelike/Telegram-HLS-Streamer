@@ -31,8 +31,6 @@ Audit basis: `app.py`, `config.py`, `database.py`, `hls_manager.py`, `stream_ana
 
 - [x] `app.py` + `hls_manager.py`: playback endpoints support HMAC-gated tokenized URLs.
 - [x] `templates/index.html`: the fragile inline delete handler was replaced with delegated event handling and `data-job-id`.
-- [ ] `app.py:_generate_playback_token`: playback tokens are deterministic per `job_id` and never expire, so any leaked token grants indefinite access until `PLAYBACK_SECRET` is rotated.
-- [ ] `app.py:_is_upload_authorized`: Basic auth credentials are compared with plain equality instead of constant-time comparison; low risk here, but still weaker than the HMAC path used elsewhere.
 
 ## P5 — Operational
 

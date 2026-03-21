@@ -10,7 +10,9 @@ Schema:
   segments   - One row per uploaded segment (maps segment_key -> Telegram file_id)
 """
 
+import argparse
 import atexit
+import json
 import logging
 import os
 import sqlite3
@@ -451,3 +453,95 @@ def delete_old_jobs(older_than_days):
 
 # Initialize on import
 init_db()
+
+
+def _default_backup_dir() -> str:
+    return os.path.join(os.path.dirname(__file__), "backups")
+
+
+def _timestamped_output_path(suffix: str) -> str:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return os.path.join(_default_backup_dir(), f"streamer-{stamp}.{suffix}")
+
+
+def _prepare_output_path(output_path: str | None, suffix: str, force: bool = False) -> str:
+    path = output_path or _timestamped_output_path(suffix)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    if os.path.exists(path) and not force:
+        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
+    return path
+
+
+def backup_database(output_path: str | None = None, force: bool = False) -> str:
+    """Create a consistent SQLite backup file and return its path."""
+    destination = _prepare_output_path(output_path, "sqlite3", force=force)
+    source = sqlite3.connect(DB_PATH)
+    source.row_factory = sqlite3.Row
+    source.execute("PRAGMA busy_timeout=5000")
+    target = sqlite3.connect(destination)
+    try:
+        with target:
+            source.backup(target)
+    finally:
+        target.close()
+        source.close()
+    logger.info("Created database backup at %s", destination)
+    return destination
+
+
+def export_database_json(output_path: str | None = None, force: bool = False) -> str:
+    """Write a JSON export of the logical database contents and return its path."""
+    destination = _prepare_output_path(output_path, "json", force=force)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = {
+            "schema_revision": _get_recorded_schema_revision(conn),
+            "schema_migrations": [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT revision, name, applied_at FROM schema_migrations ORDER BY revision"
+                ).fetchall()
+            ],
+            "jobs": [dict(row) for row in conn.execute("SELECT * FROM jobs ORDER BY created_at, job_id")],
+            "tracks": [dict(row) for row in conn.execute("SELECT * FROM tracks ORDER BY job_id, track_type, track_index")],
+            "segments": [dict(row) for row in conn.execute("SELECT * FROM segments ORDER BY job_id, segment_key")],
+        }
+    finally:
+        conn.close()
+
+    with open(destination, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    logger.info("Exported database JSON at %s", destination)
+    return destination
+
+
+def _build_arg_parser():
+    parser = argparse.ArgumentParser(description="Administrative streamer.db backup/export commands.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    backup_parser = subparsers.add_parser("backup", help="Create a consistent SQLite backup.")
+    backup_parser.add_argument("--output", help="Destination .sqlite3 path")
+    backup_parser.add_argument("--force", action="store_true", help="Overwrite an existing destination")
+
+    export_parser = subparsers.add_parser("export", help="Create a logical JSON export.")
+    export_parser.add_argument("--output", help="Destination .json path")
+    export_parser.add_argument("--force", action="store_true", help="Overwrite an existing destination")
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+    if args.command == "backup":
+        path = backup_database(args.output, force=args.force)
+    else:
+        path = export_database_json(args.output, force=args.force)
+    print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

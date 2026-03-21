@@ -1,5 +1,7 @@
+import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -261,6 +263,71 @@ class TestDatabaseMigrations(TestDatabaseBase):
 
 
 class TestDatabaseCRUD(TestDatabaseBase):
+    def test_backup_database_creates_sqlite_copy(self):
+        analysis, processing, upload = self._sample_payload("backup-job")
+        database.save_job("backup-job", analysis, processing, upload)
+        backup_path = os.path.join(self.harness.temp.name, "backup.sqlite3")
+
+        result = database.backup_database(backup_path)
+
+        self.assertEqual(result, backup_path)
+        self.assertTrue(os.path.exists(backup_path))
+        conn = sqlite3.connect(backup_path)
+        try:
+            row = conn.execute("SELECT filename FROM jobs WHERE job_id = 'backup-job'").fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row[0], "backup-job.mp4")
+
+    def test_backup_database_refuses_overwrite_without_force(self):
+        backup_path = os.path.join(self.harness.temp.name, "backup.sqlite3")
+        with open(backup_path, "wb") as handle:
+            handle.write(b"x")
+
+        with self.assertRaises(FileExistsError):
+            database.backup_database(backup_path)
+
+    def test_export_database_json_writes_logical_contents(self):
+        analysis, processing, upload = self._sample_payload("backup-job")
+        database.save_job("backup-job", analysis, processing, upload)
+        export_path = os.path.join(self.harness.temp.name, "export.json")
+
+        result = database.export_database_json(export_path)
+
+        self.assertEqual(result, export_path)
+        with open(export_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(payload["schema_revision"], database.LATEST_SCHEMA_REVISION)
+        self.assertEqual(payload["jobs"][0]["job_id"], "backup-job")
+        self.assertEqual(len(payload["tracks"]), 3)
+        self.assertEqual(len(payload["segments"]), 3)
+
+    def test_database_main_backup_command(self):
+        analysis, processing, upload = self._sample_payload("backup-job")
+        database.save_job("backup-job", analysis, processing, upload)
+        backup_path = os.path.join(self.harness.temp.name, "cli.sqlite3")
+
+        with patch.object(sys, "stdout"):
+            exit_code = database.main(["backup", "--output", backup_path])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(os.path.exists(backup_path))
+
+    def test_database_main_export_command_force_overwrite(self):
+        analysis, processing, upload = self._sample_payload("backup-job")
+        database.save_job("backup-job", analysis, processing, upload)
+        export_path = os.path.join(self.harness.temp.name, "cli.json")
+        with open(export_path, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+
+        with patch.object(sys, "stdout"):
+            exit_code = database.main(["export", "--output", export_path, "--force"])
+
+        self.assertEqual(exit_code, 0)
+        with open(export_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(payload["jobs"][0]["job_id"], "backup-job")
+
     def test_save_and_get_job(self):
         analysis, processing, upload = self._sample_payload()
         database.save_job("job1", analysis, processing, upload)
