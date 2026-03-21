@@ -67,7 +67,7 @@ _job_runtime = {}
 
 # Track in-progress chunked uploads: upload_id -> {path, filename, received, total, ...}
 _pending_uploads = {}
-_pending_filenames = {}  # filename -> upload_id (for O(1) duplicate check)
+_pending_filenames = {}  # (filename, total_size) -> upload_id (for O(1) duplicate check)
 _pending_uploads_lock = Lock()  # protects _pending_uploads, _pending_filenames, _upload_locks
 _upload_locks = {}
 _last_pending_cleanup = 0.0
@@ -452,7 +452,7 @@ def _cleanup_expired_pending_uploads(force=False):
             info = _pending_uploads.pop(upload_id, None)
             if not info:
                 continue
-            _pending_filenames.pop(info.get("filename"), None)
+            _pending_filenames.pop(info.get("dedup_key"), None)
             _upload_locks.pop(upload_id, None)
             ip = info.get("client_ip", "unknown")
             if _pending_uploads_per_ip[ip] > 0:
@@ -799,10 +799,11 @@ def upload_init():
             "error": f"File too large. Max {Config.MAX_UPLOAD_SIZE // (1024**3)}GB"
         }), 413
 
-    # Reject if there's already a pending upload for this filename
+    # Reject if there's already a pending upload for this filename+size
+    dedup_key = (filename, total_size)
     with _pending_uploads_lock:
-        if filename in _pending_filenames:
-            uid = _pending_filenames[filename]
+        if dedup_key in _pending_filenames:
+            uid = _pending_filenames[dedup_key]
             return jsonify({
                 "error": "An upload for this file is already in progress",
                 "upload_id": uid,
@@ -834,8 +835,9 @@ def upload_init():
             "created_ts": time.time(),
             "last_activity_ts": time.time(),
             "client_ip": ip,
+            "dedup_key": dedup_key,
         }
-        _pending_filenames[filename] = upload_id
+        _pending_filenames[dedup_key] = upload_id
         _upload_locks[upload_id] = Lock()
         _pending_uploads_per_ip[ip] += 1
 
@@ -965,7 +967,7 @@ def _remove_pending_upload(upload_id):
         upload = _pending_uploads.pop(upload_id, None)
         if not upload:
             return None
-        _pending_filenames.pop(upload.get("filename"), None)
+        _pending_filenames.pop(upload.get("dedup_key"), None)
         _upload_locks.pop(upload_id, None)
         ip = upload.get("client_ip", "unknown")
         if _pending_uploads_per_ip[ip] > 0:
@@ -1240,11 +1242,17 @@ def _finalize_source_file(job_id, file_path):
         _release_watch_file(source_path, success=success)
         return
 
-    if os.path.exists(file_path):
-        try:
-            os.remove(file_path)
-        except OSError:
-            logger.warning("Could not remove upload file: %s", file_path)
+    status = _active_jobs.get(job_id, {}).get("status")
+    if status == "complete":
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                logger.warning("Could not remove upload file: %s", file_path)
+    else:
+        if os.path.exists(file_path):
+            logger.info("Preserving upload source for job %s (status=%s): %s",
+                        job_id, status, file_path)
 
 
 def _process_job(job_id, file_path):

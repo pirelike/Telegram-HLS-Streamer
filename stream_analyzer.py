@@ -75,7 +75,7 @@ class SubtitleStream(StreamInfo):
 
     @property
     def is_text_based(self):
-        return self.codec_name in ("subrip", "srt", "ass", "ssa", "webvtt")
+        return self.codec_name in ("subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", "ttml")
 
 
 class MediaAnalysis:
