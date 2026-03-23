@@ -59,13 +59,15 @@ The project is designed for self-hosted personal media delivery with:
 
 The database (`streamer.db`) is the source of truth for playback.
 
-- `jobs`: one row per uploaded media job.
+- `jobs`: one row per uploaded media job (includes media_type, series/episode metadata, has_thumbnail).
 - `tracks`: one row per track variant (video tier, audio track, subtitle track).
 - `segments`: maps `segment_key` (e.g. `video_0/video_0001.ts`) to Telegram `file_id` + `bot_index`.
+- `settings`: key-value store for live configuration overrides persisted across restarts.
+- `bots`: dynamically registered bots added via UI (beyond .env-defined bots).
 - `schema_migrations`: ordered schema revision history applied on startup.
 
 If `segments` data is lost, the server cannot resolve files back from Telegram for streaming.
-On startup, the app upgrades older schemas in place and refuses to run against a newer unknown schema revision.
+On startup, the app upgrades older schemas in place (currently 6 revisions) and refuses to run against a newer unknown schema revision.
 
 ---
 
@@ -142,9 +144,9 @@ TELEGRAM_MAX_FILE_SIZE=20971520
 SEGMENT_TARGET_SIZE=15728640
 MAX_UPLOAD_SIZE=107374182400
 UPLOAD_CHUNK_SIZE=10485760
-SEGMENT_CACHE_SIZE_MB=512
-SEGMENT_PREFETCH_COUNT=2
-SEGMENT_PREFETCH_MIN_FREE_BYTES=134217728
+SEGMENT_CACHE_SIZE_MB=200
+SEGMENT_PREFETCH_COUNT=3
+SEGMENT_PREFETCH_MIN_FREE_BYTES=0
 
 # Processing
 HLS_SEGMENT_DURATION=4
@@ -321,14 +323,17 @@ Returns live/in-memory status for active jobs, or persisted metadata for complet
 #### `GET /api/jobs?page=1&limit=20`
 Returns paginated completed jobs (`limit` max 50).
 
+#### `GET /api/jobs/<job_id>`
+Returns full metadata for a single job.
+
 #### `DELETE /api/jobs/<job_id>`
 Deletes a completed job and its metadata from SQLite.
 
+#### `PATCH /api/jobs/<job_id>`
+Updates job metadata fields: `media_type`, `series_name`, `season_number`, `episode_number`, `part_number`.
+
 #### `POST /api/cancel/<job_id>`
 Marks an active job as cancelled.
-
-#### `GET /health`
-Checks SQLite access plus Telegram bot/channel reachability via `get_chat`.
 
 ### Playlist APIs
 
@@ -343,6 +348,43 @@ Checks SQLite access plus Telegram bot/channel reachability via `get_chat`.
 - `GET /segment/<job_id>/<segment_key>`
 
 This endpoint proxies the segment from Telegram with the original bot. Cache hits return immediately from the in-memory segment cache; cache misses stream to the player while the server writes a temp-file spill copy and warms the cache when the completed segment fits.
+
+### Settings & Bot APIs
+
+#### `GET /api/settings`
+Returns all configurable settings with current values, defaults, and descriptions organized by category.
+
+#### `POST /api/settings`
+Saves one or more settings and applies them live without restart. Values are persisted to the `settings` table in SQLite.
+
+#### `POST /api/settings/reset`
+Resets a specific setting to its default by removing its DB override (reverts to `.env` value).
+
+#### `GET /api/bots`
+Lists all configured bots (tokens masked).
+
+#### `POST /api/bots/health`
+Probes all bot connections and returns per-bot reachability status.
+
+#### `POST /api/bots/add`
+Validates a new bot token/channel pair (live `get_chat` check) and registers it.
+
+#### `DELETE /api/bots/<id>`
+Removes a dynamically registered bot.
+
+#### `GET /api/watch-settings`
+Returns current watch-folder configuration.
+
+#### `POST /api/watch-settings`
+Updates watch-folder settings (persisted to `watch_settings.json`).
+
+### Metrics & Health
+
+#### `GET /health`
+Checks SQLite access plus Telegram bot/channel reachability via `get_chat`.
+
+#### `GET /api/metrics`
+Returns operational metrics: job queue depth, cache hit/miss/eviction counts, prefetch pending count, and Telegram upload/download counters (counts, errors, cumulative duration).
 
 ---
 
@@ -474,7 +516,7 @@ See `todo.md` for the prioritized list of known issues, planned improvements, an
 
 - Single-process architecture — no distributed queue/worker support; job state is in-memory and not durable across restarts.
 - Segment caching is process-local only; multiple workers or nodes will still duplicate hot Telegram reads unless a shared cache is added.
-- Metrics for cache hit rate, Telegram latency/error rates, and active jobs are not exposed yet.
+- Basic metrics are available via `/api/metrics` (queue depth, cache hit/miss stats, Telegram counters). Per-request latency histograms are not yet tracked.
 - SQLite is the playback metadata store; it includes a schema versioning and migration framework for upgrades.
 - ABR tiers are static config; no per-title complexity optimization.
 - There is still no backup/export workflow for `streamer.db`.

@@ -15,12 +15,12 @@ Policy: application-level authentication is intentionally out of scope and shoul
 
 ## P5 — Operational
 
-- [ ] `app.py` + `telegram_uploader.py`: there is still no metrics surface for queue depth, Telegram API latency/error rates, cache hit rate, or active job counts.
+- [x] `app.py` + `telegram_uploader.py`: metrics surface added — `/api/metrics` exposes queue depth, cache hit/miss/eviction counts, prefetch pending, and Telegram upload/download counters.
 - [x] `config.py:load_bots`: bot discovery is still hardcoded to `TELEGRAM_BOT_TOKEN_1` through `_8`; larger pools require code changes instead of pure configuration.
 
 ## P6 — New Features
 
-- [ ] Thumbnail generation: there is still no thumbnail extraction, persistence, or proxying for the job list UI.
+- [ ] Thumbnail display: extraction and Telegram upload are implemented (`video_processor.py`, `telegram_uploader.py`); `has_thumbnail` is stored in the DB. Still missing: a proxy endpoint and display in the job list UI.
 - [ ] Job re-processing: there is still no way to regenerate a completed job with new tiers/settings without re-uploading the source.
 - [ ] Webhook notifications: there is still no completion callback for external automation.
 - [ ] Configurable per-job ABR tiers: ABR settings are still global config only.
