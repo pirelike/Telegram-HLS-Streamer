@@ -295,13 +295,37 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.assertIn("video/seg1.ts", out)
         self.assertIn("audio_0/seg2.ts", out)
 
-    async def test_upload_files_no_callback(self):
-        async def fake_upload(path, bot_entry, cancel_event=None):
-            return tu.UploadedSegment("fid", 0, "f.ts", 1)
+    async def test_upload_files_cancels_others_on_error(self):
+        """Verify that when one task fails, others are cancelled and awaited."""
+        first_fail = True
+        others_cancelled = False
 
-        with patch.object(self.uploader, "_upload_file_with_bot_lock", side_effect=fake_upload):
-            out = await self.uploader.upload_files([("k/f.ts", "/tmp/f.ts")])
-        self.assertEqual(len(out), 1)
+        async def mock_upload(path, bot_entry, cancel_event=None):
+            nonlocal first_fail, others_cancelled
+            if "fail.ts" in path:
+                raise RuntimeError("forced failure")
+
+            try:
+                # Wait longer than the failure take to trigger
+                await asyncio.sleep(1)
+                return tu.UploadedSegment("ok", 0, "ok.ts", 5)
+            except asyncio.CancelledError:
+                others_cancelled = True
+                raise
+
+        with patch.object(self.uploader, "_upload_file_with_bot_lock", side_effect=mock_upload):
+            files = [("k1", "/tmp/fail.ts"), ("k2", "/tmp/ok.ts")]
+            with self.assertRaises(RuntimeError):
+                await self.uploader.upload_files(files)
+
+        self.assertTrue(others_cancelled, "Other tasks should have been cancelled")
+
+    async def test_upload_file_check_existence(self):
+        """_upload_file should raise FileNotFoundError if file is missing."""
+        path = "/tmp/non_existent_segment_xyz.ts"
+        with self.assertRaises(FileNotFoundError):
+            await self.uploader._upload_file(path, self.uploader.bots[0])
+
 
     async def test_upload_file_cancel_event_aborts_before_attempt(self):
         with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -420,6 +444,95 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
         self.bot_instances[1].get_file = AsyncMock(return_value=fake_file)
         data = await self.uploader.get_file_bytes("B" * 50, 1)
         self.assertEqual(bytes(data), b"y")
+
+
+class TestTelegramUploaderMetrics(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN_1": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            "TELEGRAM_CHANNEL_ID_1": "-1001",
+        }, clear=True):
+            from config import Config
+            Config.load_bots()
+        self.uploader = tu.TelegramUploader()
+
+    def test_get_metrics_returns_all_keys(self):
+        m = self.uploader.get_metrics()
+        for key in ("upload_count", "upload_errors", "upload_total_seconds",
+                    "download_count", "download_errors", "download_total_seconds"):
+            self.assertIn(key, m, msg=f"metrics missing key: {key}")
+
+    def test_get_metrics_initial_values_are_zero(self):
+        m = self.uploader.get_metrics()
+        for key, val in m.items():
+            self.assertEqual(val, 0 if isinstance(val, int) else 0.0)
+
+    def test_record_metric_success_increments_count_and_time(self):
+        self.uploader._record_metric("upload", 1.5)
+        m = self.uploader.get_metrics()
+        self.assertEqual(m["upload_count"], 1)
+        self.assertAlmostEqual(m["upload_total_seconds"], 1.5)
+        self.assertEqual(m["upload_errors"], 0)
+
+    def test_record_metric_error_increments_errors_not_count(self):
+        self.uploader._record_metric("download", 0.5, error=True)
+        m = self.uploader.get_metrics()
+        self.assertEqual(m["download_errors"], 1)
+        self.assertEqual(m["download_count"], 0)
+        self.assertEqual(m["download_total_seconds"], 0.0)
+
+    def test_get_metrics_returns_copy(self):
+        m1 = self.uploader.get_metrics()
+        m1["upload_count"] = 999
+        m2 = self.uploader.get_metrics()
+        self.assertEqual(m2["upload_count"], 0)
+
+
+class TestReloadBots(unittest.TestCase):
+    def test_reload_bots_updates_bot_list(self):
+        with patch.object(tu.Config, "BOTS", [{"token": "t1", "channel_id": -1001}]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader = tu.TelegramUploader()
+                self.assertEqual(len(uploader.bots), 1)
+
+        # Change Config.BOTS to two entries and reload
+        with patch.object(tu.Config, "BOTS", [
+            {"token": "t1", "channel_id": -1001},
+            {"token": "t2", "channel_id": -1002},
+        ]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader.reload_bots()
+                self.assertEqual(len(uploader.bots), 2)
+                self.assertEqual(uploader.bots[0]["channel_id"], -1001)
+                self.assertEqual(uploader.bots[1]["channel_id"], -1002)
+
+    def test_reload_bots_resets_counter(self):
+        with patch.object(tu.Config, "BOTS", [
+            {"token": "t1", "channel_id": -1001},
+            {"token": "t2", "channel_id": -1002},
+        ]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader = tu.TelegramUploader()
+                uploader._bot_counter = 5
+                uploader.reload_bots()
+                self.assertEqual(uploader._bot_counter, 0)
+
+    def test_reload_bots_resets_locks(self):
+        with patch.object(tu.Config, "BOTS", [{"token": "t1", "channel_id": -1001}]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader = tu.TelegramUploader()
+                uploader._bot_locks = ["fake_lock"]
+                uploader.reload_bots()
+                self.assertIsNone(uploader._bot_locks)
+
+    def test_reload_bots_empty_config(self):
+        with patch.object(tu.Config, "BOTS", [{"token": "t1", "channel_id": -1001}]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader = tu.TelegramUploader()
+
+        with patch.object(tu.Config, "BOTS", []):
+            uploader.reload_bots()
+            self.assertEqual(uploader.bots, [])
 
 
 if __name__ == "__main__":

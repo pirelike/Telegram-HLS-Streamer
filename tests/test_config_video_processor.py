@@ -160,6 +160,39 @@ class TestConfigLoadBots(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected negative integer"):
                 config.Config.load_bots()
 
+    def test_load_bots_discovers_suffix_beyond_8(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_10": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+                "TELEGRAM_CHANNEL_ID_10": "-1010",
+                "TELEGRAM_BOT_TOKEN_15": "9876543210:ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvutsr",
+                "TELEGRAM_CHANNEL_ID_15": "-1015",
+            },
+            clear=True,
+        ):
+            bots = config.Config.load_bots()
+        self.assertEqual(len(bots), 2)
+        self.assertEqual(bots[0]["channel_id"], -1010)
+        self.assertEqual(bots[1]["channel_id"], -1015)
+
+    def test_load_bots_numeric_sort_order(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_3": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+                "TELEGRAM_CHANNEL_ID_3": "-1003",
+                "TELEGRAM_BOT_TOKEN_10": "9876543210:ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvutsr",
+                "TELEGRAM_CHANNEL_ID_10": "-1010",
+            },
+            clear=True,
+        ):
+            bots = config.Config.load_bots()
+        # Numeric order: 3 before 10 (not lexicographic "10" before "3")
+        self.assertEqual(len(bots), 2)
+        self.assertEqual(bots[0]["channel_id"], -1003)
+        self.assertEqual(bots[1]["channel_id"], -1010)
+
 
 class TestSegmentTargetConfig(unittest.TestCase):
     def test_segment_target_size_uses_default(self):
@@ -214,7 +247,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         vp._hw_encoder_cache = None
         self.analysis = SimpleNamespace(
             file_path="/tmp/in.mp4",
-            has_video=True,
+            has_video=True, can_copy_video=True,
             audio_streams=[],
             subtitle_streams=[],
             video_streams=[SimpleNamespace(index=0, codec_name="h264", is_copy_compatible=True,
@@ -237,15 +270,36 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_success_vaapi(self, mock_run):
+        # h264_vaapi: list contains it, probe succeeds
+        # hevc_vaapi: list does not contain it (not in stdout)
         mock_run.side_effect = [
-            Mock(stdout="h264_vaapi other stuff", returncode=0),
-            Mock(returncode=0, stderr=""),
+            Mock(stdout="h264_vaapi other stuff", returncode=0),  # encoder list for h264
+            Mock(returncode=0, stderr=""),                         # h264 probe success
+            Mock(stdout="h264_vaapi other stuff", returncode=0),  # encoder list for hevc (not found)
         ]
         with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
              patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
             enc = vp._detect_hw_encoder()
-        self.assertEqual(enc[0], "h264_vaapi")
-        self.assertIn("-vaapi_device", enc[1])
+        self.assertIsNotNone(enc)
+        self.assertEqual(enc["h264"][0], "h264_vaapi")
+        self.assertIn("-vaapi_device", enc["h264"][1])
+        self.assertIsNone(enc["hevc"])
+
+    @patch("video_processor.subprocess.run")
+    def test_detect_hw_encoder_success_both_codecs(self, mock_run):
+        # Both h264_vaapi and hevc_vaapi available
+        mock_run.side_effect = [
+            Mock(stdout="h264_vaapi hevc_vaapi", returncode=0),  # encoder list for h264
+            Mock(returncode=0, stderr=""),                        # h264 probe success
+            Mock(stdout="h264_vaapi hevc_vaapi", returncode=0),  # encoder list for hevc
+            Mock(returncode=0, stderr=""),                        # hevc probe success
+        ]
+        with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
+             patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
+            enc = vp._detect_hw_encoder()
+        self.assertIsNotNone(enc)
+        self.assertEqual(enc["h264"][0], "h264_vaapi")
+        self.assertEqual(enc["hevc"][0], "hevc_vaapi")
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_not_found_in_output(self, mock_run):
@@ -257,22 +311,27 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_result_is_cached(self, mock_run):
+        # h264 found and probed OK; hevc not in list (3 total calls on first invocation)
         mock_run.side_effect = [
-            Mock(stdout="h264_vaapi", returncode=0),
-            Mock(returncode=0, stderr=""),
+            Mock(stdout="h264_vaapi", returncode=0),  # encoder list for h264
+            Mock(returncode=0, stderr=""),             # h264 probe success
+            Mock(stdout="h264_vaapi", returncode=0),  # encoder list for hevc (not found)
         ]
         with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
              patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
             r1 = vp._detect_hw_encoder()
             r2 = vp._detect_hw_encoder()  # second call uses cache
         self.assertIs(r1, r2)
-        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_run.call_count, 3)
 
     @patch("video_processor.subprocess.run")
     def test_detect_hw_encoder_probe_failure_falls_back_to_software(self, mock_run):
+        # Both h264 and hevc probe fail → result is None
         mock_run.side_effect = [
-            Mock(stdout="h264_vaapi", returncode=0),
-            Mock(returncode=1, stderr="device init failed"),
+            Mock(stdout="h264_vaapi hevc_vaapi", returncode=0),  # encoder list for h264
+            Mock(returncode=1, stderr="device init failed"),      # h264 probe fails
+            Mock(stdout="h264_vaapi hevc_vaapi", returncode=0),  # encoder list for hevc
+            Mock(returncode=1, stderr="device init failed"),      # hevc probe fails
         ]
         with patch.object(vp.Config, "ENABLE_HW_ACCEL", True), \
              patch.object(vp.Config, "PREFERRED_ENCODER", "vaapi"):
@@ -373,7 +432,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         with patch.object(vp.Config, "SEGMENT_TARGET_SIZE", 19 * 1024 * 1024), \
              patch.object(vp.Config, "TELEGRAM_MAX_FILE_SIZE", 20 * 1024 * 1024):
             size = vp._get_safe_segment_size("8M")
-        expected = 20 * 1024 * 1024 - int(vp._parse_bitrate_to_bytes_per_sec("8M") * 1.5)
+        expected = 20 * 1024 * 1024 - int(vp._parse_bitrate_to_bytes_per_sec("8M") * 3.0)
         self.assertEqual(size, expected)
 
     def test_get_safe_segment_size_has_one_mb_floor(self):
@@ -384,13 +443,25 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     # ─── _build_video_cmd ───
 
-    def test_build_video_cmd_always_encodes_cbr(self):
-        # Tier 0 should always re-encode with CBR, never copy
+    def test_build_video_cmd_copy_compatible_uses_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd, playlist = vp._build_video_cmd(self.analysis, tmpdir, None, allow_copy=True)
+        cmd_str = " ".join(cmd)
+        self.assertIn("-c:v copy", cmd_str)
+        self.assertNotIn("-b:v", cmd_str)
+        self.assertNotIn("-minrate", cmd_str)
+        self.assertNotIn("-maxrate", cmd_str)
+        self.assertNotIn("-bufsize", cmd_str)
+        self.assertNotIn("-vf scale", cmd_str)
+        self.assertNotIn("-force_key_frames", cmd_str)
+
+    def test_build_video_cmd_default_uses_cbr(self):
+        # allow_copy defaults to False — should re-encode with CBR
         with tempfile.TemporaryDirectory() as tmpdir:
             cmd, playlist = vp._build_video_cmd(self.analysis, tmpdir, None,
                                                  target_bitrate="15M")
         cmd_str = " ".join(cmd)
-        self.assertNotIn("copy", cmd_str)
+        self.assertNotIn("-c:v copy", cmd_str)
         self.assertIn("libx264", cmd_str)
         self.assertIn("-minrate", cmd_str)
         self.assertIn("-maxrate", cmd_str)
@@ -403,16 +474,16 @@ class TestVideoProcessorHelpers(unittest.TestCase):
                                           target_bitrate="2M")
         cmd_str = " ".join(cmd)
         self.assertIn("libx264", cmd_str)
-        # Verify true CBR: -b:v, -minrate, -maxrate, -bufsize all set to same value
+        # Verify CBR flags: -bufsize is 2x the target bitrate for smoother rate control
         self.assertIn("-b:v 2M", cmd_str)
         self.assertIn("-minrate 2M", cmd_str)
         self.assertIn("-maxrate 2M", cmd_str)
-        self.assertIn("-bufsize 2M", cmd_str)
+        self.assertIn("-bufsize 4M", cmd_str)
 
     def test_build_video_cmd_hardware_encode_cbr(self):
+        hw = {"h264": ("h264_vaapi", ["-foo"]), "hevc": None}
         with tempfile.TemporaryDirectory() as tmpdir:
-            cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, ("h264_vaapi", ["-foo"]),
-                                          target_bitrate="2M")
+            cmd, _ = vp._build_video_cmd(self.analysis, tmpdir, hw, target_bitrate="2M")
         cmd_str = " ".join(cmd)
         self.assertIn("h264_vaapi", cmd_str)
         self.assertIn("-minrate 2M", cmd_str)
@@ -460,21 +531,22 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     # ─── _build_audio_cmd ───
 
-    def test_build_audio_cmd_always_encodes_aac(self):
+    def test_build_audio_cmd_copy_compatible_uses_copy(self):
         audio = SimpleNamespace(index=1, is_copy_compatible=True, language="eng",
-                                codec_name="aac", channels=2)
+                                codec_name="aac", channels=2, bit_rate=None)
         with tempfile.TemporaryDirectory() as tmpdir:
             cmd, playlist, audio_dir = vp._build_audio_cmd(self.analysis, audio, 0, tmpdir)
-            self.assertIn("aac", cmd)
-            self.assertNotIn("copy", cmd)
+            self.assertIn("copy", cmd)
+            self.assertNotIn("aac", [arg for arg in cmd if arg not in ("-c:a",)])
             self.assertTrue(os.path.isdir(audio_dir))
 
-    def test_build_audio_cmd_non_compatible_codec(self):
+    def test_build_audio_cmd_non_compatible_codec_encodes_aac(self):
         audio = SimpleNamespace(index=1, is_copy_compatible=False, language="eng",
-                                codec_name="opus", channels=2)
+                                codec_name="opus", channels=2, bit_rate=None)
         with tempfile.TemporaryDirectory() as tmpdir:
             cmd, _, _ = vp._build_audio_cmd(self.analysis, audio, 0, tmpdir)
-            self.assertIn("aac", cmd)
+        self.assertIn("aac", cmd)
+        self.assertNotIn("copy", cmd)
 
     def test_build_audio_cmd_creates_audio_dir(self):
         audio = SimpleNamespace(index=1, is_copy_compatible=True, language="eng",
@@ -613,7 +685,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
-                    has_video=True,
+                    has_video=True, can_copy_video=True,
                     duration=12.0,
                     video_streams=[SimpleNamespace(index=0, codec_name="h264",
                                                    is_copy_compatible=True, width=1280, height=720)],
@@ -642,7 +714,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
-                    has_video=True,
+                    has_video=True, can_copy_video=True,
                     duration=10.0,
                     video_streams=[SimpleNamespace(index=0, codec_name="h264",
                                                    is_copy_compatible=True, width=1920, height=1080)],
@@ -656,13 +728,13 @@ class TestVideoProcessorHelpers(unittest.TestCase):
     @patch("video_processor._run_ffmpeg_with_progress")
     @patch("video_processor._run_ffmpeg")
     @patch("video_processor._detect_hw_encoder", return_value=None)
-    def test_process_lower_tiers_use_tier0_as_input(self, _detect, _run, _run_with_progress):
-        """Verify ABR tiers encode from tier 0's playlist output."""
+    def test_process_all_tiers_use_original_source(self, _detect, _run, _run_with_progress):
+        """Verify all ABR tiers encode directly from the original source file."""
         with tempfile.TemporaryDirectory() as proc_dir:
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
-                    has_video=True,
+                    has_video=True, can_copy_video=True,
                     duration=10.0,
                     video_streams=[SimpleNamespace(index=0, codec_name="h264",
                                                    is_copy_compatible=True, width=1920, height=1080)],
@@ -670,17 +742,47 @@ class TestVideoProcessorHelpers(unittest.TestCase):
                     subtitle_streams=[],
                 )
                 vp.process(analysis, "jobt0input")
-                # Check that lower tier FFmpeg calls used tier 0 playlist as input
-                calls = _run_with_progress.call_args_list
-                # First call is tier 0, uses original file
-                tier0_cmd = calls[0][0][0]
-                self.assertIn("/tmp/in.mp4", tier0_cmd)
-                # Subsequent calls should use tier 0 playlist
-                if len(calls) > 1:
-                    tier1_cmd = calls[1][0][0]
-                    # Input should be the tier 0 playlist, not the original
-                    input_idx = tier1_cmd.index("-i")
-                    self.assertTrue(tier1_cmd[input_idx + 1].endswith("video.m3u8"))
+                # Every video tier FFmpeg call should use the original source as input
+                for call in _run_with_progress.call_args_list:
+                    cmd = call[0][0]
+                    input_idx = cmd.index("-i")
+                    self.assertEqual(cmd[input_idx + 1], "/tmp/in.mp4",
+                                     f"Expected original source as input, got: {cmd[input_idx + 1]}")
+
+    @patch("video_processor._run_ffmpeg_with_progress")
+    @patch("video_processor._run_ffmpeg")
+    @patch("video_processor._detect_hw_encoder", return_value=None)
+    def test_process_copy_mode_with_abr_produces_abr_tiers(self, _detect, _run, _run_with_progress):
+        """Copy-compatible input + ABR enabled: tier 0 uses -c:v copy, ABR tiers re-encode."""
+        with tempfile.TemporaryDirectory() as proc_dir:
+            with patch.object(vp.Config, "PROCESSING_DIR", proc_dir), \
+                 patch.object(vp.Config, "ABR_ENABLED", True), \
+                 patch.object(vp.Config, "ENABLE_COPY_MODE", True), \
+                 patch.object(vp.Config, "ABR_TIERS", [{"height": 480, "bitrate": "2M"}]):
+                analysis = SimpleNamespace(
+                    file_path="/tmp/in.mp4",
+                    has_video=True, can_copy_video=True,
+                    duration=10.0,
+                    video_streams=[SimpleNamespace(index=0, codec_name="h264",
+                                                   is_copy_compatible=True, width=1920, height=1080)],
+                    audio_streams=[],
+                    subtitle_streams=[],
+                )
+                result = vp.process(analysis, "jobcopyabr")
+                # Should have tier 0 (copy) + 1 ABR tier
+                self.assertEqual(len(result.video_playlists), 2)
+
+                # Tier 0 FFmpeg command must include -c:v copy
+                tier0_call = _run_with_progress.call_args_list[0]
+                tier0_cmd = tier0_call[0][0]
+                self.assertIn("-c:v", tier0_cmd)
+                copy_idx = tier0_cmd.index("-c:v")
+                self.assertEqual(tier0_cmd[copy_idx + 1], "copy")
+
+                # ABR tier FFmpeg command must NOT use copy
+                abr_call = _run_with_progress.call_args_list[1]
+                abr_cmd = abr_call[0][0]
+                self.assertNotIn("copy", abr_cmd)
 
     @patch("video_processor._run_ffmpeg_with_progress")
     @patch("video_processor._run_ffmpeg")
@@ -711,7 +813,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
-                    has_video=True,
+                    has_video=True, can_copy_video=True,
                     duration=10.0,
                     video_streams=[SimpleNamespace(index=0, codec_name="h264",
                                                    is_copy_compatible=True, width=640, height=480)],
@@ -730,7 +832,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
-                    has_video=True,
+                    has_video=True, can_copy_video=True,
                     duration=10.0,
                     video_streams=[SimpleNamespace(index=0, codec_name="h264",
                                                    is_copy_compatible=True, width=1280, height=720)],
@@ -742,6 +844,51 @@ class TestVideoProcessorHelpers(unittest.TestCase):
                 result = vp.process(analysis, "jobskipsub")
                 self.assertEqual(len(result.subtitle_files), 0)
 
+    @patch("video_processor._run_ffmpeg_with_progress")
+    @patch("video_processor._run_ffmpeg")
+    @patch("video_processor._detect_hw_encoder", return_value=None)
+    def test_process_fires_on_stream_encoded(self, _detect, _run, _run_with_progress):
+        """Callback fires for each video tier, audio track, and subtitle."""
+        with tempfile.TemporaryDirectory() as proc_dir:
+            with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
+                analysis = SimpleNamespace(
+                    file_path="/tmp/in.mp4",
+                    has_video=True, can_copy_video=True,
+                    duration=10.0,
+                    video_streams=[SimpleNamespace(index=0, codec_name="h264",
+                                                   is_copy_compatible=True, width=1280, height=720)],
+                    audio_streams=[
+                        SimpleNamespace(index=1, is_copy_compatible=True,
+                                        language="eng", title="", codec_name="aac", channels=2),
+                    ],
+                    subtitle_streams=[
+                        SimpleNamespace(index=2, is_text_based=True, language="eng", title=""),
+                    ],
+                )
+                calls = []
+                def callback(stream_type, stream_index, files):
+                    calls.append((stream_type, stream_index, files))
+
+                vp.process(analysis, "jobcb", on_stream_encoded=callback)
+
+                stream_types = [c[0] for c in calls]
+                self.assertIn("video", stream_types)
+                self.assertIn("audio", stream_types)
+                self.assertIn("subtitle", stream_types)
+
+                # Each call provides a non-empty files list of (key, path) tuples
+                for stream_type, stream_index, files in calls:
+                    if stream_type in ("video", "audio"):
+                        # Files may be empty if FFmpeg is mocked and produced no .ts files
+                        # — just verify the structure when files are present
+                        for key, path in files:
+                            self.assertIsInstance(key, str)
+                            self.assertIsInstance(path, str)
+                    elif stream_type == "subtitle":
+                        self.assertEqual(len(files), 1)
+                        key, path = files[0]
+                        self.assertIn("subtitles.vtt", key)
+
     # ─── cleanup() ───
 
     @patch("video_processor._run_ffmpeg_with_progress")
@@ -752,7 +899,7 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 analysis = SimpleNamespace(
                     file_path="/tmp/in.mp4",
-                    has_video=True,
+                    has_video=True, can_copy_video=True,
                     duration=12.0,
                     video_streams=[SimpleNamespace(index=0, codec_name="h264",
                                                    is_copy_compatible=True, width=1280, height=720)],
@@ -771,13 +918,47 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             with patch.object(vp.Config, "PROCESSING_DIR", proc_dir):
                 vp.cleanup("no_such_job")  # should not raise
 
+    @patch("video_processor._run_ffmpeg")
+    @patch("os.path.getsize")
+    @patch("os.replace")
+    def test_reencode_oversized_segment_selects_h264_hardware(self, mock_replace, mock_getsize, mock_run):
+        mock_getsize.return_value = 10 * 1024 * 1024
+        hw_encoders = {"h264": ("h264_vaapi", ["-vaapi_device", "/dev/dri/renderD128"]), "hevc": None}
+        vp._reencode_oversized_segment("/tmp/seg.ts", 10.0, hw_encoders, "h264")
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("h264_vaapi", cmd)
+        self.assertIn("-vaapi_device", cmd)
+        self.assertIn("-c:a", cmd)
+
+    @patch("video_processor._run_ffmpeg")
+    @patch("os.path.getsize")
+    @patch("os.replace")
+    def test_reencode_oversized_segment_selects_hevc_software_fallback(self, mock_replace, mock_getsize, mock_run):
+        mock_getsize.return_value = 10 * 1024 * 1024
+        vp._reencode_oversized_segment("/tmp/seg.ts", 10.0, None, "hevc")
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("libx265", cmd)
+
 
 class TestUploadSizeGate(unittest.TestCase):
+    def _make_bare_uploader(self):
+        import threading
+        from telegram_uploader import TelegramUploader
+        uploader = TelegramUploader.__new__(TelegramUploader)
+        uploader.metrics = {
+            "upload_count": 0, "upload_errors": 0, "upload_total_seconds": 0.0,
+            "download_count": 0, "download_errors": 0, "download_total_seconds": 0.0,
+        }
+        uploader._metrics_lock = threading.Lock()
+        return uploader
+
     def test_upload_file_raises_on_oversized(self):
         import asyncio
         from telegram_uploader import TelegramUploader
 
-        uploader = TelegramUploader.__new__(TelegramUploader)
+        uploader = self._make_bare_uploader()
         uploader.bots = [{"bot": Mock(), "channel_id": -1001, "index": 0}]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -793,9 +974,8 @@ class TestUploadSizeGate(unittest.TestCase):
 
     def test_upload_file_does_not_raise_on_exact_limit(self):
         import asyncio
-        from telegram_uploader import TelegramUploader
 
-        uploader = TelegramUploader.__new__(TelegramUploader)
+        uploader = self._make_bare_uploader()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             exact_file = os.path.join(tmpdir, "segment.ts")
@@ -819,6 +999,157 @@ class TestUploadSizeGate(unittest.TestCase):
                 # Should not raise — file is exactly at limit
                 result = asyncio.run(uploader._upload_file(exact_file, bot_entry))
             self.assertEqual(result.file_size, 100)
+
+
+class TestConfigToDict(unittest.TestCase):
+    def test_to_dict_has_categories_key(self):
+        result = config.Config.to_dict()
+        self.assertIn("categories", result)
+
+    def test_to_dict_expected_categories(self):
+        result = config.Config.to_dict()
+        cats = result["categories"]
+        for expected in ("server", "files", "hw_accel", "abr", "hls", "reliability", "rate_limiting", "watch", "telegram"):
+            self.assertIn(expected, cats, f"Missing category: {expected}")
+
+    def test_to_dict_settings_have_required_fields(self):
+        result = config.Config.to_dict()
+        for cat_key, cat in result["categories"].items():
+            self.assertIn("label", cat)
+            self.assertIn("settings", cat)
+            for s in cat["settings"]:
+                for field in ("key", "env", "type", "value", "default", "description"):
+                    self.assertIn(field, s, f"Missing field {field!r} in category {cat_key}")
+
+    def test_to_dict_bool_values_are_bool_type(self):
+        result = config.Config.to_dict()
+        for cat in result["categories"].values():
+            for s in cat["settings"]:
+                if s["type"] == "bool":
+                    self.assertIsInstance(s["value"], bool, f"Bool field {s['key']} is not bool")
+
+    def test_to_dict_int_values_are_int_type(self):
+        result = config.Config.to_dict()
+        for cat in result["categories"].values():
+            for s in cat["settings"]:
+                if s["type"] == "int":
+                    self.assertIsInstance(s["value"], int, f"Int field {s['key']} is not int")
+
+
+class TestConfigLoadFromDb(unittest.TestCase):
+    def test_load_from_db_overrides_int_setting(self):
+        import database
+        import threading
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = __import__("os").path.join(tmpdir, "test.db")
+            with patch.object(database, "DB_PATH", db_path):
+                database._close_all_connections()
+                database._local = threading.local()
+                database.init_db()
+                database.set_setting("HLS_SEGMENT_DURATION", "10")
+
+                original = config.Config.HLS_SEGMENT_DURATION
+                try:
+                    config.Config.load_from_db()
+                    self.assertEqual(config.Config.HLS_SEGMENT_DURATION, 10)
+                finally:
+                    config.Config.HLS_SEGMENT_DURATION = original
+                    database._close_all_connections()
+
+    def test_load_from_db_overrides_bool_setting(self):
+        import database
+        import threading
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = __import__("os").path.join(tmpdir, "test.db")
+            with patch.object(database, "DB_PATH", db_path):
+                database._close_all_connections()
+                database._local = threading.local()
+                database.init_db()
+                database.set_setting("ABR_ENABLED", "false")
+
+                original = config.Config.ABR_ENABLED
+                try:
+                    config.Config.load_from_db()
+                    self.assertFalse(config.Config.ABR_ENABLED)
+                finally:
+                    config.Config.ABR_ENABLED = original
+                    database._close_all_connections()
+
+    def test_load_from_db_merges_db_bots(self):
+        import database
+        import threading
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = __import__("os").path.join(tmpdir, "test.db")
+            with patch.object(database, "DB_PATH", db_path):
+                database._close_all_connections()
+                database._local = threading.local()
+                database.init_db()
+                database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100999, "DB Bot")
+
+                original_bots = list(config.Config.BOTS)
+                try:
+                    config.Config.BOTS = []
+                    config.Config.load_from_db()
+                    tokens = [b["token"] for b in config.Config.BOTS]
+                    self.assertIn("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", tokens)
+                finally:
+                    config.Config.BOTS = original_bots
+                    database._close_all_connections()
+
+    def test_load_from_db_skips_invalid_values(self):
+        import database
+        import threading
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = __import__("os").path.join(tmpdir, "test.db")
+            with patch.object(database, "DB_PATH", db_path):
+                database._close_all_connections()
+                database._local = threading.local()
+                database.init_db()
+                database.set_setting("HLS_SEGMENT_DURATION", "not_an_int")
+
+                original = config.Config.HLS_SEGMENT_DURATION
+                try:
+                    config.Config.load_from_db()  # should not raise
+                    self.assertEqual(config.Config.HLS_SEGMENT_DURATION, original)
+                finally:
+                    database._close_all_connections()
+
+    def test_load_from_db_deduplicates_bots_by_token(self):
+        import database
+        import threading
+        import tempfile
+        from unittest.mock import patch
+
+        token = "123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = __import__("os").path.join(tmpdir, "test.db")
+            with patch.object(database, "DB_PATH", db_path):
+                database._close_all_connections()
+                database._local = threading.local()
+                database.init_db()
+                database.add_bot(token, -100999)
+
+                original_bots = list(config.Config.BOTS)
+                try:
+                    config.Config.BOTS = [{"token": token, "channel_id": -100999}]
+                    config.Config.load_from_db()
+                    tokens = [b["token"] for b in config.Config.BOTS]
+                    self.assertEqual(tokens.count(token), 1)
+                finally:
+                    config.Config.BOTS = original_bots
+                    database._close_all_connections()
 
 
 if __name__ == "__main__":

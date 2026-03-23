@@ -134,6 +134,9 @@ class TestDatabaseMigrations(TestDatabaseBase):
                 (1, "create_base_schema"),
                 (2, "add_track_dimensions_and_stream_index"),
                 (3, "add_segment_duration"),
+                (4, "add_media_metadata"),
+                (5, "add_series_episode_metadata"),
+                (6, "create_settings_and_bots_tables"),
             ],
         )
 
@@ -235,7 +238,7 @@ class TestDatabaseMigrations(TestDatabaseBase):
         database.init_db()
         conn = database._get_conn()
         rows = conn.execute("SELECT revision FROM schema_migrations ORDER BY revision").fetchall()
-        self.assertEqual([row["revision"] for row in rows], [1, 2, 3])
+        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6])
 
     def test_init_db_fails_for_newer_schema_revision(self):
         self._reset_db_file()
@@ -762,6 +765,271 @@ class TestSubtitleTrackIndexMismatch(TestDatabaseBase):
         audio_tracks = database.get_job_tracks("job_orig_idx", "audio")
         self.assertEqual(video_tracks[0]["original_stream_index"], 0)
         self.assertEqual(audio_tracks[0]["original_stream_index"], 1)
+
+
+class TestMediaMetadata(TestDatabaseBase):
+    """Tests for migration 004 — media_type, series_name, has_thumbnail."""
+
+    def test_migration_004_columns_exist(self):
+        conn = database._get_conn()
+        cols = database._list_table_columns(conn, "jobs")
+        self.assertIn("media_type", cols)
+        self.assertIn("series_name", cols)
+        self.assertIn("has_thumbnail", cols)
+
+    def test_save_job_stores_media_type_and_series_name(self):
+        analysis, processing, upload = self._sample_payload("job_meta")
+        database.save_job("job_meta", analysis, processing, upload,
+                          media_type="Series", series_name="Breaking Bad")
+        job = database.get_job("job_meta")
+        self.assertEqual(job["media_type"], "Series")
+        self.assertEqual(job["series_name"], "Breaking Bad")
+        self.assertEqual(job["has_thumbnail"], 0)
+
+    def test_save_job_defaults_media_type_to_film(self):
+        analysis, processing, upload = self._sample_payload("job_default")
+        database.save_job("job_default", analysis, processing, upload)
+        job = database.get_job("job_default")
+        self.assertEqual(job["media_type"], "Film")
+        self.assertEqual(job["series_name"], "")
+
+    def test_update_job_thumbnail_sets_flag(self):
+        analysis, processing, upload = self._sample_payload("job_thumb")
+        database.save_job("job_thumb", analysis, processing, upload)
+        self.assertEqual(database.get_job("job_thumb")["has_thumbnail"], 0)
+        database.update_job_thumbnail("job_thumb")
+        self.assertEqual(database.get_job("job_thumb")["has_thumbnail"], 1)
+
+    def test_update_job_metadata(self):
+        analysis, processing, upload = self._sample_payload("job_meta_edit")
+        database.save_job("job_meta_edit", analysis, processing, upload,
+                          media_type="Film", is_series=0)
+        
+        database.update_job_metadata(
+            "job_meta_edit", media_type="Anime TV", series_name="New Series",
+            is_series=1, season_number=2, episode_number=5, part_number=None
+        )
+        
+        job = database.get_job("job_meta_edit")
+        self.assertEqual(job["media_type"], "Anime TV")
+        self.assertEqual(job["series_name"], "New Series")
+        self.assertEqual(job["is_series"], 1)
+        self.assertEqual(job["season_number"], 2)
+        self.assertEqual(job["episode_number"], 5)
+        self.assertIsNone(job["part_number"])
+
+    def test_list_jobs_includes_media_metadata(self):
+        analysis, processing, upload = self._sample_payload("job_list_meta")
+        database.save_job("job_list_meta", analysis, processing, upload,
+                          media_type="Anime", series_name="Naruto")
+        database.update_job_thumbnail("job_list_meta")
+        jobs = database.list_jobs()
+        job = next((j for j in jobs if j["job_id"] == "job_list_meta"), None)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["media_type"], "Anime")
+        self.assertEqual(job["series_name"], "Naruto")
+        self.assertEqual(job["has_thumbnail"], 1)
+
+
+class TestMigration005(TestDatabaseBase):
+    """Tests for migration 005 — is_series, season_number, episode_number, part_number."""
+
+    def test_migration_005_columns_exist(self):
+        conn = database._get_conn()
+        cols = database._list_table_columns(conn, "jobs")
+        self.assertIn("is_series", cols)
+        self.assertIn("season_number", cols)
+        self.assertIn("episode_number", cols)
+        self.assertIn("part_number", cols)
+
+    def test_save_job_stores_series_episode_metadata(self):
+        analysis, processing, upload = self._sample_payload("job_ep")
+        database.save_job("job_ep", analysis, processing, upload,
+                          media_type="Series", series_name="Breaking Bad",
+                          is_series=True, season_number=2, episode_number=5)
+        job = database.get_job("job_ep")
+        self.assertEqual(job["is_series"], 1)
+        self.assertEqual(job["season_number"], 2)
+        self.assertEqual(job["episode_number"], 5)
+        self.assertIsNone(job["part_number"])
+
+    def test_save_job_stores_part_number(self):
+        analysis, processing, upload = self._sample_payload("job_part")
+        database.save_job("job_part", analysis, processing, upload,
+                          media_type="Film", is_series=True, part_number=3)
+        job = database.get_job("job_part")
+        self.assertEqual(job["is_series"], 1)
+        self.assertEqual(job["part_number"], 3)
+        self.assertIsNone(job["season_number"])
+        self.assertIsNone(job["episode_number"])
+
+    def test_save_job_defaults_is_series_false(self):
+        analysis, processing, upload = self._sample_payload("job_noser")
+        database.save_job("job_noser", analysis, processing, upload)
+        job = database.get_job("job_noser")
+        self.assertEqual(job["is_series"], 0)
+        self.assertIsNone(job["season_number"])
+        self.assertIsNone(job["episode_number"])
+        self.assertIsNone(job["part_number"])
+
+    def test_list_jobs_includes_episode_metadata(self):
+        analysis, processing, upload = self._sample_payload("job_eplist")
+        database.save_job("job_eplist", analysis, processing, upload,
+                          media_type="Anime TV", series_name="One Piece",
+                          is_series=True, season_number=1, episode_number=42)
+        jobs = database.list_jobs()
+        job = next((j for j in jobs if j["job_id"] == "job_eplist"), None)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["is_series"], 1)
+        self.assertEqual(job["season_number"], 1)
+        self.assertEqual(job["episode_number"], 42)
+
+
+class TestSearchAndFiltering(TestDatabaseBase):
+    def setUp(self):
+        super().setUp()
+        # Create some sample data
+        data = [
+            ("job1", "Inception.mp4", "Film", ""),
+            ("job2", "Interstellar.mp4", "Film", ""),
+            ("job3", "Breaking Bad S01E01.mp4", "Series", "Breaking Bad"),
+            ("job4", "Naruto Ep 01.mkv", "Anime Film", "Naruto"),
+            ("job5", "One Piece 001.mp4", "Anime TV", "One Piece"),
+        ]
+        for jid, filename, mtype, sname in data:
+            analysis, processing, upload = self._sample_payload(jid)
+            # Ensure the filename is set correctly in analysis
+            analysis.file_path = f"/tmp/{filename}"
+            database.save_job(jid, analysis, processing, upload, media_type=mtype, series_name=sname)
+
+    def test_list_jobs_search_filename(self):
+        jobs = database.list_jobs(search="Inception")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["filename"], "Inception.mp4")
+
+    def test_list_jobs_search_series_name(self):
+        jobs = database.list_jobs(search="Breaking")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["series_name"], "Breaking Bad")
+
+    def test_list_jobs_category_filter(self):
+        jobs = database.list_jobs(category="Film")
+        self.assertEqual(len(jobs), 2)
+        filenames = {j["filename"] for j in jobs}
+        self.assertIn("Inception.mp4", filenames)
+        self.assertIn("Interstellar.mp4", filenames)
+
+    def test_list_jobs_anime_legacy_matching(self):
+        # Manually update one to 'Anime' legacy type
+        conn = database._get_conn()
+        with conn:
+            conn.execute("UPDATE jobs SET media_type = 'Anime' WHERE job_id = 'job4'")
+            
+        # Should match in Anime Film
+        jobs_film = database.list_jobs(category="Anime Film")
+        self.assertEqual(len(jobs_film), 1)
+        self.assertEqual(jobs_film[0]["job_id"], "job4")
+        
+        # Should also match in Anime TV
+        jobs_tv = database.list_jobs(category="Anime TV")
+        # job5 is 'Anime TV', job4 is 'Anime'
+        self.assertEqual(len(jobs_tv), 2)
+
+    def test_count_jobs_with_filters(self):
+        self.assertEqual(database.count_jobs(search="Interstellar"), 1)
+        self.assertEqual(database.count_jobs(category="Series"), 1)
+        self.assertEqual(database.count_jobs(category="Film"), 2)
+
+    def test_search_and_category_combined(self):
+        jobs = database.list_jobs(search="Naruto", category="Anime Film")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job_id"], "job4")
+        
+        jobs_empty = database.list_jobs(search="Naruto", category="Film")
+        self.assertEqual(len(jobs_empty), 0)
+
+
+class TestSettingsCRUD(TestDatabaseBase):
+    def test_get_all_settings_empty(self):
+        result = database.get_all_settings()
+        self.assertEqual(result, {})
+
+    def test_set_and_get_setting(self):
+        database.set_setting("HLS_SEGMENT_DURATION", "8")
+        result = database.get_all_settings()
+        self.assertEqual(result["HLS_SEGMENT_DURATION"], "8")
+
+    def test_set_setting_overwrite(self):
+        database.set_setting("MAX_PARALLEL_ENCODES", "2")
+        database.set_setting("MAX_PARALLEL_ENCODES", "4")
+        result = database.get_all_settings()
+        self.assertEqual(result["MAX_PARALLEL_ENCODES"], "4")
+
+    def test_set_settings_bulk(self):
+        database.set_settings({"KEY_A": "val1", "KEY_B": "val2"})
+        result = database.get_all_settings()
+        self.assertEqual(result["KEY_A"], "val1")
+        self.assertEqual(result["KEY_B"], "val2")
+
+    def test_delete_setting(self):
+        database.set_setting("TO_DELETE", "yes")
+        database.delete_setting("TO_DELETE")
+        result = database.get_all_settings()
+        self.assertNotIn("TO_DELETE", result)
+
+    def test_delete_nonexistent_setting_does_not_raise(self):
+        database.delete_setting("NONEXISTENT_KEY")  # should not raise
+
+
+class TestBotsCRUD(TestDatabaseBase):
+    def test_get_all_bots_empty(self):
+        result = database.get_all_bots()
+        self.assertEqual(result, [])
+
+    def test_add_and_get_bot(self):
+        bot_id = database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100123, "Test")
+        self.assertIsInstance(bot_id, int)
+        bots = database.get_all_bots()
+        self.assertEqual(len(bots), 1)
+        self.assertEqual(bots[0]["channel_id"], -100123)
+        self.assertEqual(bots[0]["label"], "Test")
+        self.assertEqual(bots[0]["id"], bot_id)
+
+    def test_add_bot_default_label(self):
+        database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100123)
+        bots = database.get_all_bots()
+        self.assertEqual(bots[0]["label"], "")
+
+    def test_add_duplicate_token_raises(self):
+        database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100123)
+        import sqlite3
+        with self.assertRaises(sqlite3.IntegrityError):
+            database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100456)
+
+    def test_delete_bot(self):
+        bot_id = database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100123)
+        database.delete_bot(bot_id)
+        bots = database.get_all_bots()
+        self.assertEqual(bots, [])
+
+    def test_delete_nonexistent_bot_does_not_raise(self):
+        database.delete_bot(9999)  # should not raise
+
+    def test_bot_exists_true(self):
+        token = "123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678"
+        database.add_bot(token, -100123)
+        self.assertTrue(database.bot_exists(token))
+
+    def test_bot_exists_false(self):
+        self.assertFalse(database.bot_exists("999999999:XYZabcDEFghiJKLmnoPQRstuvWXYZ123456"))
+
+    def test_multiple_bots_ordered_by_id(self):
+        database.add_bot("111111111:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100001, "Bot 1")
+        database.add_bot("222222222:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100002, "Bot 2")
+        bots = database.get_all_bots()
+        self.assertEqual(len(bots), 2)
+        self.assertEqual(bots[0]["label"], "Bot 1")
+        self.assertEqual(bots[1]["label"], "Bot 2")
 
 
 if __name__ == "__main__":

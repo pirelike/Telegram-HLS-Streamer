@@ -6,6 +6,7 @@ For each input file, produces:
   - One WebVTT file per subtitle track
 """
 
+import concurrent.futures
 import glob as _glob
 import logging
 import os
@@ -41,7 +42,11 @@ def _detect_vaapi_device():
 
 
 def _detect_hw_encoder():
-    """Detect available hardware encoder. Result is cached after first probe."""
+    """Detect available hardware encoders for h264 and hevc. Result is cached after first probe.
+
+    Returns a dict {"h264": (enc_name, enc_flags)|None, "hevc": (enc_name, enc_flags)|None}
+    or None when hardware acceleration is disabled or no encoders are available.
+    """
     global _hw_encoder_cache, _hw_encoder_probed
 
     if _hw_encoder_probed:
@@ -53,25 +58,37 @@ def _detect_hw_encoder():
         _hw_encoder_cache = None
         return None
 
-    encoders = {
-        "nvenc": ("h264_nvenc", []),
-        "qsv": ("h264_qsv", []),
-    }
-
     preferred = Config.PREFERRED_ENCODER
     if preferred == "vaapi":
         vaapi_device = Config.VAAPI_DEVICE or _detect_vaapi_device()
-        encoders["vaapi"] = ("h264_vaapi", ["-vaapi_device", vaapi_device])
+        enc_flags = ["-vaapi_device", vaapi_device]
+        h264_name, hevc_name = "h264_vaapi", "hevc_vaapi"
+    elif preferred == "nvenc":
+        enc_flags = []
+        h264_name, hevc_name = "h264_nvenc", "hevc_nvenc"
+    elif preferred == "qsv":
+        enc_flags = []
+        h264_name, hevc_name = "h264_qsv", "hevc_qsv"
+    else:
+        _hw_encoder_cache = None
+        return None
 
-    if preferred in encoders:
-        enc_name, enc_flags = encoders[preferred]
-        if _encoder_list_contains(enc_name) and _probe_hw_encoder(enc_name, enc_flags):
-            logger.info("Using hardware encoder: %s", enc_name)
-            _hw_encoder_cache = encoders[preferred]
-            return _hw_encoder_cache
+    result = {"h264": None, "hevc": None}
 
-    _hw_encoder_cache = None
-    return None
+    if _encoder_list_contains(h264_name) and _probe_hw_encoder(h264_name, enc_flags):
+        logger.info("Using hardware h264 encoder: %s", h264_name)
+        result["h264"] = (h264_name, enc_flags)
+
+    if _encoder_list_contains(hevc_name) and _probe_hw_encoder(hevc_name, enc_flags):
+        logger.info("Using hardware hevc encoder: %s", hevc_name)
+        result["hevc"] = (hevc_name, enc_flags)
+
+    if result["h264"] or result["hevc"]:
+        _hw_encoder_cache = result
+    else:
+        _hw_encoder_cache = None
+
+    return _hw_encoder_cache
 
 
 def _encoder_list_contains(enc_name):
@@ -97,12 +114,12 @@ def _probe_hw_encoder(enc_name, enc_flags):
         "-f",
         "lavfi",
         "-i",
-        "color=c=black:s=64x64:d=0.1",
+        "color=c=black:s=128x128:d=0.1",
         "-frames:v",
         "1",
     ]
     probe_cmd += enc_flags
-    if enc_name == "h264_vaapi":
+    if enc_name in ("h264_vaapi", "hevc_vaapi"):
         probe_cmd += ["-vf", "format=nv12,hwupload"]
     probe_cmd += ["-an", "-c:v", enc_name, "-f", "null", "-"]
 
@@ -174,17 +191,37 @@ def _parse_bitrate_to_bytes_per_sec(bitrate_str):
     return int(val / 8)
 
 
+def _double_bitrate(bitrate_str):
+    """Return a bitrate string doubled in value (e.g. '30M' -> '60M', '128k' -> '256k').
+
+    Used to set -bufsize to 2x the target bitrate so the rate controller has
+    enough headroom to smooth out instantaneous spikes without allowing the encoder
+    to run arbitrarily over the CBR target.
+    """
+    import re as _re
+    m = _re.match(r'^([\d\.]+)([kKmMgG]?)$', str(bitrate_str).strip())
+    if not m:
+        return bitrate_str
+    val = float(m.group(1)) * 2
+    suffix = m.group(2)
+    # Keep integer representation when possible
+    if val == int(val):
+        return f"{int(val)}{suffix}"
+    return f"{val}{suffix}"
+
+
 def _get_safe_segment_size(bitrate_str):
     """Calculate a safe `-hls_segment_size` from the target and hard limit.
 
     FFmpeg's `-hls_segment_size` writes until the limit, then splits at the next
     keyframe. Since we force keyframes every 1 second, the overshoot can be up to
-    1 second of video plus container overhead. We subtract 1.5 seconds of bitrate
-    from the hard Telegram limit, then clamp the configured segment target under it.
+    1 second of video plus container overhead. With CBR encoding and bufsize=2*bitrate
+    the instantaneous rate can spike to ~2x the target; we use a 3x multiplier to
+    account for bitrate variance, I-frame size spikes, and muxing overhead.
     """
     bytes_per_sec = _parse_bitrate_to_bytes_per_sec(bitrate_str)
-    # Estimate max overshoot as 1.5 seconds of data (1 sec keyframe interval + 50% overhead margin)
-    max_overshoot = int(bytes_per_sec * 1.5)
+    # 3x margin: 1 sec keyframe interval * peak rate (~2x nominal) + overhead
+    max_overshoot = int(bytes_per_sec * 3.0)
 
     # Leave margin under the hard Telegram upload ceiling.
     safe_ceiling = Config.TELEGRAM_MAX_FILE_SIZE - max_overshoot
@@ -196,12 +233,16 @@ def _get_safe_segment_size(bitrate_str):
 
 def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
                      tier_index=0, target_height=None, target_bitrate=None,
-                     input_override=None):
-    """Build FFmpeg command for video-only HLS with CBR encoding.
+                     input_override=None, allow_copy=False):
+    """Build FFmpeg command for video-only HLS.
 
-    All tiers are re-encoded at constant bitrate for predictable segment sizes.
-    Uses -hls_segment_size for size-based segmentation and forced keyframes
-    every 1 second so the muxer has frequent split points.
+    When allow_copy=True and the source is copy-compatible (h264/hevc), passes
+    through the video bitstream unchanged (-c:v copy). Oversized segments must
+    be handled by the caller via _reencode_oversized_segment.
+
+    Otherwise encodes at constant bitrate (CBR) with forced 1-second keyframes
+    for predictable segment sizes. hw_encoder is a dict {"h264": ..., "hevc": ...}
+    or None; the h264 entry is used for re-encode paths.
 
     When input_override is given, uses that file/playlist as input instead of
     the original source (used for encoding lower tiers from tier 0 output).
@@ -218,43 +259,49 @@ def _build_video_cmd(analysis: MediaAnalysis, output_dir: str, hw_encoder,
     # Map only the first video stream, no audio, no subtitles
     cmd += ["-map", "0:v:0", "-an", "-sn"]
 
-    bitrate = target_bitrate or Config.VIDEO_BITRATE
-
-    # CBR encoding — always re-encode, never copy
-    if hw_encoder:
-        enc_name, enc_flags = hw_encoder
-        cmd += enc_flags + ["-c:v", enc_name,
-                            "-b:v", bitrate, "-minrate", bitrate,
-                            "-maxrate", bitrate, "-bufsize", bitrate]
-        if enc_name == "h264_vaapi":
-            if target_height:
-                cmd += ["-vf", f"format=nv12,hwupload,scale_vaapi=-2:{target_height}"]
-            else:
-                cmd += ["-vf", "format=nv12,hwupload"]
-        elif target_height:
-            cmd += ["-vf", f"scale=-2:{target_height}"]
-        logger.info(
-            "Video tier %d: hardware CBR %s at %s (%s)",
-            tier_index, enc_name, bitrate,
-            f"{target_height}p" if target_height else "original",
-        )
+    if allow_copy and analysis.can_copy_video:
+        # Passthrough: no re-encode, no keyframe injection, no scaling
+        cmd += ["-c:v", "copy"]
+        source_br = getattr(video, "bit_rate", None)
+        bitrate_for_size = str(source_br) if source_br else Config.VIDEO_BITRATE
+        safe_segment_size = _get_safe_segment_size(bitrate_for_size)
+        logger.info("Video tier %d: copy mode (passthrough)", tier_index)
     else:
-        cmd += ["-c:v", "libx264", "-preset", "fast",
-                "-b:v", bitrate, "-minrate", bitrate,
-                "-maxrate", bitrate, "-bufsize", bitrate]
-        if target_height:
-            cmd += ["-vf", f"scale=-2:{target_height}"]
-        logger.info(
-            "Video tier %d: libx264 CBR at %s (%s)",
-            tier_index, bitrate,
-            f"{target_height}p" if target_height else "original",
-        )
+        bitrate = target_bitrate or Config.VIDEO_BITRATE
 
-    # Forced keyframes every 1 second for reliable segment splitting
-    cmd += ["-force_key_frames", "expr:gte(t,n_forced*1)"]
+        h264_hw = hw_encoder.get("h264") if isinstance(hw_encoder, dict) else None
+        if h264_hw:
+            enc_name, enc_flags = h264_hw
+            cmd += enc_flags + ["-c:v", enc_name,
+                                "-b:v", bitrate, "-minrate", bitrate,
+                                "-maxrate", bitrate, "-bufsize", _double_bitrate(bitrate)]
+            if enc_name == "h264_vaapi":
+                if target_height:
+                    cmd += ["-vf", f"format=nv12,hwupload,scale_vaapi=-2:{target_height}"]
+                else:
+                    cmd += ["-vf", "format=nv12,hwupload"]
+            elif target_height:
+                cmd += ["-vf", f"scale=-2:{target_height}"]
+            logger.info(
+                "Video tier %d: hardware CBR %s at %s (%s)",
+                tier_index, enc_name, bitrate,
+                f"{target_height}p" if target_height else "original",
+            )
+        else:
+            cmd += ["-c:v", "libx264", "-preset", "fast",
+                    "-b:v", bitrate, "-minrate", bitrate,
+                    "-maxrate", bitrate, "-bufsize", _double_bitrate(bitrate)]
+            if target_height:
+                cmd += ["-vf", f"scale=-2:{target_height}"]
+            logger.info(
+                "Video tier %d: libx264 CBR at %s (%s)",
+                tier_index, bitrate,
+                f"{target_height}p" if target_height else "original",
+            )
 
-    # Calculate safe segment size to prevent overshooting TELEGRAM_MAX_FILE_SIZE
-    safe_segment_size = _get_safe_segment_size(bitrate)
+        # Forced keyframes every 1 second for reliable segment splitting
+        cmd += ["-force_key_frames", "expr:gte(t,n_forced*1)"]
+        safe_segment_size = _get_safe_segment_size(bitrate)
 
     # HLS output with size-based segmentation
     cmd += [
@@ -279,15 +326,21 @@ def _build_audio_cmd(analysis: MediaAnalysis, audio_stream, audio_index: int, ou
     cmd = ["ffmpeg", "-y", "-i", analysis.file_path]
     cmd += ["-map", f"0:{audio_stream.index}", "-vn", "-sn"]
 
-    # Always encode to AAC for consistent HLS compatibility
-    audio_bitrate = Config.AUDIO_BITRATE
-    cmd += ["-c:a", "aac", "-b:a", audio_bitrate]
-    logger.info(
-        "Audio track %d (%s): AAC encode at %s",
-        audio_index, audio_stream.language, audio_bitrate,
-    )
+    if audio_stream.is_copy_compatible:
+        cmd += ["-c:a", "copy"]
+        source_br = getattr(audio_stream, "bit_rate", None)
+        bitrate_for_size = str(source_br) if source_br else Config.AUDIO_BITRATE
+        logger.info("Audio track %d (%s): copy mode (passthrough)", audio_index, audio_stream.language)
+    else:
+        audio_bitrate = Config.AUDIO_BITRATE
+        cmd += ["-c:a", "aac", "-b:a", audio_bitrate]
+        bitrate_for_size = audio_bitrate
+        logger.info(
+            "Audio track %d (%s): AAC encode at %s",
+            audio_index, audio_stream.language, audio_bitrate,
+        )
 
-    safe_segment_size = _get_safe_segment_size(audio_bitrate)
+    safe_segment_size = _get_safe_segment_size(bitrate_for_size)
 
     cmd += [
         "-f", "hls",
@@ -466,11 +519,27 @@ def _run_ffmpeg_with_progress(
     return proc
 
 
+def _probe_segment_duration(filepath):
+    """Run ffprobe on a single .ts file and return its duration, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", filepath],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError) as e:
+        logger.warning("Failed to probe duration for %s: %s", filepath, e)
+    return None
+
+
 def _parse_segment_durations(playlist_path):
     """Get actual durations for HLS segments in the same directory as a playlist.
 
     FFmpeg's m3u8 output is unreliable with -hls_segment_size (writes default
     -hls_time instead of actual duration), so we probe each .ts file directly.
+    Probing is done in parallel for speed.
 
     Returns dict mapping filename -> duration (float).
     """
@@ -482,20 +551,110 @@ def _parse_segment_durations(playlist_path):
         logger.warning("Failed to list segments in %s: %s", segment_dir, e)
         return durations
 
-    for filename in ts_files:
-        filepath = os.path.join(segment_dir, filename)
-        try:
-            result = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", filepath],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                durations[filename] = float(result.stdout.strip())
-        except (subprocess.TimeoutExpired, ValueError, OSError) as e:
-            logger.warning("Failed to probe duration for %s: %s", filepath, e)
+    if not ts_files:
+        return durations
+
+    max_workers = min(len(ts_files), 8)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_name = {
+            executor.submit(_probe_segment_duration, os.path.join(segment_dir, f)): f
+            for f in ts_files
+        }
+        for future in concurrent.futures.as_completed(future_to_name):
+            filename = future_to_name[future]
+            try:
+                dur = future.result()
+                if dur is not None:
+                    durations[filename] = dur
+            except Exception as e:
+                logger.warning("Failed to probe duration for %s: %s", filename, e)
 
     return durations
+
+
+def _check_segment_sizes(segment_dir):
+    """Warn about any .ts segments that exceed the Telegram upload limit.
+
+    Returns a list of (filename, size) tuples for oversized files.
+    Does not raise — the uploader will catch hard violations; this is for early
+    visibility in the logs.
+    """
+    oversized = []
+    try:
+        for filename in sorted(os.listdir(segment_dir)):
+            if not filename.endswith(".ts"):
+                continue
+            filepath = os.path.join(segment_dir, filename)
+            try:
+                size = os.path.getsize(filepath)
+            except OSError:
+                continue
+            if size > Config.TELEGRAM_MAX_FILE_SIZE:
+                oversized.append((filename, size))
+                logger.warning(
+                    "Segment %s is %d bytes — exceeds Telegram limit of %d bytes",
+                    filepath, size, Config.TELEGRAM_MAX_FILE_SIZE,
+                )
+    except OSError as e:
+        logger.warning("Could not scan segment dir %s: %s", segment_dir, e)
+    return oversized
+
+
+def _reencode_oversized_segment(segment_path, duration, hw_encoders, source_codec):
+    """Re-encode a single oversized .ts segment in-place to fit within TELEGRAM_MAX_FILE_SIZE.
+
+    source_codec: "h264" or "hevc" — selects which hw encoder to prefer.
+    hw_encoders: dict from _detect_hw_encoder, e.g. {"h264": (...), "hevc": (...)} or None.
+    """
+    if duration is None or duration <= 0:
+        logger.warning("Cannot re-encode segment with unknown duration: %s", segment_path)
+        return
+
+    # Target bitrate with 0.85 safety margin so the re-encoded file fits
+    target_bps = int((Config.TELEGRAM_MAX_FILE_SIZE * 8 * 0.85) / duration)
+
+    codec_hw = hw_encoders.get(source_codec) if hw_encoders else None
+    if codec_hw:
+        enc_name, enc_flags = codec_hw
+    elif source_codec == "hevc":
+        enc_name, enc_flags = "libx265", []
+    else:
+        enc_name, enc_flags = "libx264", []
+
+    target_str = str(target_bps)
+    bufsize_str = str(target_bps * 2)
+
+    temp_path = segment_path + ".tmp.ts"
+    cmd = ["ffmpeg", "-y", "-i", segment_path]
+    cmd += enc_flags
+    cmd += ["-c:v", enc_name,
+            "-b:v", target_str, "-maxrate", target_str, "-bufsize", bufsize_str]
+    if enc_name.endswith("_vaapi"):
+        cmd += ["-vf", "format=nv12,hwupload"]
+    cmd += ["-c:a", "copy", "-f", "mpegts", temp_path]
+
+    logger.info(
+        "Re-encoding oversized segment %s (%.1f MB) — target bitrate %d kbps",
+        os.path.basename(segment_path),
+        os.path.getsize(segment_path) / 1024 / 1024,
+        target_bps // 1000,
+    )
+    try:
+        _run_ffmpeg(cmd, f"re-encode oversized segment {os.path.basename(segment_path)}")
+    except RuntimeError:
+        logger.error("Failed to re-encode oversized segment: %s", segment_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return
+
+    os.replace(temp_path, segment_path)
+
+    final_size = os.path.getsize(segment_path)
+    if final_size > Config.TELEGRAM_MAX_FILE_SIZE:
+        logger.warning(
+            "Segment still oversized after re-encode: %s (%d bytes)",
+            os.path.basename(segment_path), final_size,
+        )
 
 
 class ProcessingResult:
@@ -508,6 +667,7 @@ class ProcessingResult:
         self.audio_playlists = []   # list of (playlist_path, audio_dir, language, title, channels)
         self.subtitle_files = []    # list of (vtt_path, sub_dir, language, title, enum_idx, orig_stream_idx)
         self.segment_durations = {} # maps "video_0/video_0001.ts" -> duration (float)
+        self.thumbnail_path = None  # path to thumbnail.jpg or None
 
     @property
     def video_playlist(self):
@@ -528,6 +688,51 @@ class ProcessingResult:
         return dirs
 
 
+def extract_thumbnail(file_path, output_dir):
+    """Extract a thumbnail image from a video file.
+
+    Seeks to 10% of the video duration (minimum 2 seconds) and captures
+    one frame as a JPEG. Returns the path to the thumbnail or None on failure.
+    """
+    thumb_dir = os.path.join(output_dir, "thumbnail")
+    os.makedirs(thumb_dir, exist_ok=True)
+    output_path = os.path.join(thumb_dir, "thumbnail.jpg")
+
+    # Probe duration first
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if probe.returncode != 0 or not probe.stdout.strip():
+            seek_time = 2.0
+        else:
+            duration = float(probe.stdout.strip())
+            seek_time = max(2.0, duration * 0.1)
+    except Exception:
+        seek_time = 2.0
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(seek_time),
+        "-i", file_path,
+        "-vframes", "1",
+        "-q:v", "5",
+        "-vf", "scale='min(640,iw)':-2",
+        output_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and os.path.exists(output_path):
+            logger.info("Thumbnail extracted: %s", output_path)
+            return output_path
+        logger.warning("Thumbnail extraction failed (non-fatal): %s", result.stderr[-500:])
+    except Exception as exc:
+        logger.warning("Thumbnail extraction failed (non-fatal): %s", exc)
+    return None
+
+
 def _raise_if_cancelled(cancel_event, description):
     if cancel_event and cancel_event.is_set():
         raise RuntimeError(description)
@@ -540,6 +745,7 @@ def process(
     cancel_event=None,
     on_process_start=None,
     on_process_end=None,
+    on_stream_encoded=None,
 ) -> ProcessingResult:
     """Process a media file into separate HLS streams.
 
@@ -556,17 +762,23 @@ def process(
     result = ProcessingResult(job_id, output_dir)
     hw_encoder = _detect_hw_encoder()
 
-    # Determine ABR tiers
+    # Determine ABR tiers and copy mode
     abr_tiers = []
+    use_copy_mode = False
     if analysis.has_video:
         source_height = getattr(analysis.video_streams[0], "height", 0) or 0
         source_width = getattr(analysis.video_streams[0], "width", 0) or 0
+        use_copy_mode = analysis.can_copy_video and Config.ENABLE_COPY_MODE
         abr_tiers = _get_abr_tiers(source_height)
     media_duration = getattr(analysis, "duration", 0) or 0
 
-    # Total steps: original video + ABR tiers + audio + subtitles
+    # Total steps: 1 tier 0 + ABR tiers + audio + subtitles
+    if analysis.has_video:
+        num_video_steps = 1 + len(abr_tiers)
+    else:
+        num_video_steps = 0
     total_steps = (
-        (1 + len(abr_tiers) if analysis.has_video else 0)
+        num_video_steps
         + len(analysis.audio_streams)
         + len(analysis.subtitle_streams)
     )
@@ -593,59 +805,136 @@ def process(
 
         return cb
 
-    # 1. Video streams (tier 0 CBR + ABR tiers from tier 0 output)
+    # 1. Video streams
     if analysis.has_video:
         _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
-        # Tier 0: high-quality CBR re-encode at source resolution
-        tier0_bitrate = _get_tier0_bitrate(source_height)
-        cmd, playlist = _build_video_cmd(
-            analysis, output_dir, hw_encoder, tier_index=0,
-            target_bitrate=tier0_bitrate,
-        )
-        _run_ffmpeg_with_progress(
-            cmd, f"video tier 0 (original CBR {tier0_bitrate}) for {job_id}",
-            duration_seconds=media_duration,
-            step_progress_cb=make_step_progress_cb("Encoding video (original)"),
-            cancel_event=cancel_event,
-            on_process_start=on_process_start,
-            on_process_end=on_process_end,
-        )
-        tier0_playlist = playlist
-        tier_dir = os.path.dirname(playlist)
-        result.video_playlists.append((
-            playlist, tier_dir, source_width, source_height, tier0_bitrate,
-        ))
-        for filename, dur in _parse_segment_durations(playlist).items():
-            result.segment_durations[f"video_0/{filename}"] = dur
-        report("Video (original) encoded")
 
-        # Additional ABR tiers — encoded from tier 0 output, not original source
+        tier0_bitrate = _get_tier0_bitrate(source_height)
+
+        # Tier 0 + all applicable ABR tiers (copy mode only affects tier 0 encoding)
+        tier_descriptors = [(0, None, source_width, source_height, tier0_bitrate, "original")]
         for ti, tier in enumerate(abr_tiers, start=1):
-            _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
             target_h = tier["height"]
-            # Calculate proportional width (even number)
             target_w = int(source_width * target_h / source_height)
             target_w = target_w + (target_w % 2)  # ensure even
+            tier_descriptors.append((ti, target_h, target_w, target_h, tier["bitrate"], f"{target_h}p"))
+
+        num_video_tiers = len(tier_descriptors)
+
+        # Aggregate per-tier progress to produce a single smooth value.
+        # Each tier independently reports 0-100; we average all tiers and map
+        # that aggregate percentage onto the [0, num_video_tiers] step range so
+        # the overall bar advances monotonically even when tiers run in parallel.
+        _tier_progress_lock = threading.Lock()
+        _tier_progress = {td[0]: 0 for td in tier_descriptors}  # tier_index -> 0-100
+
+        def _encode_tier(tier_index, target_height, width, height, bitrate, label, allow_copy=False):
+            """Encode a single video tier; returns collected data for assembly."""
+            _raise_if_cancelled(cancel_event, f"Processing cancelled: {job_id}")
             cmd, playlist = _build_video_cmd(
                 analysis, output_dir, hw_encoder,
-                tier_index=ti, target_height=target_h, target_bitrate=tier["bitrate"],
-                input_override=tier0_playlist,
+                tier_index=tier_index, target_height=target_height,
+                target_bitrate=bitrate, allow_copy=allow_copy,
             )
+            def step_cb(pct):
+                if not progress_callback or total_steps == 0:
+                    return
+                with _tier_progress_lock:
+                    _tier_progress[tier_index] = pct
+                    aggregate_pct = sum(_tier_progress.values()) / num_video_tiers
+                fractional = aggregate_pct / 100.0 * num_video_tiers
+                progress_callback(fractional, total_steps, f"Encoding video ({int(aggregate_pct)}%)")
+
             _run_ffmpeg_with_progress(
-                cmd, f"video tier {ti} ({target_h}p) for {job_id}",
+                cmd, f"video tier {tier_index} ({label}) for {job_id}",
                 duration_seconds=media_duration,
-                step_progress_cb=make_step_progress_cb(f"Encoding video ({target_h}p)"),
+                step_progress_cb=step_cb,
                 cancel_event=cancel_event,
                 on_process_start=on_process_start,
                 on_process_end=on_process_end,
             )
             tier_dir = os.path.dirname(playlist)
-            result.video_playlists.append((
-                playlist, tier_dir, target_w, target_h, tier["bitrate"],
-            ))
-            for filename, dur in _parse_segment_durations(playlist).items():
+            _check_segment_sizes(tier_dir)
+            seg_durations = _parse_segment_durations(playlist)
+            return (tier_index, playlist, tier_dir, width, height, bitrate, seg_durations, label)
+
+        tier_results = {}  # tier_index -> result tuple
+
+        if use_copy_mode:
+            # Run tier 0 with copy passthrough
+            tier_0_result = _encode_tier(
+                0, None, source_width, source_height, tier0_bitrate, "original",
+                allow_copy=True,
+            )
+            tier_results[0] = tier_0_result
+
+            # Re-encode any segments that still exceed Telegram's file size limit
+            _, _, tier_dir, _, _, _, seg_durations, _ = tier_0_result
+            oversized = _check_segment_sizes(tier_dir)
+            if oversized:
+                source_codec = analysis.video_streams[0].codec_name
+                for seg_file, _seg_size in oversized:
+                    seg_path = os.path.join(tier_dir, seg_file)
+                    seg_duration = seg_durations.get(seg_file)
+                    _reencode_oversized_segment(seg_path, seg_duration, hw_encoder, source_codec)
+
+            if on_stream_encoded:
+                ts_files = [
+                    (f"video_0/{fn}", os.path.join(tier_dir, fn))
+                    for fn in sorted(os.listdir(tier_dir))
+                    if fn.endswith(".ts")
+                ]
+                on_stream_encoded("video", 0, ts_files)
+
+        abr_tier_descriptors = [td for td in tier_descriptors if td[0] > 0]
+        if not use_copy_mode:
+            # Normal mode: encode tier 0 + all ABR tiers in parallel
+            abr_tier_descriptors = tier_descriptors
+
+        if abr_tier_descriptors:
+            failed_exc = None
+            max_workers = min(len(abr_tier_descriptors), Config.MAX_PARALLEL_ENCODES)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {
+                    executor.submit(_encode_tier, *td): td[0]
+                    for td in abr_tier_descriptors
+                }
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    if failed_exc is not None:
+                        future.cancel()
+                        continue
+                    try:
+                        tier_result = future.result()
+                        tier_results[tier_result[0]] = tier_result
+                        if on_stream_encoded:
+                            ti, _, tier_dir, _, _, _, _, _ = tier_result
+                            ts_files = [
+                                (f"video_{ti}/{fn}", os.path.join(tier_dir, fn))
+                                for fn in sorted(os.listdir(tier_dir))
+                                if fn.endswith(".ts")
+                            ]
+                            on_stream_encoded("video", ti, ts_files)
+                    except Exception as exc:
+                        failed_exc = exc
+                        if cancel_event:
+                            cancel_event.set()
+
+            if failed_exc is not None:
+                raise failed_exc
+
+        # Assemble results in tier order to keep video_playlists sorted by quality
+        for ti in range(num_video_tiers):
+            _, playlist, tier_dir, width, height, bitrate, seg_durations, label = tier_results[ti]
+            result.video_playlists.append((playlist, tier_dir, width, height, bitrate))
+            for filename, dur in seg_durations.items():
                 result.segment_durations[f"video_{ti}/{filename}"] = dur
-            report(f"Video ({target_h}p) encoded")
+
+        # Advance current_step past all video tiers for subsequent audio/subtitle steps.
+        # Fire a single callback at the exact boundary so audio steps index correctly.
+        current_step = num_video_tiers
+        if progress_callback and total_steps > 0:
+            progress_callback(current_step, total_steps, "Video encoding complete")
 
     # 2. Audio streams - each track gets its own HLS stream
     for i, audio in enumerate(analysis.audio_streams):
@@ -659,11 +948,19 @@ def process(
             on_process_start=on_process_start,
             on_process_end=on_process_end,
         )
+        _check_segment_sizes(audio_dir)
         result.audio_playlists.append((
             playlist, audio_dir, audio.language, audio.title, audio.channels,
         ))
         for filename, dur in _parse_segment_durations(playlist).items():
             result.segment_durations[f"audio_{i}/{filename}"] = dur
+        if on_stream_encoded:
+            ts_files = [
+                (f"audio_{i}/{fn}", os.path.join(audio_dir, fn))
+                for fn in sorted(os.listdir(audio_dir))
+                if fn.endswith(".ts")
+            ]
+            on_stream_encoded("audio", i, ts_files)
         report(f"Audio track {i} ({audio.language}) extracted")
 
     # 3. Subtitle streams - extract text-based subtitles to WebVTT
@@ -688,6 +985,8 @@ def process(
                 on_process_end=on_process_end,
             )
             result.subtitle_files.append((vtt_file, sub_dir, sub.language, sub.title, i, sub.index))
+            if on_stream_encoded:
+                on_stream_encoded("subtitle", i, [(f"sub_{i}/subtitles.vtt", vtt_file)])
             report(f"Subtitle track {i} ({sub.language}) extracted")
         except RuntimeError as e:
             logger.warning("Failed to extract subtitle track %d, skipping: %s", i, e)
@@ -701,6 +1000,13 @@ def process(
         len(result.audio_playlists),
         len(result.subtitle_files),
     )
+
+    # Extract thumbnail (non-fatal — failure does not abort the job)
+    if analysis.has_video:
+        result.thumbnail_path = extract_thumbnail(analysis.file_path, output_dir)
+        if result.thumbnail_path and on_stream_encoded:
+            on_stream_encoded("thumbnail", 0, [("thumbnail/thumbnail.jpg", result.thumbnail_path)])
+
     return result
 
 

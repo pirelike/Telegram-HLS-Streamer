@@ -5,7 +5,7 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch, ANY
 
 # Provide a lightweight telegram stub so importing app works in test envs.
 telegram_mod = types.ModuleType("telegram")
@@ -537,6 +537,91 @@ class TestP0TodoFixes(unittest.TestCase):
         resp = self.client.post("/api/upload/finalize", json={})
         self.assertEqual(resp.status_code, 404)
 
+    @patch("app._queue_local_file")
+    def test_upload_finalize_passes_new_fields(self, mock_queue):
+        mock_queue.return_value = ("job123", 4)
+        upload_id = self._init_upload(total_size=4, total_chunks=1)
+        self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"DATA",
+        )
+        resp = self.client.post(
+            "/api/upload/finalize",
+            json={
+                "upload_id": upload_id,
+                "media_type": "Anime TV",
+                "series_name": "Test Series",
+                "is_series": 1,
+                "season_number": 2,
+                "episode_number": 5,
+                "part_number": 3,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        
+        # Verify kwargs passed to _queue_local_file
+        mock_queue.assert_called_once()
+        _, kwargs = mock_queue.call_args
+        self.assertEqual(kwargs.get("media_type"), "Anime TV")
+        self.assertEqual(kwargs.get("series_name"), "Test Series")
+        self.assertEqual(kwargs.get("is_series"), True)
+        self.assertEqual(kwargs.get("season_number"), 2)
+        self.assertEqual(kwargs.get("episode_number"), 5)
+        self.assertEqual(kwargs.get("part_number"), 3)
+
+    @patch("app._queue_local_file")
+    def test_upload_finalize_accepts_new_media_types(self, mock_queue):
+        mock_queue.return_value = ("job123", 4)
+        for media_type in ["Anime Film", "Anime TV"]:
+            with self.subTest(media_type=media_type):
+                upload_id = self._init_upload(total_size=4, total_chunks=1)
+                self.client.post(
+                    "/api/upload/chunk",
+                    headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+                    data=b"DATA",
+                )
+                resp = self.client.post(
+                    "/api/upload/finalize",
+                    json={
+                        "upload_id": upload_id,
+                        "media_type": media_type,
+                    },
+                )
+                self.assertEqual(resp.status_code, 200)
+                mock_queue.assert_called_once()
+                _, kwargs = mock_queue.call_args
+                self.assertEqual(kwargs.get("media_type"), media_type)
+                mock_queue.reset_mock()
+
+    @patch("app._queue_local_file")
+    def test_upload_finalize_numeric_validation(self, mock_queue):
+        mock_queue.return_value = ("job123", 4)
+        upload_id = self._init_upload(total_size=4, total_chunks=1)
+        self.client.post(
+            "/api/upload/chunk",
+            headers={"X-Upload-Id": upload_id, "X-Chunk-Index": "0"},
+            data=b"DATA",
+        )
+        # Pass invalid strings instead of ints
+        resp = self.client.post(
+            "/api/upload/finalize",
+            json={
+                "upload_id": upload_id,
+                "season_number": "invalid",
+                "episode_number": {"not": "an_int"},
+                "part_number": ["also_not_int"],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        
+        # Verify it handled invalid numbers by passing None
+        mock_queue.assert_called_once()
+        _, kwargs = mock_queue.call_args
+        self.assertIsNone(kwargs.get("season_number"))
+        self.assertIsNone(kwargs.get("episode_number"))
+        self.assertIsNone(kwargs.get("part_number"))
+
     # ─── /api/status/<job_id> ───
 
     def test_job_status_active_job(self):
@@ -563,7 +648,7 @@ class TestP0TodoFixes(unittest.TestCase):
     # ─── /api/jobs ───
 
     def test_jobs_list_empty(self):
-        with patch("app.list_jobs", return_value={}), patch("app.count_jobs", return_value=0):
+        with patch("app.db.list_jobs", return_value=[]), patch("app.db.count_jobs", return_value=0):
             resp = self.client.get("/api/jobs")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
@@ -586,12 +671,15 @@ class TestP0TodoFixes(unittest.TestCase):
         self.assertEqual(data["page"], 1)
         self.assertEqual(data["limit"], 20)
 
-    def test_jobs_list_has_more_flag(self):
-        jobs = {f"job{i}": {"job_id": f"job{i}"} for i in range(3)}
-        with patch("app.list_jobs", return_value=jobs), patch("app.count_jobs", return_value=10):
-            resp = self.client.get("/api/jobs?limit=3")
-        data = resp.get_json()
-        self.assertTrue(data["has_more"])
+    def test_jobs_list_search_and_category_params(self):
+        with patch("app.db.list_jobs", return_value=[]) as mock_list, \
+             patch("app.db.count_jobs", return_value=0) as mock_count:
+            resp = self.client.get("/api/jobs?search=test&category=Film")
+        self.assertEqual(resp.status_code, 200)
+        mock_list.assert_called_with(limit=20, offset=0, search="test", category="Film",
+                                     group_by=None, series_name=None, season_number=None)
+        mock_count.assert_called_with(search="test", category="Film",
+                                      group_by=None, series_name=None, season_number=None)
 
     # ─── /api/cancel/<job_id> ───
 
@@ -609,7 +697,7 @@ class TestP0TodoFixes(unittest.TestCase):
     def test_cancel_active_job_requests_runtime_stop(self):
         runtime = app_module._get_job_runtime("cjob")
         runtime.current_process = type("Proc", (), {"poll": lambda self: 0})()
-        runtime.upload_future = Mock(done=Mock(return_value=True))
+        runtime.upload_futures = [Mock(done=Mock(return_value=True))]
         app_module._active_jobs["cjob"] = {"status": "processing"}
         with patch("app._request_job_stop") as request_stop:
             resp = self.client.post("/api/cancel/cjob")
@@ -629,7 +717,7 @@ class TestP0TodoFixes(unittest.TestCase):
         runtime = app_module._get_job_runtime("jobstop")
         future = Mock()
         future.done.return_value = False
-        runtime.upload_future = future
+        runtime.upload_futures = [future]
         proc = Mock()
         proc.poll.return_value = 0
         runtime.current_process = proc
@@ -638,6 +726,57 @@ class TestP0TodoFixes(unittest.TestCase):
 
         self.assertTrue(runtime.cancel_event.is_set())
         future.cancel.assert_called_once_with()
+
+    def test_process_job_upload_error_cancels_encoding(self):
+        """Upload failure during pipeline sets cancel_event and marks job as error."""
+        import concurrent.futures as cf
+        from types import SimpleNamespace
+
+        job_id = "pipeline_err_job"
+        app_module._active_jobs[job_id] = {
+            "status": "processing",
+            "file_size": 0,
+            "media_type": "movie",
+            "series_name": None,
+            "is_series": False,
+            "season_number": None,
+            "episode_number": None,
+            "part_number": None,
+        }
+        runtime = app_module._get_job_runtime(job_id)
+
+        fake_analysis = SimpleNamespace(
+            file_path="/tmp/fake.mp4",
+            has_video=True,
+            duration=10.0,
+            video_streams=[SimpleNamespace(index=0)],
+            audio_streams=[],
+            subtitle_streams=[],
+            summary=lambda: {"video": 1},
+        )
+        fake_result = SimpleNamespace(
+            video_playlists=[], audio_playlists=[], subtitle_files=[],
+            segment_durations={}, thumbnail_path=None,
+        )
+
+        def fake_process(analysis, job_id_arg, **kwargs):
+            cb = kwargs.get("on_stream_encoded")
+            if cb:
+                cb("video", 0, [("video_0/seg0001.ts", "/tmp/fake/video_0/seg0001.ts")])
+            return fake_result
+
+        fail_future = cf.Future()
+        fail_future.set_exception(RuntimeError("upload boom"))
+
+        with patch("app._bots_configured", return_value=True), \
+             patch("app._check_disk_space", return_value=(True, "")), \
+             patch("app.analyze", return_value=fake_analysis), \
+             patch("app.process", side_effect=fake_process), \
+             patch("asyncio.run_coroutine_threadsafe", return_value=fail_future):
+            app_module._process_job(job_id, "/tmp/fake.mp4")
+
+        self.assertTrue(runtime.cancel_event.is_set())
+        self.assertEqual(app_module._active_jobs[job_id]["status"], "error")
 
     # ─── /api/jobs/<job_id> DELETE ───
 
@@ -660,6 +799,29 @@ class TestP0TodoFixes(unittest.TestCase):
             resp = self.client.delete("/api/jobs/donejob")
         self.assertEqual(resp.status_code, 200)
         mock_delete.assert_called_once_with("donejob")
+
+    def test_update_job_metadata_not_found(self):
+        with patch("app.get_job", return_value=None):
+            resp = self.client.patch("/api/jobs/nope", json={"media_type": "Film"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_update_job_metadata_success(self):
+        with patch("app.get_job", return_value={"job_id": "job123"}), \
+             patch("app.db.update_job_metadata") as mock_update:
+            resp = self.client.patch(
+                "/api/jobs/job123",
+                json={
+                    "media_type": "Anime TV",
+                    "series_name": "Test",
+                    "is_series": 1,
+                    "season_number": 2,
+                    "episode_number": 5
+                }
+            )
+        self.assertEqual(resp.status_code, 200)
+        mock_update.assert_called_once_with(
+            "job123", "Anime TV", "Test", True, 2, 5, None
+        )
 
     def test_removed_token_endpoint_returns_404(self):
         resp = self.client.get("/api/jobs/job1/token")
@@ -1353,6 +1515,48 @@ class TestP0TodoFixes(unittest.TestCase):
             self.assertIn("No Telegram bots configured", job["error"])
             self.assertIn("finished_ts", job)
 
+class TestSegmentCacheStats(unittest.TestCase):
+    def _make_cache(self, max_bytes=1024):
+        return app_module._SegmentCache(max_bytes=max_bytes)
+
+    def test_initial_stats_all_zero(self):
+        cache = self._make_cache()
+        s = cache.stats()
+        self.assertEqual(s["hits"], 0)
+        self.assertEqual(s["misses"], 0)
+        self.assertEqual(s["evictions"], 0)
+        self.assertEqual(s["items"], 0)
+        self.assertEqual(s["current_bytes"], 0)
+
+    def test_miss_increments_misses(self):
+        cache = self._make_cache()
+        result = cache.get("nonexistent")
+        self.assertIsNone(result)
+        self.assertEqual(cache.stats()["misses"], 1)
+        self.assertEqual(cache.stats()["hits"], 0)
+
+    def test_hit_increments_hits(self):
+        cache = self._make_cache()
+        cache.put("k", b"data")
+        cache.get("k")
+        self.assertEqual(cache.stats()["hits"], 1)
+        self.assertEqual(cache.stats()["misses"], 0)
+
+    def test_eviction_increments_evictions(self):
+        # Fill cache to capacity then add another item to trigger eviction
+        cache = self._make_cache(max_bytes=8)
+        cache.put("a", b"12345678")  # fills exactly
+        cache.put("b", b"x")        # evicts "a"
+        self.assertEqual(cache.stats()["evictions"], 1)
+        self.assertEqual(cache.stats()["items"], 1)
+
+    def test_stats_reports_correct_item_count(self):
+        cache = self._make_cache()
+        cache.put("k1", b"aaa")
+        cache.put("k2", b"bbb")
+        self.assertEqual(cache.stats()["items"], 2)
+
+
 class TestHealthEndpoint(unittest.TestCase):
     def setUp(self):
         _reset_state()
@@ -1436,6 +1640,342 @@ class TestHealthEndpoint(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data["status"], "degraded")
         self.assertEqual(data["bots"][0]["error"], "probe_error: RuntimeError")
+
+    def test_metrics_returns_expected_top_level_keys(self):
+        resp = self.client.get("/api/metrics")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("queue", data)
+        self.assertIn("cache", data)
+        self.assertIn("prefetch", data)
+        self.assertIn("telegram", data)
+        self.assertIn("bots_configured", data)
+
+    def test_metrics_queue_keys(self):
+        resp = self.client.get("/api/metrics")
+        data = resp.get_json()
+        self.assertIn("depth", data["queue"])
+        self.assertIn("active_jobs", data["queue"])
+
+    def test_metrics_cache_keys(self):
+        resp = self.client.get("/api/metrics")
+        data = resp.get_json()
+        for key in ("max_bytes", "current_bytes", "items", "hits", "misses", "evictions"):
+            self.assertIn(key, data["cache"], msg=f"cache missing key: {key}")
+
+    def test_metrics_telegram_keys(self):
+        resp = self.client.get("/api/metrics")
+        data = resp.get_json()
+        for key in ("upload_count", "upload_errors", "upload_total_seconds",
+                    "download_count", "download_errors", "download_total_seconds"):
+            self.assertIn(key, data["telegram"], msg=f"telegram missing key: {key}")
+
+
+class TestMediaMetadataUploadFlow(unittest.TestCase):
+    """Tests for media_type/series_name metadata in the upload flow."""
+
+    def setUp(self):
+        _reset_state()
+        self.bots_patch = patch.object(
+            app_module._telegram_uploader, "bots",
+            [{"bot": StubBot(), "index": 0, "channel_id": -1001}],
+        )
+        self.bots_patch.start()
+        self.upload_dir_patch = patch.object(app_module.Config, "UPLOAD_DIR", tempfile.mkdtemp())
+        self.upload_dir_patch.start()
+        self.client = app_module.app.test_client()
+
+    def tearDown(self):
+        self.bots_patch.stop()
+        self.upload_dir_patch.stop()
+        _reset_state()
+
+    def _init_and_chunk(self, size=4, filename="video.mp4"):
+        init_resp = self.client.post("/api/upload/init", json={
+            "filename": filename, "total_size": size, "total_chunks": 1,
+        })
+        upload_id = init_resp.get_json()["upload_id"]
+        self.client.post("/api/upload/chunk", data=b"\x00" * size, headers={
+            "X-Upload-Id": upload_id, "X-Chunk-Index": "0",
+            "Content-Type": "application/octet-stream",
+        })
+        return upload_id
+
+    def test_finalize_stores_media_type_in_active_jobs(self):
+        upload_id = self._init_and_chunk()
+        with patch.object(app_module, "_enqueue_job"), \
+             patch.object(app_module, "_get_job_runtime",
+                          return_value=type("R", (), {"cancel_event": None})()):
+            resp = self.client.post("/api/upload/finalize", json={
+                "upload_id": upload_id,
+                "media_type": "Series",
+                "series_name": "Breaking Bad",
+            })
+        self.assertEqual(resp.status_code, 200)
+        job_id = resp.get_json()["job_id"]
+        job = app_module._active_jobs.get(job_id, {})
+        self.assertEqual(job.get("media_type"), "Series")
+        self.assertEqual(job.get("series_name"), "Breaking Bad")
+
+    def test_finalize_defaults_media_type_to_film(self):
+        upload_id = self._init_and_chunk()
+        with patch.object(app_module, "_enqueue_job"), \
+             patch.object(app_module, "_get_job_runtime",
+                          return_value=type("R", (), {"cancel_event": None})()):
+            resp = self.client.post("/api/upload/finalize", json={"upload_id": upload_id})
+        self.assertEqual(resp.status_code, 200)
+        job_id = resp.get_json()["job_id"]
+        job = app_module._active_jobs.get(job_id, {})
+        self.assertEqual(job.get("media_type"), "Film")
+
+    def test_finalize_rejects_invalid_media_type_silently(self):
+        upload_id = self._init_and_chunk()
+        with patch.object(app_module, "_enqueue_job"), \
+             patch.object(app_module, "_get_job_runtime",
+                          return_value=type("R", (), {"cancel_event": None})()):
+            resp = self.client.post("/api/upload/finalize", json={
+                "upload_id": upload_id, "media_type": "InvalidCategory",
+            })
+        self.assertEqual(resp.status_code, 200)
+        job_id = resp.get_json()["job_id"]
+        job = app_module._active_jobs.get(job_id, {})
+        # Invalid category falls back to Film
+        self.assertEqual(job.get("media_type"), "Film")
+
+
+class TestThumbnailRoute(unittest.TestCase):
+    """Tests for GET /thumbnail/<job_id>."""
+
+    def setUp(self):
+        _reset_state()
+        self.client = app_module.app.test_client()
+
+    def tearDown(self):
+        _reset_state()
+
+    def test_thumbnail_404_for_missing_job(self):
+        with patch("app.get_job", return_value=None):
+            resp = self.client.get("/thumbnail/nonexistent")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_thumbnail_404_when_job_has_no_thumbnail(self):
+        job = {"job_id": "j1", "has_thumbnail": 0}
+        with patch("app.get_job", return_value=job):
+            resp = self.client.get("/thumbnail/j1")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_thumbnail_returns_jpeg_from_cache(self):
+        job = {"job_id": "j2", "has_thumbnail": 1}
+        fake_data = b"\xff\xd8\xff\xe0" + b"\x00" * 100  # minimal JPEG header
+        cache_key = "j2/thumbnail/thumbnail.jpg"
+        app_module._segment_cache.put(cache_key, fake_data)
+        segment_info = {"file_id": "abc123" * 10, "bot_index": 0}
+        with patch("app.get_job", return_value=job), \
+             patch("app.get_segment_info", return_value=segment_info):
+            resp = self.client.get("/thumbnail/j2")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content_type, "image/jpeg")
+        self.assertEqual(resp.data, fake_data)
+
+
+class TestSettingsAPI(unittest.TestCase):
+    def setUp(self):
+        _reset_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp.name, "test.db")
+        self.db_patch = patch.object(database, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        database._close_all_connections()
+        database._local = threading.local()
+        database.init_db()
+        self.client = app_module.app.test_client()
+
+    def tearDown(self):
+        database._close_all_connections()
+        self.db_patch.stop()
+        self.temp.cleanup()
+
+    def test_settings_get_returns_categories(self):
+        resp = self.client.get("/api/settings")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("categories", data)
+        self.assertIn("server", data["categories"])
+        self.assertIn("files", data["categories"])
+
+    def test_settings_get_includes_current_values(self):
+        resp = self.client.get("/api/settings")
+        data = resp.get_json()
+        server_keys = [s["key"] for s in data["categories"]["server"]["settings"]]
+        self.assertIn("HOST", server_keys)
+        self.assertIn("PORT", server_keys)
+
+    def test_settings_post_valid_saves_and_reloads(self):
+        with patch.object(app_module.Config, "reload"):
+            resp = self.client.post(
+                "/api/settings",
+                json={"settings": {"HLS_SEGMENT_DURATION": "8"}},
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("message", data)
+
+    def test_settings_post_unknown_key_returns_400(self):
+        resp = self.client.post(
+            "/api/settings",
+            json={"settings": {"UNKNOWN_KEY_XYZ": "value"}},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("error", data)
+
+    def test_settings_post_invalid_int_returns_400(self):
+        resp = self.client.post(
+            "/api/settings",
+            json={"settings": {"HLS_SEGMENT_DURATION": "not_a_number"}},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_settings_reset_valid_key(self):
+        database.set_setting("HLS_SEGMENT_DURATION", "99")
+        with patch.object(app_module.Config, "reload"):
+            resp = self.client.post(
+                "/api/settings/reset",
+                json={"key": "HLS_SEGMENT_DURATION"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        remaining = database.get_all_settings()
+        self.assertNotIn("HLS_SEGMENT_DURATION", remaining)
+
+    def test_settings_reset_unknown_key_returns_400(self):
+        resp = self.client.post(
+            "/api/settings/reset",
+            json={"key": "NONEXISTENT_SETTING"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_settings_reset_wildcard(self):
+        database.set_settings({"HLS_SEGMENT_DURATION": "5", "MAX_PARALLEL_ENCODES": "4"})
+        with patch.object(app_module.Config, "reload"):
+            resp = self.client.post(
+                "/api/settings/reset",
+                json={"key": "*"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        remaining = database.get_all_settings()
+        self.assertNotIn("HLS_SEGMENT_DURATION", remaining)
+        self.assertNotIn("MAX_PARALLEL_ENCODES", remaining)
+
+
+class TestBotsAPI(unittest.TestCase):
+    def setUp(self):
+        _reset_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp.name, "test.db")
+        self.db_patch = patch.object(database, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        database._close_all_connections()
+        database._local = threading.local()
+        database.init_db()
+        self.bots_patch = patch.object(
+            app_module._telegram_uploader, "bots",
+            [{"bot": StubBot(), "index": 0, "channel_id": -1001}],
+        )
+        self.bots_patch.start()
+        self.config_bots_patch = patch.object(
+            app_module.Config, "BOTS",
+            [{"token": "123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", "channel_id": -1001}],
+        )
+        self.config_bots_patch.start()
+        self.client = app_module.app.test_client()
+
+    def tearDown(self):
+        self.bots_patch.stop()
+        self.config_bots_patch.stop()
+        database._close_all_connections()
+        self.db_patch.stop()
+        self.temp.cleanup()
+
+    def test_bots_list_returns_bots(self):
+        resp = self.client.get("/api/bots")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("bots", data)
+        self.assertEqual(len(data["bots"]), 1)
+
+    def test_bots_list_masks_token(self):
+        resp = self.client.get("/api/bots")
+        data = resp.get_json()
+        token_masked = data["bots"][0]["token_masked"]
+        self.assertTrue(token_masked.startswith("***"))
+        self.assertNotIn("ABCdef", token_masked)
+
+    def test_bots_list_shows_source(self):
+        resp = self.client.get("/api/bots")
+        data = resp.get_json()
+        # env bot count matches Config.BOTS length (1 env bot), uploader has 1 bot → source=env
+        self.assertIn(data["bots"][0]["source"], ("env", "db"))
+
+    def test_bots_health_returns_results(self):
+        health_results = [{"index": 0, "channel_id": -1001, "ok": True, "error": None}]
+        with patch.object(
+            app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=health_results)
+        ):
+            resp = self.client.post("/api/bots/health", json={})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("results", data)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertTrue(data["results"][0]["ok"])
+
+    def test_bots_health_filtered_by_index(self):
+        health_results = [
+            {"index": 0, "channel_id": -1001, "ok": True, "error": None},
+            {"index": 1, "channel_id": -1002, "ok": False, "error": "forbidden"},
+        ]
+        with patch.object(
+            app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=health_results)
+        ):
+            resp = self.client.post("/api/bots/health", json={"index": 1})
+        data = resp.get_json()
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["index"], 1)
+
+    def test_bots_add_invalid_token_returns_400(self):
+        resp = self.client.post(
+            "/api/bots/add",
+            json={"token": "bad_token", "channel_id": "-100123"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("error", data)
+
+    def test_bots_add_positive_channel_id_returns_400(self):
+        resp = self.client.post(
+            "/api/bots/add",
+            json={"token": "123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", "channel_id": "100123"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("error", data)
+
+    def test_bots_add_duplicate_token_returns_409(self):
+        token = "999999999:ABCdefGHIjklMNOpqrSTUvwXYZ012345678"
+        database.add_bot(token, -100999)
+        resp = self.client.post(
+            "/api/bots/add",
+            json={"token": token, "channel_id": "-100999"},
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    def test_bots_delete_removes_bot(self):
+        token = "888888888:ABCdefGHIjklMNOpqrSTUvwXYZ012345678"
+        bot_id = database.add_bot(token, -100888)
+        with patch.object(app_module.Config, "load_from_db"), \
+             patch.object(app_module._telegram_uploader, "reload_bots"):
+            resp = self.client.delete(f"/api/bots/{bot_id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(database.bot_exists(token))
 
 
 if __name__ == "__main__":

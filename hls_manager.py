@@ -17,9 +17,14 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-def register_job(job_id, analysis, processing_result, upload_result):
+def register_job(job_id, analysis, processing_result, upload_result,
+                 media_type=None, series_name=None,
+                 is_series=None, season_number=None, episode_number=None, part_number=None):
     """Persist a completed job to the database."""
-    db.save_job(job_id, analysis, processing_result, upload_result)
+    db.save_job(job_id, analysis, processing_result, upload_result,
+                media_type=media_type, series_name=series_name,
+                is_series=is_series, season_number=season_number,
+                episode_number=episode_number, part_number=part_number)
     logger.info("Registered job %s", job_id)
 
 
@@ -28,13 +33,13 @@ def get_job(job_id):
     return db.get_job(job_id)
 
 
-def list_jobs(limit=50, offset=0):
+def list_jobs(limit=50, offset=0, search=None, category=None):
     """List jobs with summary info, newest first.
 
     Returns a dict keyed by job_id. Uses counts from db.list_jobs()
     directly to avoid 2N extra queries per page.
     """
-    jobs = db.list_jobs(limit=limit, offset=offset)
+    jobs = db.list_jobs(limit=limit, offset=offset, search=search, category=category)
     result = {}
     for j in jobs:
         job_id = j["job_id"]
@@ -46,13 +51,20 @@ def list_jobs(limit=50, offset=0):
             "audio_count": j["audio_count"],
             "subtitle_count": j["subtitle_count"],
             "segment_count": j["segment_count"],
+            "media_type": j.get("media_type", "Film"),
+            "series_name": j.get("series_name", ""),
+            "has_thumbnail": j.get("has_thumbnail", 0),
+            "is_series": j.get("is_series", 0),
+            "season_number": j.get("season_number"),
+            "episode_number": j.get("episode_number"),
+            "part_number": j.get("part_number"),
         }
     return result
 
 
-def count_jobs():
+def count_jobs(search=None, category=None):
     """Return the total number of completed jobs."""
-    return db.count_jobs()
+    return db.count_jobs(search=search, category=category)
 
 
 def get_segment_info(job_id, segment_key):
@@ -117,20 +129,7 @@ def generate_master_playlist(job_id, base_url):
     duration = job["duration"] or 1
 
     if video_tracks:
-        # EXT-X-MEDIA:TYPE=VIDEO entries with named quality tiers
-        for t in video_tracks:
-            i = t["track_index"]
-            is_default = "YES" if i == 0 else "NO"
-            raw_name = _video_tier_name(t["height"], is_original=(i == 0))
-            name = _sanitize_hls_attribute(raw_name)
-            uri = f"{base_url}/hls/{job_id}/video_{i}.m3u8"
-            lines.append(
-                f'#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="{video_group}",'
-                f'NAME="{name}",DEFAULT={is_default},'
-                f'AUTOSELECT={is_default},URI="{uri}"'
-            )
-
-        # STREAM-INF entries referencing the video group
+        # Standard ABR: one STREAM-INF per quality tier (no EXT-X-MEDIA:TYPE=VIDEO)
         for t in video_tracks:
             bw = _parse_bitrate(t["bitrate"]) if t["bitrate"] else 0
             if bw == 0:
@@ -139,7 +138,7 @@ def generate_master_playlist(job_id, base_url):
             stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bw}"
             if t["width"] and t["height"]:
                 stream_inf += f',RESOLUTION={t["width"]}x{t["height"]}'
-            stream_inf += f',VIDEO="{video_group}"'
+            stream_inf += f',CODECS="{_h264_codec_string(t["height"], bool(audio_tracks))}"'
             if audio_tracks:
                 stream_inf += f',AUDIO="{audio_group}"'
             if subtitle_tracks:
@@ -156,6 +155,7 @@ def generate_master_playlist(job_id, base_url):
         stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}"
         if job["video_width"] and job["video_height"]:
             stream_inf += f',RESOLUTION={job["video_width"]}x{job["video_height"]}'
+        stream_inf += f',CODECS="{_h264_codec_string(job["video_height"], bool(audio_tracks))}"'
         if audio_tracks:
             stream_inf += f',AUDIO="{audio_group}"'
         if subtitle_tracks:
@@ -173,6 +173,25 @@ def _video_tier_name(height, is_original=False):
     if is_original:
         return f"Original ({label})"
     return label
+
+
+def _h264_codec_string(height, has_audio):
+    """Return the CODECS attribute value for an H.264/AAC HLS stream.
+
+    H.264 High Profile levels are assigned by resolution:
+      5.1 for 4K+, 4.0 for 1080p, 3.1 for 720p, 3.0 for 480p and below.
+    """
+    if height and height >= 2160:
+        video_codec = "avc1.640033"  # High 5.1
+    elif height and height >= 1080:
+        video_codec = "avc1.640028"  # High 4.0
+    elif height and height >= 720:
+        video_codec = "avc1.64001f"  # High 3.1
+    else:
+        video_codec = "avc1.64001e"  # High 3.0
+    if has_audio:
+        return f"{video_codec},mp4a.40.2"
+    return video_codec
 
 
 def _height_to_label(height):
@@ -249,6 +268,7 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:4",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
         f"#EXT-X-TARGETDURATION:{target_duration}",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
@@ -268,6 +288,7 @@ def _generate_subtitle_playlist(job_id, job, sub_index):
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:4",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
         f"#EXT-X-TARGETDURATION:{int(duration) + 1}",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]

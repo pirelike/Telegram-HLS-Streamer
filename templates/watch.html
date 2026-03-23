@@ -1,52 +1,25 @@
 {% extends "base.html" %}
 
-{% block navbar_left %}
-<button class="hamburger" id="hamburgerBtn" title="Toggle sidebar">
-    <i class="material-icons-round">menu</i>
-</button>
-<a class="logo" href="/" onclick="setCategory('all'); return false;">TG<span>HLS</span></a>
-{% endblock %}
+{% block title %}Watch — Telegram HLS Streamer{% endblock %}
 
-{% block navbar_center %}
-<div class="search-bar">
-    <input class="search-input" id="searchInput" type="text" placeholder="Search videos...">
-    <button class="search-btn" title="Search">
-        <i class="material-icons-round">search</i>
-    </button>
-</div>
+{% block extra_css %}
+<link rel="stylesheet" href="/static/shaka-controls.css">
 {% endblock %}
 
 {% block body %}
-<div class="app-body">
+<main class="main sidebar-collapsed">
 
-    <!-- ── Sidebar ── -->
-    <aside class="sidebar" id="sidebar">
-        <div class="sidebar-item active" data-category="all" onclick="setCategory('all')">
-            <i class="sidebar-icon material-icons-round">home</i> Home
+    <div class="player-view active">
+        <a href="/" class="back-btn" onclick="event.preventDefault(); history.length > 1 ? history.back() : location.href='/';">
+            <i class="material-icons-round">arrow_back</i> Back to browse
+        </a>
+        <div class="player-container" id="playerContainer">
+            <video id="videoEl" autoplay playsinline crossorigin="anonymous"></video>
         </div>
-        <div class="sidebar-item" data-category="Film" onclick="setCategory('Film')">
-            <i class="sidebar-icon material-icons-round">movie</i> Films
-        </div>
-        <div class="sidebar-item" data-category="Series" onclick="setCategory('Series')">
-            <i class="sidebar-icon material-icons-round">tv</i> Series
-        </div>
-        <div class="sidebar-item" data-category="Anime Film" onclick="setCategory('Anime Film')">
-            <i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films
-        </div>
-        <div class="sidebar-item" data-category="Anime TV" onclick="setCategory('Anime TV')">
-            <i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV
-        </div>
-    </aside>
+        <div class="player-info" id="playerInfo"></div>
+    </div>
 
-    <!-- ── Main ── -->
-    <main class="main" id="mainContent">
-        <div class="browse-view" id="browseView">
-            <div id="videosContainer"></div>
-            <button class="load-more-btn" id="loadMoreBtn" onclick="loadMoreJobs()">Load more</button>
-        </div>
-    </main>
-
-</div>
+</main>
 
 <!-- ── Edit Metadata Modal ── -->
 <div class="modal-overlay" id="editModal">
@@ -98,5 +71,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/browse.js"></script>
+<script src="/static/shaka-player.ui.js"></script>
+<script src="/static/watch.js"></script>
 {% endblock %}
