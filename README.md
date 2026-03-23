@@ -163,6 +163,7 @@ VAAPI_DEVICE=
 
 # Adaptive bitrate
 ABR_ENABLED=true
+ENABLE_COPY_MODE=true
 # ABR_TIERS=1080:10M,720:5M,480:2M,360:1200k
 # TIER0_BITRATES=2160:60M,1080:30M,720:15M,480:5M
 # TIER0_BITRATE_DEFAULT=15M
@@ -405,11 +406,20 @@ Master playlists include:
 - `EXT-X-MEDIA` entries for subtitle tracks
 - video quality tiers and `EXT-X-STREAM-INF` references
 
-### Video tiers (ABR)
+### Video tiers (ABR) and copy mode
 
-When enabled, the processor creates:
-- original-resolution tier (index 0)
-- additional tiers according to configured ABR heights (`Config.ABR_TIERS`) up to source height
+The processor supports four encoding scenarios controlled by `ABR_ENABLED` and `ENABLE_COPY_MODE`:
+
+| `ENABLE_COPY_MODE` | `ABR_ENABLED` | Codec OK | Result |
+|---|---|---|---|
+| true (default) | true (default) | h264/hevc | Tier 0 copy passthrough + lower-resolution ABR tiers re-encoded |
+| false | true | any | Tier 0 re-encoded at source res + all ABR tiers re-encoded |
+| true | false | h264/hevc | Tier 0 copy passthrough only — fastest, no encoding |
+| false | false | any | Tier 0 re-encoded only |
+
+When copy mode is active, only ABR tiers **strictly below** the source resolution are produced (same-resolution tiers are excluded since tier 0 already covers it via passthrough). When copy mode is off, ABR tiers at or below the source resolution are produced, including same-resolution lower-bitrate variants.
+
+If the source codec is not h264/hevc, copy mode falls back to re-encoding tier 0 regardless of the `ENABLE_COPY_MODE` setting.
 
 ### Audio and subtitles
 

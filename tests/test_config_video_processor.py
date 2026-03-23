@@ -420,6 +420,31 @@ class TestVideoProcessorHelpers(unittest.TestCase):
             tiers = vp._get_abr_tiers(240)
         self.assertEqual(tiers, [])
 
+    def test_get_abr_tiers_exclude_same_resolution_1080p(self):
+        """Copy mode: 1080p source excludes 1080p ABR tier, keeps lower."""
+        with patch.object(vp.Config, "ABR_ENABLED", True):
+            tiers = vp._get_abr_tiers(1080, exclude_same_resolution=True)
+        heights = [t["height"] for t in tiers]
+        self.assertNotIn(1080, heights)
+        self.assertIn(720, heights)
+        self.assertIn(480, heights)
+        self.assertIn(360, heights)
+
+    def test_get_abr_tiers_exclude_same_resolution_720p(self):
+        """Copy mode: 720p source excludes 720p tier, keeps lower."""
+        with patch.object(vp.Config, "ABR_ENABLED", True):
+            tiers = vp._get_abr_tiers(720, exclude_same_resolution=True)
+        heights = [t["height"] for t in tiers]
+        self.assertNotIn(720, heights)
+        self.assertIn(480, heights)
+        self.assertIn(360, heights)
+
+    def test_get_abr_tiers_exclude_same_resolution_360p_returns_empty(self):
+        """Copy mode: 360p source with strict filter returns no ABR tiers."""
+        with patch.object(vp.Config, "ABR_ENABLED", True):
+            tiers = vp._get_abr_tiers(360, exclude_same_resolution=True)
+        self.assertEqual(tiers, [])
+
     # ─── _get_safe_segment_size ───
 
     def test_get_safe_segment_size_uses_segment_target_when_safe(self):
@@ -783,6 +808,35 @@ class TestVideoProcessorHelpers(unittest.TestCase):
                 abr_call = _run_with_progress.call_args_list[1]
                 abr_cmd = abr_call[0][0]
                 self.assertNotIn("copy", abr_cmd)
+
+    @patch("video_processor._run_ffmpeg_with_progress")
+    @patch("video_processor._run_ffmpeg")
+    @patch("video_processor._detect_hw_encoder", return_value=None)
+    def test_process_copy_mode_excludes_same_resolution_abr_tier(self, _detect, _run, _run_with_progress):
+        """Copy mode with 1080p source: 1080p ABR tier is excluded, only lower-res tiers produced."""
+        with tempfile.TemporaryDirectory() as proc_dir:
+            with patch.object(vp.Config, "PROCESSING_DIR", proc_dir), \
+                 patch.object(vp.Config, "ABR_ENABLED", True), \
+                 patch.object(vp.Config, "ENABLE_COPY_MODE", True), \
+                 patch.object(vp.Config, "ABR_TIERS", [
+                     {"height": 1080, "bitrate": "10M"},
+                     {"height": 480, "bitrate": "2M"},
+                 ]):
+                analysis = SimpleNamespace(
+                    file_path="/tmp/in.mp4",
+                    has_video=True, can_copy_video=True,
+                    duration=10.0,
+                    video_streams=[SimpleNamespace(index=0, codec_name="h264",
+                                                   is_copy_compatible=True, width=1920, height=1080)],
+                    audio_streams=[],
+                    subtitle_streams=[],
+                )
+                result = vp.process(analysis, "jobcopysameres")
+                # tier 0 (copy) + 480p only; 1080p ABR tier excluded
+                self.assertEqual(len(result.video_playlists), 2)
+
+                # Only 2 FFmpeg calls: tier 0 copy + 480p encode
+                self.assertEqual(_run_with_progress.call_count, 2)
 
     @patch("video_processor._run_ffmpeg_with_progress")
     @patch("video_processor._run_ffmpeg")

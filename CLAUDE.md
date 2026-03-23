@@ -69,8 +69,8 @@ HLS playback: /hls/<job_id>/master.m3u8
 2. All chunks assembled and verified on server
 3. `stream_analyzer.py` runs FFprobe to enumerate all streams
 4. `video_processor.py` runs FFmpeg:
-   - Video tier 0 → high-bitrate CBR re-encode at source resolution
-   - Video tiers 1–N → re-encoded lower-bitrate/lower-resolution variants (1080p, 720p, 480p, 360p as applicable)
+   - Video tier 0 → copy passthrough when `ENABLE_COPY_MODE=true` and source is h264/hevc; otherwise high-bitrate CBR re-encode at source resolution
+   - Video tiers 1–N → re-encoded lower-bitrate/lower-resolution variants (only tiers strictly below source height when copy mode is active; tiers at or below source height otherwise)
    - Each audio track → separate HLS stream re-encoded to AAC
    - Each subtitle track → WebVTT `.vtt` file
 5. `telegram_uploader.py` uploads all output files across bots (round-robin), with retry/backoff
@@ -105,7 +105,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Playback cache: `SEGMENT_CACHE_SIZE_MB` (200), `SEGMENT_PREFETCH_COUNT` (3), `SEGMENT_PREFETCH_MIN_FREE_BYTES` (0 = no check)
 - HLS/encoding: `HLS_SEGMENT_DURATION` (4 s), `VIDEO_BITRATE` (4M), `AUDIO_BITRATE` (128k)
 - Hardware acceleration: `ENABLE_HARDWARE_ACCELERATION` (true), `PREFERRED_ENCODER` (vaapi), `VAAPI_DEVICE` (empty = auto-detect highest /dev/dri/renderD*), `MAX_PARALLEL_ENCODES` (2)
-- ABR: `ABR_ENABLED` (true), `ENABLE_COPY_MODE` (true — passthrough if source is h264/hevc), `ABR_TIERS` (1080p/10M, 720p/5M, 480p/2M, 360p/1200k), `TIER0_BITRATES`, `TIER0_BITRATE_DEFAULT`
+- ABR: `ABR_ENABLED` (true), `ENABLE_COPY_MODE` (true — passthrough tier 0 if source is h264/hevc; ABR tiers only at strictly lower resolutions), `ABR_TIERS` (1080p/10M, 720p/5M, 480p/2M, 360p/1200k), `TIER0_BITRATES`, `TIER0_BITRATE_DEFAULT`
 - Reliability/cleanup: `JOB_TIMEOUT_SECONDS` (7200), `PENDING_UPLOAD_TTL_SECONDS` (86400), `PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (300), `JOB_RETENTION_DAYS` (0), `MAX_CONCURRENT_JOBS` (1)
 - Rate limiting (per IP): `UPLOAD_RATE_LIMIT_WINDOW` (60 s), `UPLOAD_RATE_LIMIT_MAX_REQUESTS` (100), `MAX_PENDING_UPLOADS_PER_IP` (5)
 - Watch folder: `WATCH_ENABLED` (false), `WATCH_ROOT`, `WATCH_DONE_DIR`, `WATCH_POLL_SECONDS` (5), `WATCH_STABLE_SECONDS` (30), `WATCH_VIDEO_EXTENSIONS`, `WATCH_IGNORE_SUFFIXES`
@@ -133,8 +133,12 @@ HLS playback: /hls/<job_id>/master.m3u8
 ### `video_processor.py`
 - `process(analysis, job_id, progress_callback)` → `ProcessingResult`
 - `_detect_hw_encoder()` performs test encodes for VAAPI (auto-detecting `/dev/dri/renderD*`), NVENC, QSV in that order; falls back to libx264/libx265
-- Copy mode (`ENABLE_COPY_MODE=true`): tier 0 uses `-c:v copy` passthrough if source is already h264/hevc, avoiding unnecessary re-encode
-- Adaptive bitrate: tier 0 at source resolution (high CBR from `TIER0_BITRATES`); additional tiers at 1080p/720p/480p/360p — only tiers ≤ source height produced
+- Copy mode + ABR interaction (four scenarios):
+  - `ENABLE_COPY_MODE=true` + `ABR_ENABLED=true` (default): tier 0 uses `-c:v copy` passthrough; ABR tiers only at resolutions **strictly below** the source are re-encoded. If source codec is not h264/hevc, falls back to full encoding.
+  - `ENABLE_COPY_MODE=false` + `ABR_ENABLED=true`: tier 0 is CBR re-encoded at source resolution; all ABR tiers at or below source height are re-encoded (including same-resolution lower-bitrate tier).
+  - `ENABLE_COPY_MODE=true` + `ABR_ENABLED=false`: tier 0 copy passthrough only — fastest mode, no encoding at all. Falls back to tier 0 encode if codec incompatible.
+  - `ENABLE_COPY_MODE=false` + `ABR_ENABLED=false`: tier 0 CBR re-encode only.
+- Tier 0 bitrate selected from `TIER0_BITRATES` by source height; ABR tiers from `ABR_TIERS`
 - Video tiers encoded in parallel via `ThreadPoolExecutor` limited by `MAX_PARALLEL_ENCODES`
 - Audio always re-encoded to AAC at `AUDIO_BITRATE` (128k default); only text-based subtitle formats extracted to WebVTT
 - Oversized segment handling: scans `.ts` files exceeding `TELEGRAM_MAX_FILE_SIZE`; re-encodes in-place at computed target bitrate
@@ -209,8 +213,11 @@ VIDEO_BITRATE=4M
 AUDIO_BITRATE=128k
 
 # Adaptive Bitrate
-ABR_ENABLED=true               # source-res tier 0 + re-encoded lower tiers
-ENABLE_COPY_MODE=true          # passthrough for h264/hevc (skip re-encode)
+ABR_ENABLED=true               # produce re-encoded lower-resolution tiers alongside tier 0
+ENABLE_COPY_MODE=true          # tier 0 passthrough for h264/hevc sources (skip re-encode)
+                               # with ABR: copy tier 0 + encode strictly lower-res tiers
+                               # without ABR: copy-only, fastest mode (no encoding)
+                               # incompatible codec: falls back to tier 0 re-encode
 # ABR_TIERS=1080:10M,720:5M,480:2M,360:1200k
 # TIER0_BITRATES=2160:60M,1080:30M,720:15M,480:5M
 # TIER0_BITRATE_DEFAULT=15M
