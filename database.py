@@ -21,7 +21,7 @@ from typing import Set
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "streamer.db")
-LATEST_SCHEMA_REVISION = 3
+LATEST_SCHEMA_REVISION = 6
 
 # Thread-local connections for SQLite (which doesn't allow sharing across threads)
 _local = threading.local()
@@ -145,6 +145,14 @@ def _detect_legacy_schema_revision(conn: sqlite3.Connection) -> int:
             f"Unsupported legacy schema in {DB_PATH}: segments.duration exists without full tracks v2 columns"
         )
 
+    job_cols = _list_table_columns(conn, "jobs")
+    has_v4_jobs = "media_type" in job_cols
+    has_v5_jobs = "is_series" in job_cols
+
+    if has_v5_jobs:
+        return 5
+    if has_v4_jobs:
+        return 4
     if has_v3_segments:
         return 3
     if has_v2_tracks:
@@ -161,6 +169,8 @@ def _bootstrap_legacy_schema_migrations(conn: sqlite3.Connection):
         1: "create_base_schema",
         2: "add_track_dimensions_and_stream_index",
         3: "add_segment_duration",
+        4: "add_media_metadata",
+        5: "add_series_episode_metadata",
     }
     for current_revision in range(1, revision + 1):
         _record_migration(conn, current_revision, names[current_revision])
@@ -221,10 +231,48 @@ def _migration_003_add_segment_duration(conn: sqlite3.Connection):
     conn.execute("ALTER TABLE segments ADD COLUMN duration REAL DEFAULT 0")
 
 
+def _migration_004_add_media_metadata(conn: sqlite3.Connection):
+    conn.executescript("""
+        ALTER TABLE jobs ADD COLUMN media_type TEXT DEFAULT 'Film';
+        ALTER TABLE jobs ADD COLUMN series_name TEXT DEFAULT '';
+        ALTER TABLE jobs ADD COLUMN has_thumbnail INTEGER DEFAULT 0;
+    """)
+
+
+def _migration_005_add_series_episode_metadata(conn: sqlite3.Connection):
+    conn.executescript("""
+        ALTER TABLE jobs ADD COLUMN is_series INTEGER DEFAULT 0;
+        ALTER TABLE jobs ADD COLUMN season_number INTEGER DEFAULT NULL;
+        ALTER TABLE jobs ADD COLUMN episode_number INTEGER DEFAULT NULL;
+        ALTER TABLE jobs ADD COLUMN part_number INTEGER DEFAULT NULL;
+    """)
+
+
+def _migration_006_create_settings_and_bots_tables(conn: sqlite3.Connection):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS bots (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            token      TEXT NOT NULL UNIQUE,
+            channel_id INTEGER NOT NULL,
+            label      TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+
 MIGRATIONS = [
     (1, "create_base_schema", _migration_001_create_base_schema),
     (2, "add_track_dimensions_and_stream_index", _migration_002_add_track_dimensions_and_stream_index),
     (3, "add_segment_duration", _migration_003_add_segment_duration),
+    (4, "add_media_metadata", _migration_004_add_media_metadata),
+    (5, "add_series_episode_metadata", _migration_005_add_series_episode_metadata),
+    (6, "create_settings_and_bots_tables", _migration_006_create_settings_and_bots_tables),
 ]
 
 
@@ -256,7 +304,9 @@ def init_db():
 
 # ─── Jobs ───
 
-def save_job(job_id, analysis, processing_result, upload_result):
+def save_job(job_id, analysis, processing_result, upload_result,
+             media_type=None, series_name=None,
+             is_series=None, season_number=None, episode_number=None, part_number=None):
     """Persist a completed job with all its tracks and segments.
 
     Uses an explicit transaction so partial failures roll back cleanly.
@@ -269,8 +319,9 @@ def save_job(job_id, analysis, processing_result, upload_result):
 
             conn.execute(
                 """INSERT OR REPLACE INTO jobs
-                   (job_id, filename, duration, file_size, video_codec, video_width, video_height)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (job_id, filename, duration, file_size, video_codec, video_width, video_height,
+                    media_type, series_name, is_series, season_number, episode_number, part_number)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     os.path.basename(analysis.file_path),
@@ -279,6 +330,12 @@ def save_job(job_id, analysis, processing_result, upload_result):
                     video.codec_name if video else None,
                     video.width if video else 0,
                     video.height if video else 0,
+                    media_type or "Film",
+                    series_name or "",
+                    1 if is_series else 0,
+                    season_number,
+                    episode_number,
+                    part_number,
                 ),
             )
 
@@ -338,6 +395,28 @@ def save_job(job_id, analysis, processing_result, upload_result):
     )
 
 
+def update_job_thumbnail(job_id):
+    """Mark a job as having a thumbnail (sets has_thumbnail = 1)."""
+    conn = _get_conn()
+    with conn:
+        conn.execute("UPDATE jobs SET has_thumbnail = 1 WHERE job_id = ?", (job_id,))
+
+
+def update_job_metadata(job_id, media_type=None, series_name=None,
+                        is_series=None, season_number=None, episode_number=None, part_number=None):
+    """Update metadata for an existing job."""
+    conn = _get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE jobs
+               SET media_type = ?, series_name = ?, is_series = ?,
+                   season_number = ?, episode_number = ?, part_number = ?
+               WHERE job_id = ?""",
+            (media_type, series_name, is_series,
+             season_number, episode_number, part_number, job_id)
+        )
+
+
 def get_job(job_id):
     """Load job metadata from database. Returns dict or None."""
     conn = _get_conn()
@@ -390,33 +469,149 @@ def get_segments_for_prefix(job_id, prefix):
              "file_id": r["file_id"], "bot_index": r["bot_index"]} for r in rows]
 
 
-def list_jobs(limit=50, offset=0):
-    """List jobs with their track counts, newest first.
+def list_jobs(limit=50, offset=0, search=None, category=None, group_by=None, series_name=None, season_number=None):
+    """List jobs or groups of jobs (series/seasons) with pagination.
 
     Args:
-        limit: Maximum number of jobs to return.
-        offset: Number of jobs to skip (for pagination).
+        limit: Maximum number of items to return.
+        offset: Number of items to skip.
+        search: Optional search filter.
+        category: Optional category filter.
+        group_by: 'series' or 'season' to group results.
+        series_name: Filter by specific series when grouping by season or listing episodes.
+        season_number: Filter by specific season when listing episodes.
     """
     conn = _get_conn()
-    # Use subqueries instead of JOIN + GROUP BY to avoid Cartesian product
-    # before limiting, which is much faster with many segments per job.
-    rows = conn.execute("""
-        SELECT j.*,
-               (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'audio') as audio_count,
-               (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'subtitle') as subtitle_count,
-               (SELECT COUNT(*) FROM segments s WHERE s.job_id = j.job_id) as segment_count
-        FROM jobs j
-        ORDER BY j.created_at DESC
-        LIMIT ? OFFSET ?
-    """, (limit, offset)).fetchall()
+    
+    where_clauses = []
+    params = []
+    
+    if search:
+        search_val = f"%{search}%"
+        where_clauses.append("(j.filename LIKE ? OR j.series_name LIKE ?)")
+        params.extend([search_val, search_val])
+    
+    if category and category != "all":
+        if category == "Anime Film":
+            where_clauses.append("j.media_type IN ('Anime Film', 'Anime')")
+        elif category == "Anime TV":
+            where_clauses.append("j.media_type IN ('Anime TV', 'Anime')")
+        else:
+            where_clauses.append("j.media_type = ?")
+            params.append(category)
+
+    if series_name:
+        where_clauses.append("j.series_name = ?")
+        params.append(series_name)
+
+    if season_number is not None:
+        where_clauses.append("j.season_number = ?")
+        params.append(season_number)
+            
+    where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+    
+    if group_by == 'series':
+        # Group by series name, return a representative job_id for the thumbnail
+        # and total count of episodes in that series.
+        query = f"""
+            SELECT j.series_name, 
+                   COUNT(*) as episode_count,
+                   MAX(j.created_at) as last_updated,
+                   (SELECT j2.job_id FROM jobs j2 WHERE j2.series_name = j.series_name ORDER BY j2.created_at DESC LIMIT 1) as job_id,
+                   (SELECT j2.has_thumbnail FROM jobs j2 WHERE j2.series_name = j.series_name ORDER BY j2.created_at DESC LIMIT 1) as has_thumbnail,
+                   'Series' as media_type
+            FROM jobs j
+            {where_sql}
+            {"AND" if where_sql else "WHERE"} j.series_name IS NOT NULL AND j.series_name != ''
+            GROUP BY j.series_name
+            ORDER BY last_updated DESC
+            LIMIT ? OFFSET ?
+        """
+    elif group_by == 'season':
+        # Group by season for a specific series.
+        query = f"""
+            SELECT j.series_name, j.season_number,
+                   COUNT(*) as episode_count,
+                   MAX(j.created_at) as last_updated,
+                   (SELECT j2.job_id FROM jobs j2 WHERE j2.series_name = j.series_name AND (j2.season_number = j.season_number OR (j2.season_number IS NULL AND j.season_number IS NULL)) ORDER BY j2.episode_number ASC LIMIT 1) as job_id,
+                   (SELECT j2.has_thumbnail FROM jobs j2 WHERE j2.series_name = j.series_name AND (j2.season_number = j.season_number OR (j2.season_number IS NULL AND j.season_number IS NULL)) ORDER BY j2.episode_number ASC LIMIT 1) as has_thumbnail,
+                   'Series' as media_type
+            FROM jobs j
+            {where_sql}
+            GROUP BY j.series_name, j.season_number
+            ORDER BY j.season_number ASC
+            LIMIT ? OFFSET ?
+        """
+    else:
+        # Standard episode list.
+        query = f"""
+            SELECT j.*,
+                   (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'audio') as audio_count,
+                   (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'subtitle') as subtitle_count,
+                   (SELECT COUNT(*) FROM segments s WHERE s.job_id = j.job_id) as segment_count
+            FROM jobs j
+            {where_sql}
+            ORDER BY 
+                CASE WHEN j.series_name IS NOT NULL AND j.series_name != ''
+                     THEN (SELECT MAX(created_at) FROM jobs j2 WHERE j2.series_name = j.series_name)
+                     ELSE j.created_at 
+                END DESC,
+                j.series_name ASC,
+                j.season_number ASC,
+                j.episode_number ASC,
+                j.part_number ASC,
+                j.created_at DESC
+            LIMIT ? OFFSET ?
+        """
+        
+    params.extend([limit, offset])
+    rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
 
 
-def count_jobs():
-    """Return the total number of completed jobs."""
+def count_jobs(search=None, category=None, group_by=None, series_name=None, season_number=None):
+    """Return the total number of items (jobs or groups) matching filters."""
     conn = _get_conn()
-    row = conn.execute("SELECT COUNT(*) AS cnt FROM jobs").fetchone()
-    return row["cnt"]
+    
+    where_clauses = []
+    params = []
+    
+    if search:
+        search_val = f"%{search}%"
+        where_clauses.append("(filename LIKE ? OR series_name LIKE ?)")
+        params.extend([search_val, search_val])
+    
+    if category and category != "all":
+        if category == "Anime Film":
+            where_clauses.append("media_type IN ('Anime Film', 'Anime')")
+        elif category == "Anime TV":
+            where_clauses.append("media_type IN ('Anime TV', 'Anime')")
+        else:
+            where_clauses.append("media_type = ?")
+            params.append(category)
+
+    if series_name:
+        where_clauses.append("series_name = ?")
+        params.append(series_name)
+            
+    if season_number is not None:
+        where_clauses.append("season_number = ?")
+        params.append(season_number)
+
+    where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+    
+    if group_by == 'series':
+        query = f"SELECT COUNT(DISTINCT series_name) AS cnt FROM jobs {where_sql} {"AND" if where_sql else "WHERE"} series_name IS NOT NULL AND series_name != ''"
+    elif group_by == 'season':
+        query = f"SELECT COUNT(*) FROM (SELECT 1 FROM jobs {where_sql} GROUP BY series_name, season_number) as t"
+    else:
+        query = f"SELECT COUNT(*) AS cnt FROM jobs {where_sql}"
+    
+    row = conn.execute(query, params).fetchone()
+    if group_by == 'season':
+        return row[0] if row else 0
+    return row["cnt"] if row else 0
+
 
 
 def delete_job(job_id):
@@ -448,6 +643,78 @@ def delete_old_jobs(older_than_days):
     if count:
         logger.info("Retention cleanup: deleted %d jobs older than %d days", count, older_than_days)
     return count
+
+
+# ─── Settings CRUD ────────────────────────────────────────────────────────────
+
+def get_all_settings() -> dict:
+    """Return all rows from the settings table as {key: value}."""
+    conn = _get_conn()
+    rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def set_setting(key: str, value: str):
+    """Insert or replace a single setting."""
+    conn = _get_conn()
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (key, value),
+        )
+
+
+def set_settings(mapping: dict):
+    """Bulk upsert multiple settings in a single transaction."""
+    conn = _get_conn()
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            [(k, v) for k, v in mapping.items()],
+        )
+
+
+def delete_setting(key: str):
+    """Remove a setting, reverting to .env/default on next Config.reload()."""
+    conn = _get_conn()
+    with conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
+# ─── Bots CRUD ────────────────────────────────────────────────────────────────
+
+def get_all_bots() -> list:
+    """Return all rows from the bots table as a list of dicts."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, token, channel_id, label FROM bots ORDER BY id"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_bot(token: str, channel_id: int, label: str = "") -> int:
+    """Insert a new bot and return its id."""
+    conn = _get_conn()
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO bots (token, channel_id, label) VALUES (?, ?, ?)",
+            (token, channel_id, label),
+        )
+    return cursor.lastrowid
+
+
+def delete_bot(bot_id: int):
+    """Delete a bot by its primary key."""
+    conn = _get_conn()
+    with conn:
+        conn.execute("DELETE FROM bots WHERE id = ?", (bot_id,))
+
+
+def bot_exists(token: str) -> bool:
+    """Return True if a bot with the given token already exists."""
+    conn = _get_conn()
+    row = conn.execute("SELECT 1 FROM bots WHERE token = ?", (token,)).fetchone()
+    return row is not None
 
 
 # Initialize on import

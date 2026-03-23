@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Telegram HLS Streamer{% endblock %}</title>
+    <script>(function(){var t=localStorage.getItem('hls_theme');var d=t?t==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.setAttribute('data-theme','dark');})()</script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons+Round">
+    <link rel="stylesheet" href="/static/app.css">
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+
+<!-- ── Navbar ── -->
+<nav class="navbar">
+    <div class="navbar-left">
+        {% block navbar_left %}
+        <a class="logo" href="/"><span>TG</span>HLS</a>
+        {% endblock %}
+    </div>
+    <div class="navbar-center">
+        {% block navbar_center %}{% endblock %}
+    </div>
+    <div class="navbar-right">
+        <a href="/upload" class="upload-btn">
+            <i class="material-icons-round">add</i> Upload
+        </a>
+        <button class="navbar-icon-btn" id="themeToggleBtn" title="Toggle dark mode">
+            <i class="material-icons-round">dark_mode</i>
+        </button>
+        <a href="/settings" class="navbar-icon-btn" title="Settings">
+            <i class="material-icons-round">settings</i>
+        </a>
+    </div>
+</nav>
+
+{% block body %}{% endblock %}
+
+<script src="/static/shared.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

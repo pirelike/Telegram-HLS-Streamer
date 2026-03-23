@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — Telegram HLS Streamer{% endblock %}
+
+{% block body %}
+<main class="main sidebar-collapsed">
+
+    <!-- Dynamic settings cards populated by JS from GET /api/settings -->
+    <div id="settingsContainer"></div>
+
+    <!-- Watch Folder (uses its own separate API) -->
+    <div class="page-card">
+        <div class="page-card-header">
+            <span class="page-card-title">Watch Folder</span>
+        </div>
+        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:1.5rem;">
+            Automatically process videos dropped into a folder. Leave the done folder blank to use <code>&lt;watch root&gt;/done</code>.
+        </p>
+        <div class="settings-grid">
+            <div class="settings-inline">
+                <input type="checkbox" id="watchEnabled">
+                <label for="watchEnabled" style="font-size:0.9rem;">Enable automatic watch-folder uploads</label>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="watchRoot">Folder to watch</label>
+                <input class="form-input" type="text" id="watchRoot" placeholder="/home/you/Downloads">
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="watchDoneDir">Finished folder</label>
+                <input class="form-input" type="text" id="watchDoneDir" placeholder="/home/you/Downloads/done">
+            </div>
+        </div>
+        <div class="settings-actions">
+            <button class="settings-btn" id="saveWatchSettingsBtn" onclick="saveWatchSettings()">Save settings</button>
+            <span class="settings-status" id="watchSettingsStatus">Loading...</span>
+        </div>
+    </div>
+
+    <!-- Telegram Bots -->
+    <div class="page-card">
+        <div class="page-card-header" style="justify-content:space-between;">
+            <span class="page-card-title">Telegram Bots</span>
+            <button class="action-btn primary" onclick="openAddBotModal()">
+                <span class="material-icons-round" style="font-size:1.1rem;vertical-align:middle;">add</span>
+                Add Bot
+            </button>
+        </div>
+        <p class="settings-category-note">
+            Bots from .env cannot be deleted via the UI. Changes to the bot list take effect immediately.
+        </p>
+        <div id="botListContainer">
+            <div class="bot-empty">Loading bots…</div>
+        </div>
+        <div class="settings-actions">
+            <button class="action-btn" onclick="checkAllBotHealth()">Check all health</button>
+            <span class="settings-status" id="botHealthStatus"></span>
+        </div>
+    </div>
+
+</main>
+
+<!-- Add Bot Modal -->
+<div class="modal-overlay" id="addBotModal" onclick="handleModalOverlayClick(event)">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">Add Telegram Bot</span>
+            <button class="modal-close" onclick="closeAddBotModal()">
+                <span class="material-icons-round">close</span>
+            </button>
+        </div>
+        <div class="form-group">
+            <label class="form-label" for="newBotToken">Bot Token</label>
+            <input class="form-input" type="text" id="newBotToken" placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678" autocomplete="off">
+            <div class="field-description">Get a token from @BotFather on Telegram.</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label" for="newBotChannelId">Channel ID</label>
+            <input class="form-input" type="text" id="newBotChannelId" placeholder="-1001234567890">
+            <div class="field-description">Must be a negative integer. Forward a message from the channel to @userinfobot to find it.</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label" for="newBotLabel">Label <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
+            <input class="form-input" type="text" id="newBotLabel" placeholder="e.g. Main storage bot">
+        </div>
+        <div class="settings-actions">
+            <button class="modal-btn primary" id="addBotSaveBtn" onclick="testAndSaveBot()">Test &amp; Save</button>
+            <span class="settings-status" id="addBotStatus"></span>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/settings.js"></script>
+{% endblock %}

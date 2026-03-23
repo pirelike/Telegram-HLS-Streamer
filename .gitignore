@@ -11,3 +11,7 @@ __pycache__/
 venv/
 *.mkv
 *.mp4
+node_modules/
+.playwright-mcp/
+.claude/
+.pytest_cache/

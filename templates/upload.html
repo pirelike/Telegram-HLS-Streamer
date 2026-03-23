@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block title %}Upload — Telegram HLS Streamer{% endblock %}
+
+{% block body %}
+<main class="main sidebar-collapsed">
+    <div class="page-card">
+        <div class="page-card-header">
+            <span class="page-card-title">Upload Video</span>
+        </div>
+
+        <div class="resume-banner" id="resumeBanner">
+            <span class="resume-banner-text" id="resumeBannerText"></span>
+            <button class="resume-dismiss" onclick="dismissResume()">Dismiss</button>
+        </div>
+
+        <!-- Category segmented control -->
+        <div class="segmented-control" id="categoryControl">
+            <button class="seg-btn active" data-cat="Film">Film</button>
+            <button class="seg-btn" data-cat="Film Series">Film Series</button>
+            <button class="seg-btn" data-cat="TV Series">TV Series</button>
+            <button class="seg-btn" data-cat="Anime Film">Anime Film</button>
+            <button class="seg-btn" data-cat="Anime TV">Anime TV</button>
+            <button class="seg-btn" data-cat="Anime TV Series">Anime TV Series</button>
+        </div>
+
+        <div class="drop-zone" id="uploadArea">
+            <input type="file" id="fileInput" accept="video/*,.mkv,.avi,.mp4,.mov,.webm,.ts,.m4v,.flv">
+            <input type="file" id="folderInput" webkitdirectory multiple style="display:none">
+            <div class="drop-icon">
+                <i class="material-icons-round">movie</i>
+            </div>
+            <div class="drop-text" id="dropText">Drop your video here or <strong>click to browse</strong><br>
+                <small>Supports 50GB+ files &bull; MKV, MP4, AVI, MOV, WebM &bull; Resumable</small>
+            </div>
+        </div>
+        <div style="text-align:center;margin-top:-0.5rem;margin-bottom:1.5rem;">
+            <button type="button" class="folder-upload-btn hidden" id="folderUploadBtn" onclick="document.getElementById('folderInput').click()">
+                <i class="material-icons-round" style="font-size:1.1rem;vertical-align:middle;margin-right:0.25rem;">folder_open</i> Upload Folder
+            </button>
+        </div>
+
+        <!-- Metadata section (shown after files are selected) -->
+        <div class="metadata-section hidden" id="metadataSection">
+            <div class="apply-all-row hidden" id="applyAllRow">
+                <span class="apply-all-label" id="applyAllLabel">Series name:</span>
+                <input class="apply-all-input" type="text" id="applyAllInput" placeholder="Apply to all rows">
+                <button class="apply-all-btn" id="applyAllBtn">Apply</button>
+            </div>
+            <div class="metadata-table-wrap" id="metadataTableWrap"></div>
+            <button class="start-upload-btn" id="startUploadBtn" disabled>Start Upload</button>
+        </div>
+
+        <div class="error-msg" id="errorMsg"></div>
+
+        <div class="analysis-card" id="analysisCard">
+            <h4>Detected Streams</h4>
+            <div class="stream-badges" id="streamBadges"></div>
+        </div>
+
+        <div class="progress-block" id="progressContainer">
+            <div class="status-text" id="statusText">Preparing...</div>
+            <div class="progress-bar-bg">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="progressStep">-</span>
+                <span id="progressPct">0%</span>
+            </div>
+            <div class="speed-text" id="speedText"></div>
+            <button class="cancel-btn" id="cancelBtn" onclick="cancelUpload()">Cancel</button>
+        </div>
+
+        <div class="result-block" id="resultCard">
+            <h4><i class="material-icons-round" style="vertical-align:middle;margin-right:0.3rem;">check_circle</i> Stream Ready</h4>
+            <div class="url-box">
+                <span class="url-text" id="masterUrl"></span>
+                <button class="copy-btn" onclick="copyUrl()">Copy</button>
+            </div>
+            <a class="watch-link" id="watchLink" href="#">
+                <i class="material-icons-round">play_circle</i> Watch Now
+            </a>
+        </div>
+    </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/upload.js"></script>
+{% endblock %}

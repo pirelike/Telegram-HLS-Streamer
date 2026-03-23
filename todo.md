@@ -5,32 +5,18 @@ Policy: application-level authentication is intentionally out of scope and shoul
 
 ## P0 — Critical Bugs
 
-- [x] `telegram_uploader.py:_next_bot` + `app.py:_process_job`: the server accepts uploads even when no Telegram bots are configured and only fails after analysis/FFmpeg complete, wasting time and disk before surfacing the misconfiguration.
-- [x] `hls_manager.py:generate_master_playlist`: track titles/languages are interpolated into HLS attribute strings without escaping quotes, commas, or newlines, so crafted media metadata can break playlists or inject invalid tags.
-
 ## P1 — Performance (High Impact)
 
-- [x] `app.py:cancel_job` + `app.py:_process_job`: cancellation/timeouts are soft flags only; FFmpeg work and in-flight Telegram uploads keep running until their current phase ends, so cancelled jobs still burn CPU/network and may upload orphaned segments.
-- [x] `app.py:_schedule_segment_prefetch` + `config.py:SEGMENT_PREFETCH_MIN_FREE_BYTES`: the low-free-memory prefetch guard is documented and configurable but never enforced, so cache-pressure behavior does not match config or docs.
-- [x] `video_processor.py:_detect_hw_encoder`: hardware detection only checks whether an encoder name appears in `ffmpeg -encoders`; it never verifies device access or a real encode path, so partially configured VAAPI/QSV/NVENC hosts fail jobs instead of falling back cleanly.
-
 ## P2 — Reliability
-
-- [x] `app.py:/api/upload/init`: pending-upload deduplication is still keyed only by sanitized basename, so different files with the same name can collide and incorrectly share one resumable session.
-- [x] `app.py:_finalize_source_file`: upload-mode source files are deleted even after failed or cancelled jobs, which removes the only local copy and makes retry/debug impossible without re-uploading.
-- [x] `stream_analyzer.py:SubtitleStream.is_text_based`: the subtitle codec whitelist excludes common text codecs such as `mov_text`, so valid subtitles from MP4 sources are silently skipped.
 
 ## P3 — Data Model
 
 ## P4 — Security Hardening
 
-- [x] `config.py:BEHIND_PROXY`: this defaults to `true`, so direct deployments trust spoofed `X-Forwarded-For` / `X-Forwarded-Proto` headers and weaken rate limiting, per-IP pending-upload caps, and generated base URLs unless the app is actually behind a trusted proxy.
-- [x] `config.py:CLOUDFLARED_ENABLED` + `app.py:__main__`: public quick tunnels are enabled by default and start automatically whenever `cloudflared` is installed, which can expose the service unexpectedly.
-
 ## P5 — Operational
 
 - [ ] `app.py` + `telegram_uploader.py`: there is still no metrics surface for queue depth, Telegram API latency/error rates, cache hit rate, or active job counts.
-- [ ] `config.py:load_bots`: bot discovery is still hardcoded to `TELEGRAM_BOT_TOKEN_1` through `_8`; larger pools require code changes instead of pure configuration.
+- [x] `config.py:load_bots`: bot discovery is still hardcoded to `TELEGRAM_BOT_TOKEN_1` through `_8`; larger pools require code changes instead of pure configuration.
 
 ## P6 — New Features
 

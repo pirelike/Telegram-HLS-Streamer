@@ -42,7 +42,7 @@ from flask import (
 from config import Config
 from stream_analyzer import analyze
 from video_processor import process, cleanup
-from telegram_uploader import TelegramUploader
+from telegram_uploader import TelegramUploader, UploadResult
 from hls_manager import (
     register_job, generate_master_playlist, generate_media_playlist,
     get_segment_info, list_jobs, get_job, count_jobs,
@@ -91,7 +91,7 @@ class _JobRuntime:
         self.cancel_event = threading.Event()
         self.lock = Lock()
         self.current_process = None
-        self.upload_future = None
+        self.upload_futures = []
 
 
 def _get_job_runtime(job_id):
@@ -124,7 +124,7 @@ def _set_job_upload_future(job_id, future):
     if runtime is None:
         return
     with runtime.lock:
-        runtime.upload_future = future
+        runtime.upload_futures.append(future)
 
 
 def _clear_job_upload_future(job_id, future):
@@ -132,8 +132,10 @@ def _clear_job_upload_future(job_id, future):
     if runtime is None:
         return
     with runtime.lock:
-        if runtime.upload_future is future:
-            runtime.upload_future = None
+        try:
+            runtime.upload_futures.remove(future)
+        except ValueError:
+            pass
 
 
 def _terminate_process(proc, job_id):
@@ -165,11 +167,12 @@ def _request_job_stop(job_id):
     runtime.cancel_event.set()
     with runtime.lock:
         proc = runtime.current_process
-        future = runtime.upload_future
+        futures = list(runtime.upload_futures)
 
     _terminate_process(proc, job_id)
-    if future and not future.done():
-        future.cancel()
+    for future in futures:
+        if not future.done():
+            future.cancel()
 
 
 def _get_client_ip():
@@ -639,6 +642,23 @@ def cancel_job(job_id):
     return jsonify({"message": "Job cancellation requested"})
 
 
+@app.route("/api/jobs/<job_id>", methods=["GET"])
+def get_job_endpoint(job_id):
+    """Return metadata for a single job including track counts."""
+    conn = db._get_conn()
+    rows = conn.execute(
+        """SELECT j.*,
+               (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'audio') as audio_count,
+               (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'subtitle') as subtitle_count,
+               (SELECT COUNT(*) FROM segments s WHERE s.job_id = j.job_id) as segment_count
+           FROM jobs j WHERE j.job_id = ?""",
+        (job_id,),
+    ).fetchall()
+    if not rows:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(dict(rows[0]))
+
+
 @app.route("/api/jobs/<job_id>", methods=["DELETE"])
 def delete_job_endpoint(job_id):
     """Delete a completed job from the database."""
@@ -653,6 +673,42 @@ def delete_job_endpoint(job_id):
     db.delete_job(job_id)
     logger.info("Job %s deleted by user", job_id)
     return jsonify({"message": "Job deleted"})
+
+
+@app.route("/api/jobs/<job_id>", methods=["PATCH"])
+def update_job_metadata_endpoint(job_id):
+    """Update metadata for an existing job."""
+    if not get_job(job_id):
+        return jsonify({"error": "Job not found"}), 404
+
+    data = request.get_json() or {}
+    
+    raw_media_type = data.get("media_type")
+    valid_media_types = {"Film", "Series", "Anime Film", "Anime TV"}
+    media_type = raw_media_type if raw_media_type in valid_media_types else "Film"
+    
+    series_name = data.get("series_name", "")
+    is_series = bool(data.get("is_series", 0))
+
+    def _int_or_none(val):
+        if val is None or val == "":
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _int_or_none(data.get("season_number"))
+    episode_number = _int_or_none(data.get("episode_number"))
+    part_number = _int_or_none(data.get("part_number"))
+
+    db.update_job_metadata(
+        job_id, media_type, series_name, is_series,
+        season_number, episode_number, part_number
+    )
+    
+    logger.info("Job %s metadata updated by user", job_id)
+    return jsonify({"message": "Metadata updated successfully"})
 
 
 # Shared TelegramUploader singleton — avoids creating fresh Bot objects on every
@@ -672,6 +728,21 @@ _start_retention_cleanup()
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/upload")
+def upload_page():
+    return render_template("upload.html")
+
+
+@app.route("/settings")
+def settings_page():
+    return render_template("settings.html")
+
+
+@app.route("/watch/<job_id>")
+def watch_page(job_id):
+    return render_template("watch.html", job_id=job_id)
 
 
 # ─── Health Check ───
@@ -719,6 +790,26 @@ def health():
     }), code
 
 
+@app.route("/api/metrics")
+def metrics():
+    """Operational metrics: cache, queue, prefetch, and Telegram counters."""
+    with _queue_order_lock:
+        queue_depth = len(_queue_order)
+    with _job_status_lock:
+        active_jobs = len(_active_jobs)
+    with _segment_prefetch_lock:
+        prefetch_pending = len(_scheduled_segment_prefetches)
+    with _segment_download_lock:
+        downloads_inflight = len(_segment_downloads)
+    return jsonify({
+        "queue": {"depth": queue_depth, "active_jobs": active_jobs},
+        "cache": _segment_cache.stats(),
+        "prefetch": {"pending": prefetch_pending, "downloads_inflight": downloads_inflight},
+        "telegram": _telegram_uploader.get_metrics(),
+        "bots_configured": len(_telegram_uploader.bots),
+    })
+
+
 @app.route("/api/watch-settings", methods=["GET", "POST"])
 def watch_settings():
     """Read or update mutable watch-folder settings for the UI."""
@@ -741,6 +832,161 @@ def watch_settings():
         except Exception:
             logger.exception("Initial watch-folder scan failed after settings update")
     return jsonify(settings)
+
+
+# ─── Settings API ───────────────────────────────────────────────────────────
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    """GET: return all configurable settings. POST: save settings to DB and apply live."""
+    if request.method == "GET":
+        return jsonify(Config.to_dict())
+    # POST: save settings
+    data = request.get_json() or {}
+    incoming = data.get("settings", {})
+    if not isinstance(incoming, dict):
+        return jsonify({"error": "Expected {settings: {KEY: value}}"}), 400
+
+    allowed_keys = {entry[0]: entry[2] for entry in Config.CONFIGURABLE_SETTINGS}
+    validated = {}
+    for key, raw_value in incoming.items():
+        if key not in allowed_keys:
+            return jsonify({"error": f"Unknown setting: {key!r}"}), 400
+        type_hint = allowed_keys[key]
+        try:
+            if type_hint == "int":
+                validated[key] = str(int(raw_value))
+            elif type_hint == "bool":
+                if isinstance(raw_value, bool):
+                    validated[key] = "true" if raw_value else "false"
+                else:
+                    validated[key] = "true" if str(raw_value).lower() == "true" else "false"
+            elif type_hint == "tiers":
+                from config import _parse_tiers  # noqa: PLC0415
+                _parse_tiers(str(raw_value))  # validate only
+                validated[key] = str(raw_value)
+            else:
+                validated[key] = str(raw_value)
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": f"Invalid value for {key}: {exc}"}), 400
+
+    db.set_settings(validated)
+    Config.reload()
+    return jsonify({"message": "Settings saved. Changes apply to new jobs only.", "settings": Config.to_dict()})
+
+
+@app.route("/api/settings/reset", methods=["POST"])
+def api_settings_reset():
+    """Delete a setting from DB so it reverts to .env/default."""
+    data = request.get_json() or {}
+    key = data.get("key", "")
+    allowed_keys = {entry[0] for entry in Config.CONFIGURABLE_SETTINGS}
+    if key == "*":
+        for k in allowed_keys:
+            db.delete_setting(k)
+    elif key in allowed_keys:
+        db.delete_setting(key)
+    else:
+        return jsonify({"error": f"Unknown setting: {key!r}"}), 400
+    Config.reload()
+    return jsonify({"message": "Setting reset to default.", "settings": Config.to_dict()})
+
+
+# ─── Bot Management API ──────────────────────────────────────────────────────
+
+@app.route("/api/bots")
+def api_bots_list():
+    """List all configured bots with masked tokens."""
+    bots = []
+    for i, bot_entry in enumerate(_telegram_uploader.bots):
+        bot_config = Config.BOTS[i] if i < len(Config.BOTS) else {}
+        token = bot_config.get("token", "")
+        masked = f"***{token[-4:]}" if len(token) > 4 else "****"
+        # "_db_id" is only set for DB-sourced bots by load_from_db()
+        db_id = bot_config.get("_db_id")
+        source = "db" if db_id is not None else "env"
+        bots.append({
+            "index": i,
+            "token_masked": masked,
+            "channel_id": bot_entry["channel_id"],
+            "source": source,
+            "db_id": db_id,
+        })
+    return jsonify({"bots": bots})
+
+
+@app.route("/api/bots/health", methods=["POST"])
+def api_bots_health():
+    """Run health probes for all or a single bot."""
+    data = request.get_json() or {}
+    index = data.get("index")
+    try:
+        results = _run_async(_telegram_uploader.probe_health(), timeout=15)
+    except Exception as exc:
+        return jsonify({"error": f"Health check failed: {exc}"}), 500
+    if index is not None:
+        results = [r for r in results if r["index"] == index]
+    return jsonify({"results": results})
+
+
+@app.route("/api/bots/add", methods=["POST"])
+def api_bots_add():
+    """Validate, test, and add a new Telegram bot."""
+    import re as _re  # noqa: PLC0415
+    from telegram import Bot as _Bot  # noqa: PLC0415
+    from telegram.request import HTTPXRequest as _HTTPXRequest  # noqa: PLC0415
+
+    data = request.get_json() or {}
+    token = str(data.get("token", "")).strip()
+    channel_raw = str(data.get("channel_id", "")).strip()
+    label = str(data.get("label", "")).strip()
+
+    token_pattern = _re.compile(r"^[0-9]{8,12}:[a-zA-Z0-9_-]{35,45}$")
+    if not token_pattern.match(token):
+        return jsonify({"error": "Invalid token format. Expected: 123456789:ABCdef..."}), 400
+
+    try:
+        channel_id = int(channel_raw)
+    except ValueError:
+        return jsonify({"error": "channel_id must be an integer"}), 400
+    if channel_id >= 0:
+        return jsonify({"error": "channel_id must be a negative integer (Telegram channel format)"}), 400
+
+    env_tokens = {b["token"] for b in Config.BOTS}
+    if token in env_tokens:
+        return jsonify({"error": "This token is already configured as an env bot"}), 409
+    if db.bot_exists(token):
+        return jsonify({"error": "A bot with this token already exists"}), 409
+
+    # Live test: verify the bot can access the channel
+    test_bot = _Bot(
+        token=token,
+        request=_HTTPXRequest(connection_pool_size=4),
+        get_updates_request=_HTTPXRequest(connection_pool_size=2),
+    )
+    async def _test():
+        return await test_bot.get_chat(channel_id)
+
+    try:
+        _run_async(_test(), timeout=15)
+    except Exception as exc:
+        return jsonify({"error": f"Bot test failed: {exc}"}), 400
+
+    db_id = db.add_bot(token, channel_id, label)
+    Config.reload()
+    _telegram_uploader.reload_bots()
+    logger.info("Added new bot (db_id=%d) for channel %d", db_id, channel_id)
+    return jsonify({"message": "Bot added successfully", "db_id": db_id})
+
+
+@app.route("/api/bots/<int:bot_id>", methods=["DELETE"])
+def api_bots_delete(bot_id):
+    """Remove a DB-stored bot."""
+    db.delete_bot(bot_id)
+    Config.reload()
+    _telegram_uploader.reload_bots()
+    logger.info("Deleted bot db_id=%d", bot_id)
+    return jsonify({"message": "Bot removed"})
 
 
 # ─── Chunked Upload API ───
@@ -975,7 +1221,9 @@ def _remove_pending_upload(upload_id):
         return upload
 
 
-def _queue_local_file(file_path, *, filename=None, source_mode="upload", skip_disk_check=False):
+def _queue_local_file(file_path, *, filename=None, source_mode="upload", skip_disk_check=False,
+                      media_type=None, series_name=None,
+                      is_series=None, season_number=None, episode_number=None, part_number=None):
     """Queue an existing local file for processing via the shared job pipeline."""
     actual_size = os.path.getsize(file_path)
     if not skip_disk_check:
@@ -989,9 +1237,18 @@ def _queue_local_file(file_path, *, filename=None, source_mode="upload", skip_di
         "filename": filename or os.path.basename(file_path),
         "file_size": actual_size,
         "progress": 0,
+        "_encode_progress": 0,
+        "_upload_progress": 0,
+        "_hwm_progress": 0,
         "step": "Queued for processing...",
         "started_ts": time.time(),
         "queue_position": None,
+        "media_type": media_type or "Film",
+        "series_name": series_name or "",
+        "is_series": 1 if is_series else 0,
+        "season_number": season_number,
+        "episode_number": episode_number,
+        "part_number": part_number,
     }
     _job_source_info[job_id] = {
         "mode": source_mode,
@@ -1166,6 +1423,26 @@ def upload_finalize():
     _cleanup_expired_pending_uploads()
     data = request.get_json()
     upload_id = data.get("upload_id") if data else None
+    raw_media_type = (data.get("media_type") or "Film") if data else "Film"
+    series_name = (data.get("series_name") or "") if data else ""
+    valid_media_types = {"Film", "Series", "Anime Film", "Anime TV"}
+    media_type = raw_media_type if raw_media_type in valid_media_types else "Film"
+
+    # Extract and validate series/episode fields
+    raw_is_series = (data.get("is_series") or 0) if data else 0
+    is_series = bool(raw_is_series)
+
+    def _int_or_none(val):
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    season_number = _int_or_none((data or {}).get("season_number"))
+    episode_number = _int_or_none((data or {}).get("episode_number"))
+    part_number = _int_or_none((data or {}).get("part_number"))
 
     with _pending_uploads_lock:
         if not upload_id or upload_id not in _pending_uploads:
@@ -1196,6 +1473,12 @@ def upload_finalize():
             filename=filename,
             source_mode="upload",
             skip_disk_check=True,
+            media_type=media_type,
+            series_name=series_name,
+            is_series=is_series,
+            season_number=season_number,
+            episode_number=episode_number,
+            part_number=part_number,
         )
 
     logger.info("Upload finalized: %s -> job %s (%d bytes)", upload_id, job_id, actual_size)
@@ -1295,7 +1578,7 @@ def _process_job(job_id, file_path):
             _active_jobs[job_id]["analysis"] = analysis.summary()
         logger.info("Job %s analysis: %s", job_id, analysis.summary())
 
-        # Step 2: Process (split into separate streams)
+        # Step 2: Process (split into separate streams), uploading each stream as it finishes
         with _job_status_lock:
             _active_jobs[job_id]["status"] = "processing"
 
@@ -1303,8 +1586,63 @@ def _process_job(job_id, file_path):
             if _is_job_cancelled(job_id):
                 return
             with _job_status_lock:
-                _active_jobs[job_id]["progress"] = int(current / total * 50) if total else 0
+                encode_pct = int(current / total * 50) if total else 0
+                _active_jobs[job_id]["_encode_progress"] = encode_pct
+                combined = encode_pct + _active_jobs[job_id]["_upload_progress"]
+                hwm = max(_active_jobs[job_id]["_hwm_progress"], combined)
+                _active_jobs[job_id]["_hwm_progress"] = hwm
+                _active_jobs[job_id]["progress"] = hwm
                 _active_jobs[job_id]["step"] = step_name
+
+        # Pipeline state: uploads are serialized — each batch waits for the previous
+        # batch to finish before starting, so bots are never double-booked across tiers.
+        _upload_lock = Lock()
+        _upload_count = {"total": 0, "completed": 0}
+        _batch_futures = []  # concurrent.futures.Future from run_coroutine_threadsafe
+        _prev_upload_future = [None]  # mutable cell so the closure can chain futures
+
+        def on_stream_encoded(stream_type, stream_index, files):
+            if not files or runtime.cancel_event.is_set():
+                return
+            with _upload_lock:
+                _upload_count["total"] += len(files)
+                prev = _prev_upload_future[0]
+
+            def _batch_progress(current, total, name):
+                if _is_job_cancelled(job_id):
+                    return
+                with _upload_lock:
+                    _upload_count["completed"] += 1
+                    done = _upload_count["completed"]
+                    total_f = _upload_count["total"]
+                with _job_status_lock:
+                    upload_pct = int(done / total_f * 50) if total_f else 0
+                    _active_jobs[job_id]["_upload_progress"] = upload_pct
+                    combined = _active_jobs[job_id]["_encode_progress"] + upload_pct
+                    hwm = max(_active_jobs[job_id]["_hwm_progress"], combined)
+                    _active_jobs[job_id]["_hwm_progress"] = hwm
+                    _active_jobs[job_id]["progress"] = hwm
+                    _active_jobs[job_id]["step"] = f"Uploading {name}"
+                    _active_jobs[job_id]["upload_current"] = done
+                    _active_jobs[job_id]["upload_total"] = total_f
+
+            async def _sequential_upload():
+                if prev is not None:
+                    try:
+                        await asyncio.wrap_future(prev)
+                    except Exception:
+                        pass  # previous batch failed; still attempt this one
+                return await _telegram_uploader.upload_files(
+                    files,
+                    progress_callback=_batch_progress,
+                    cancel_event=runtime.cancel_event,
+                )
+
+            future = asyncio.run_coroutine_threadsafe(_sequential_upload(), _async_loop)
+            _set_job_upload_future(job_id, future)
+            with _upload_lock:
+                _batch_futures.append(future)
+                _prev_upload_future[0] = future
 
         result = process(
             analysis,
@@ -1313,40 +1651,53 @@ def _process_job(job_id, file_path):
             cancel_event=runtime.cancel_event,
             on_process_start=lambda proc: _set_job_process(job_id, proc),
             on_process_end=lambda proc: _clear_job_process(job_id, proc),
+            on_stream_encoded=on_stream_encoded,
         )
         if _is_job_cancelled(job_id):
             return
 
-        # Step 3: Upload to Telegram
+        # Step 3: Join all pending upload futures and merge results
         with _job_status_lock:
             _active_jobs[job_id]["status"] = "uploading_telegram"
 
-        def on_upload_progress(current, total, name):
-            if _is_job_cancelled(job_id):
-                return
-            with _job_status_lock:
-                _active_jobs[job_id]["progress"] = 50 + int(current / total * 50) if total else 50
-                _active_jobs[job_id]["step"] = f"Uploading {name}"
-                _active_jobs[job_id]["upload_current"] = current
-                _active_jobs[job_id]["upload_total"] = total
+        with _upload_lock:
+            futures_snapshot = list(_batch_futures)
 
-        upload_coro = _telegram_uploader.upload_job(
-            result,
-            progress_callback=on_upload_progress,
-            cancel_event=runtime.cancel_event,
-        )
-        upload_future = asyncio.run_coroutine_threadsafe(upload_coro, _async_loop)
-        _set_job_upload_future(job_id, upload_future)
-        try:
-            upload_result = upload_future.result(timeout=None)
-        finally:
-            _clear_job_upload_future(job_id, upload_future)
+        upload_result = UploadResult(job_id)
+        for future in futures_snapshot:
+            try:
+                batch = future.result(timeout=None)
+                upload_result.segments.update(batch)
+                for seg in batch.values():
+                    upload_result.total_bytes += seg.file_size
+                upload_result.total_files += len(batch)
+            except Exception:
+                if _is_job_cancelled(job_id):
+                    return
+                runtime.cancel_event.set()
+                with _upload_lock:
+                    for f in _batch_futures:
+                        if not f.done():
+                            f.cancel()
+                raise
+            finally:
+                _clear_job_upload_future(job_id, future)
+
         if _is_job_cancelled(job_id):
             return
 
         # Step 4: Register for serving
+        job_meta = _active_jobs.get(job_id, {})
         try:
-            register_job(job_id, analysis, result, upload_result)
+            register_job(
+                job_id, analysis, result, upload_result,
+                media_type=job_meta.get("media_type"),
+                series_name=job_meta.get("series_name"),
+                is_series=job_meta.get("is_series"),
+                season_number=job_meta.get("season_number"),
+                episode_number=job_meta.get("episode_number"),
+                part_number=job_meta.get("part_number"),
+            )
         except Exception as reg_err:
             # Segments are already on Telegram — log enough detail for manual recovery.
             logger.error(
@@ -1358,6 +1709,9 @@ def _process_job(job_id, file_path):
             raise RuntimeError(
                 f"Failed to register job after uploading segments: {reg_err}"
             ) from reg_err
+
+        if "thumbnail/thumbnail.jpg" in upload_result.segments:
+            db.update_job_thumbnail(job_id)
 
         with _job_status_lock:
             # Only mark complete if the user hasn't cancelled in the meantime.
@@ -1424,8 +1778,13 @@ def jobs_list():
     """List completed jobs with pagination.
 
     Query params:
-      page  – 1-based page number (default 1)
-      limit – jobs per page, 1–50 (default 20)
+      page          – 1-based page number (default 1)
+      limit         – items per page, 1–50 (default 20)
+      search        – search string for filename or series name
+      category      – filter by media type
+      group_by      – 'series' or 'season' to group results
+      series_name   – filter by specific series
+      season_number – filter by specific season
     """
     try:
         page = max(1, int(request.args.get("page", 1)))
@@ -1433,9 +1792,23 @@ def jobs_list():
     except ValueError:
         page, limit = 1, 20
 
+    search = request.args.get("search")
+    category = request.args.get("category")
+    group_by = request.args.get("group_by")
+    series_name = request.args.get("series_name")
+    
+    season_number = request.args.get("season_number")
+    if season_number is not None:
+        try:
+            season_number = int(season_number)
+        except ValueError:
+            season_number = None
+
     offset = (page - 1) * limit
-    total = count_jobs()
-    jobs = list_jobs(limit=limit, offset=offset)
+    total = db.count_jobs(search=search, category=category, group_by=group_by, 
+                          series_name=series_name, season_number=season_number)
+    jobs = db.list_jobs(limit=limit, offset=offset, search=search, category=category, 
+                        group_by=group_by, series_name=series_name, season_number=season_number)
     return jsonify({
         "jobs": jobs,
         "total": total,
@@ -1501,6 +1874,9 @@ class _SegmentCache:
         self._current_bytes = 0
         self._data = collections.OrderedDict()
         self._lock = Lock()
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
 
     def has(self, key):
         with self._lock:
@@ -1509,7 +1885,9 @@ class _SegmentCache:
     def get(self, key):
         with self._lock:
             if key not in self._data:
+                self._misses += 1
                 return None
+            self._hits += 1
             self._data.move_to_end(key)
             return self._data[key]
 
@@ -1524,6 +1902,7 @@ class _SegmentCache:
             while self._current_bytes + size > self._max_bytes and self._data:
                 _, v = self._data.popitem(last=False)
                 self._current_bytes -= len(v)
+                self._evictions += 1
             self._data[key] = data
             self._current_bytes += size
 
@@ -1531,6 +1910,17 @@ class _SegmentCache:
         with self._lock:
             self._data.clear()
             self._current_bytes = 0
+
+    def stats(self):
+        with self._lock:
+            return {
+                "max_bytes": self._max_bytes,
+                "current_bytes": self._current_bytes,
+                "items": len(self._data),
+                "hits": self._hits,
+                "misses": self._misses,
+                "evictions": self._evictions,
+            }
 
     @property
     def current_bytes(self):
@@ -1856,6 +2246,46 @@ def _schedule_segment_prefetch(job_id, segment_key, *, _from_chain=False):
 
     if to_prefetch:
         _async_loop.call_soon_threadsafe(_start_batch_prefetch, to_prefetch, not _from_chain)
+
+
+# ─── Thumbnail Proxy ───
+
+@app.route("/thumbnail/<job_id>")
+def serve_thumbnail(job_id):
+    """Serve a job's thumbnail image, proxied from Telegram."""
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if not job.get("has_thumbnail"):
+        return jsonify({"error": "No thumbnail for this job"}), 404
+
+    info = get_segment_info(job_id, "thumbnail/thumbnail.jpg")
+    if not info:
+        return jsonify({"error": "Thumbnail not found"}), 404
+
+    cache_key = f"{job_id}/thumbnail/thumbnail.jpg"
+    cached = _segment_cache.get(cache_key)
+    if cached is not None:
+        return Response(
+            cached,
+            content_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=604800"},
+        )
+
+    coro = _telegram_uploader.get_file_bytes(info["file_id"], info["bot_index"])
+    future = asyncio.run_coroutine_threadsafe(coro, _async_loop)
+    try:
+        data = future.result(timeout=30)
+    except Exception as exc:
+        logger.warning("Thumbnail download failed for %s: %s", job_id, exc)
+        return jsonify({"error": "Failed to fetch thumbnail"}), 502
+
+    _segment_cache.put(cache_key, bytes(data))
+    return Response(
+        bytes(data),
+        content_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
 
 
 # ─── Segment Proxy ───
