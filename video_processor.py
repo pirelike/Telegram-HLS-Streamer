@@ -157,19 +157,28 @@ def _get_tier0_bitrate(source_height):
     return best or Config.TIER0_BITRATE_DEFAULT
 
 
-def _get_abr_tiers(source_height):
+def _get_abr_tiers(source_height, exclude_same_resolution=False):
     """Return applicable ABR tiers for the given source resolution.
 
-    Includes tiers whose height is less than or equal to the source height,
-    so same-resolution lower-bitrate tiers are produced alongside tier 0.
+    When *exclude_same_resolution* is False (default), includes tiers whose
+    height is less than or equal to the source height, so same-resolution
+    lower-bitrate tiers are produced alongside tier 0.
+
+    When *exclude_same_resolution* is True (used in copy mode), only tiers
+    strictly below the source height are included because tier 0 already
+    covers the source resolution via passthrough.
     """
     if not Config.ABR_ENABLED or source_height <= 0:
         return []
 
     tiers = []
     for tier in Config.ABR_TIERS:
-        if tier["height"] <= source_height:
-            tiers.append(tier)
+        if exclude_same_resolution:
+            if tier["height"] < source_height:
+                tiers.append(tier)
+        else:
+            if tier["height"] <= source_height:
+                tiers.append(tier)
     return tiers
 
 
@@ -769,7 +778,7 @@ def process(
         source_height = getattr(analysis.video_streams[0], "height", 0) or 0
         source_width = getattr(analysis.video_streams[0], "width", 0) or 0
         use_copy_mode = analysis.can_copy_video and Config.ENABLE_COPY_MODE
-        abr_tiers = _get_abr_tiers(source_height)
+        abr_tiers = _get_abr_tiers(source_height, exclude_same_resolution=use_copy_mode)
     media_duration = getattr(analysis, "duration", 0) or 0
 
     # Total steps: 1 tier 0 + ABR tiers + audio + subtitles
