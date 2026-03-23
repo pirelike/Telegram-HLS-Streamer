@@ -5,6 +5,8 @@ Policy: application-level authentication is intentionally out of scope and shoul
 
 ## P0 — Critical Bugs
 
+- [x] `video_processor.py`: copy mode + ABR interaction fixed — when `ENABLE_COPY_MODE=true`, ABR tiers are now filtered to strictly lower resolutions than the source (same-resolution tiers are excluded since tier 0 already covers it via passthrough).
+
 ## P1 — Performance (High Impact)
 
 ## P2 — Reliability
