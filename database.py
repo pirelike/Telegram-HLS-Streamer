@@ -32,13 +32,37 @@ _all_connections_lock = threading.Lock()
 
 def _get_conn() -> sqlite3.Connection:
     if not hasattr(_local, "conn") or _local.conn is None:
-        _local.conn = sqlite3.connect(DB_PATH)
-        _local.conn.row_factory = sqlite3.Row
-        _local.conn.execute("PRAGMA journal_mode=WAL")
-        _local.conn.execute("PRAGMA foreign_keys=ON")
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        _local.conn = conn
         with _all_connections_lock:
             _all_connections.append(_local.conn)
     return _local.conn
+
+
+def _reset_conn():
+    """Close and discard the current thread's connection without raising."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _local.conn = None
+        with _all_connections_lock:
+            try:
+                _all_connections.remove(conn)
+            except ValueError:
+                pass
 
 
 def close_conn():
@@ -276,9 +300,69 @@ MIGRATIONS = [
 ]
 
 
+def _handle_corrupt_db() -> None:
+    """Rename a corrupt DB file and reset the thread-local connection so a fresh
+    database can be created on the next _get_conn() call.
+
+    The corrupt file is kept (renamed) so the user has a chance to attempt
+    manual recovery via ``sqlite3 streamer.db.corrupted.N ".recover"`` or similar.
+    """
+    _reset_conn()
+    if os.path.exists(DB_PATH):
+        # Find a unique backup name
+        backup_path = DB_PATH + ".corrupted"
+        counter = 1
+        while os.path.exists(backup_path):
+            backup_path = f"{DB_PATH}.corrupted.{counter}"
+            counter += 1
+        try:
+            os.rename(DB_PATH, backup_path)
+            logger.error(
+                "SQLite database at %s is corrupted. "
+                "The file has been renamed to %s. "
+                "A fresh database will be created. "
+                "Job history and segment mappings from the corrupted database are lost "
+                "unless you can recover the file manually.",
+                DB_PATH,
+                backup_path,
+            )
+        except OSError as exc:
+            logger.error(
+                "SQLite database at %s is corrupted and could not be renamed: %s. "
+                "Attempting to delete it so a fresh database can be created.",
+                DB_PATH,
+                exc,
+            )
+            try:
+                os.remove(DB_PATH)
+            except OSError:
+                pass
+
+
+def _integrity_check(conn: sqlite3.Connection) -> None:
+    """Run a quick SQLite integrity check; raise DatabaseError if the DB is corrupt."""
+    result = conn.execute("PRAGMA quick_check").fetchone()
+    if result is None or result[0] != "ok":
+        raise sqlite3.DatabaseError(
+            f"PRAGMA quick_check returned: {result[0] if result else 'no result'}"
+        )
+
+
 def init_db():
     """Initialize the database and migrate it to the latest supported schema."""
-    conn = _get_conn()
+    try:
+        conn = _get_conn()
+    except sqlite3.DatabaseError as exc:
+        logger.error("Failed to open database: %s — attempting corruption recovery.", exc)
+        _handle_corrupt_db()
+        conn = _get_conn()
+    try:
+        _integrity_check(conn)
+    except sqlite3.DatabaseError as exc:
+        logger.error("Database integrity check failed: %s — attempting corruption recovery.", exc)
+        _handle_corrupt_db()
+        conn = _get_conn()
+
     with conn:
         if not _table_exists(conn, "schema_migrations"):
             _bootstrap_legacy_schema_migrations(conn)
