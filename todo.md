@@ -20,7 +20,8 @@ Policy: application-level authentication is intentionally out of scope and shoul
 
 ## P6 — New Features
 
-- [ ] Thumbnail display: extraction and Telegram upload are implemented (`video_processor.py`, `telegram_uploader.py`); `has_thumbnail` is stored in the DB. Still missing: a proxy endpoint and display in the job list UI.
+- [x] Thumbnail generation: FFmpeg extraction, Telegram upload, DB persistence (`has_thumbnail`), and proxy endpoint (`/thumbnail/<job_id>`) are all implemented.
+- [ ] Thumbnail UI polish: dedicated per-series/per-episode thumbnail display and fallback placeholder in the job browser could be improved.
 - [ ] Job re-processing: there is still no way to regenerate a completed job with new tiers/settings without re-uploading the source.
 - [ ] Webhook notifications: there is still no completion callback for external automation.
 - [ ] Configurable per-job ABR tiers: ABR settings are still global config only.

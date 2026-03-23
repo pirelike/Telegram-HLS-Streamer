@@ -110,7 +110,10 @@ All runtime config is environment-variable based (`config.py`).
 
 ### Required Telegram settings
 
-You can configure up to 8 bots/channels:
+Bots are configured via `_N` suffixes — any number is supported. Two ways to add bots:
+
+1. In `.env`: `TELEGRAM_BOT_TOKEN_N` / `TELEGRAM_CHANNEL_ID_N` for any positive N (applied on next restart).
+2. Via the Settings UI (`/settings`) or `POST /api/bots/add` — validated live and persisted to the DB without restart.
 
 ```bash
 TELEGRAM_BOT_TOKEN_1=123456:ABCDEF...
@@ -118,7 +121,7 @@ TELEGRAM_CHANNEL_ID_1=-1001234567890
 
 TELEGRAM_BOT_TOKEN_2=...
 TELEGRAM_CHANNEL_ID_2=-100...
-# ... up to 8
+# add TELEGRAM_BOT_TOKEN_3, _4, ... as needed
 ```
 
 Notes:
@@ -377,6 +380,11 @@ Returns current watch-folder configuration.
 
 #### `POST /api/watch-settings`
 Updates watch-folder settings (persisted to `watch_settings.json`).
+
+### Thumbnail API
+
+#### `GET /thumbnail/<job_id>`
+Proxies the job's thumbnail JPEG from Telegram. Returns `image/jpeg` or 404 if no thumbnail was extracted.
 
 ### Metrics & Health
 

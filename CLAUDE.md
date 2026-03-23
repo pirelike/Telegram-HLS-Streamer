@@ -19,7 +19,12 @@ hls_manager.py            # HLS M3U8 playlist generation
 stream_analyzer.py        # FFprobe stream analysis
 telegram_uploader.py      # Multi-bot Telegram upload handler
 video_processor.py        # FFmpeg HLS conversion pipeline
-templates/index.html      # Frontend web UI (vanilla JS, no framework)
+templates/                # Frontend web UI (vanilla JS, no framework)
+  base.html               #   Shared layout shell
+  index.html              #   Job browser / home page
+  upload.html             #   Upload page
+  settings.html           #   Settings management page (live config + bot management)
+  watch.html              #   Per-job player/detail page
 requirements.txt          # Python dependencies
 .env.example              # Environment variable template
 todo.md                   # Prioritized backlog of issues and features
@@ -87,6 +92,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Bot management: `GET /api/bots`, `POST /api/bots/health`, `POST /api/bots/add`, `DELETE /api/bots/<id>`
 - Live settings: `GET/POST /api/settings`, `POST /api/settings/reset` — changes applied without restart
 - Watch-folder auto-ingest: polls `WATCH_ROOT` for stable video files, moves processed files to `WATCH_DONE_DIR`; `GET/POST /api/watch-settings`
+- Thumbnail proxy: `GET /thumbnail/<job_id>` — fetches `thumbnail/thumbnail.jpg` from Telegram, cached in the shared segment LRU cache, served as `image/jpeg`
 - Health and metrics: `GET /health`, `GET /api/metrics` (queue depth, cache stats, Telegram counters)
 - Series/episode metadata: `PATCH /api/jobs/<job_id>` sets `media_type`, `series_name`, season/episode/part numbers
 - Optional Cloudflared tunnel (`CLOUDFLARED_ENABLED`) with auto-restart and DNS readiness check
@@ -351,6 +357,6 @@ Segment sizing is driven by FFmpeg `-hls_segment_size` planning plus forced 1-se
 
 See `todo.md` for the full prioritized backlog. Key items for next season:
 1. Add backup/export workflow for `streamer.db` (P5)
-2. Thumbnail display in job list UI — extraction is done, proxy endpoint + UI display still needed (P6)
+2. Thumbnail UI polish — extraction, upload, and proxy are done; dedicated display improvements in the job browser (P6)
 3. Job re-processing without re-upload (P6)
 4. Optional shared cache backend if multi-worker deployment becomes necessary
