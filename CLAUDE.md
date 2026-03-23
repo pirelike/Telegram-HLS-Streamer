@@ -19,7 +19,12 @@ hls_manager.py            # HLS M3U8 playlist generation
 stream_analyzer.py        # FFprobe stream analysis
 telegram_uploader.py      # Multi-bot Telegram upload handler
 video_processor.py        # FFmpeg HLS conversion pipeline
-templates/index.html      # Frontend web UI (vanilla JS, no framework)
+templates/                # Frontend web UI (vanilla JS, no framework)
+  base.html               #   Shared layout shell
+  index.html              #   Job browser / home page
+  upload.html             #   Upload page
+  settings.html           #   Settings management page (live config + bot management)
+  watch.html              #   Per-job player/detail page
 requirements.txt          # Python dependencies
 .env.example              # Environment variable template
 todo.md                   # Prioritized backlog of issues and features
@@ -50,7 +55,7 @@ Browser → Flask (app.py)
   ├── Chunked upload endpoint → temp file assembly
   ├── stream_analyzer.py (FFprobe) → detects video/audio/subtitle streams
   ├── video_processor.py (FFmpeg) → produces HLS segments + WebVTT subtitles
-  ├── telegram_uploader.py → uploads segments to Telegram via 8 bots (round-robin)
+  ├── telegram_uploader.py → uploads segments to Telegram via multiple bots (round-robin)
   ├── hls_manager.py → generates M3U8 playlists, registers in SQLite
   └── database.py → stores job metadata, track info, segment file_ids
          ↓
@@ -78,30 +83,46 @@ HLS playback: /hls/<job_id>/master.m3u8
 
 ### `app.py`
 - Flask app and all route handlers
-- Chunked resumable upload: `/api/upload/init`, `/api/upload/chunk`, `/api/upload/finalize`
-- Job status polling: `/api/status/<job_id>`
+- Chunked resumable upload: `/api/upload/init`, `/api/upload/chunk`, `/api/upload/finalize`, `/api/upload/status/<upload_id>`
+- Job management: `/api/status/<job_id>`, `GET/DELETE/PATCH /api/jobs/<job_id>`, `GET /api/jobs` (paginated, filterable, grouped by series/season)
+- Job cancellation: `POST /api/cancel/<job_id>` — terminates FFmpeg and cancels upload futures
 - HLS serving: `/hls/<job_id>/master.m3u8`, `/hls/<job_id>/video_<N>.m3u8`, audio/subtitle playlists
-- Segment proxy: `/segment/<job_id>/<segment_key>` — fetches TS/VTT from Telegram
-- CORS headers on HLS endpoints (required for cross-origin HLS playback)
-- Persistent async loop for Telegram reads plus a bounded worker queue for processing jobs
-- Robust job cancellation (terminates FFmpeg processes and cancels upload futures)
-- Memory-aware HLS segment prefetching (enforces `SEGMENT_PREFETCH_MIN_FREE_BYTES`)
+- Segment proxy: `/segment/<job_id>/<segment_key>` — fetches TS/VTT from Telegram with in-memory LRU cache, single-flight dedup, and sequential prefetch
+- CORS headers on HLS/API endpoints (configurable via `CORS_ALLOWED_ORIGINS`)
+- Bot management: `GET /api/bots`, `POST /api/bots/health`, `POST /api/bots/add`, `DELETE /api/bots/<id>`
+- Live settings: `GET/POST /api/settings`, `POST /api/settings/reset` — changes applied without restart
+- Watch-folder auto-ingest: polls `WATCH_ROOT` for stable video files, moves processed files to `WATCH_DONE_DIR`; `GET/POST /api/watch-settings`
+- Thumbnail proxy: `GET /thumbnail/<job_id>` — fetches `thumbnail/thumbnail.jpg` from Telegram, cached in the shared segment LRU cache, served as `image/jpeg`
+- Health and metrics: `GET /health`, `GET /api/metrics` (queue depth, cache stats, Telegram counters)
+- Series/episode metadata: `PATCH /api/jobs/<job_id>` sets `media_type`, `series_name`, season/episode/part numbers
+- Optional Cloudflared tunnel (`CLOUDFLARED_ENABLED`) with auto-restart and DNS readiness check
+- Persistent async loop for Telegram reads plus a bounded worker queue for processing jobs (`MAX_CONCURRENT_JOBS`)
 
 ### `config.py`
 - All settings loaded from environment variables (via `python-dotenv`)
-- Key settings: `MAX_UPLOAD_SIZE` (100 GB), `UPLOAD_CHUNK_SIZE` (10 MB), `SEGMENT_TARGET_SIZE` (15 MB), `TELEGRAM_MAX_FILE_SIZE` (20 MB default in code), `HLS_SEGMENT_DURATION` (4 s)
-- ABR settings: `ABR_ENABLED` (default true), `ABR_TIERS` defines re-encoded quality tiers (1080p/10M, 720p/5M, 480p/2M, 360p/1.2M)
-- Playback cache settings: `SEGMENT_CACHE_SIZE_MB`, `SEGMENT_PREFETCH_COUNT`, `SEGMENT_PREFETCH_MIN_FREE_BYTES`
-- Dynamically reads up to 8 bot tokens (`TELEGRAM_BOT_TOKEN_1`…`TELEGRAM_BOT_TOKEN_8`) and channel IDs (`TELEGRAM_CHANNEL_ID_1`…`TELEGRAM_CHANNEL_ID_8`)
+- Server: `HOST` (0.0.0.0), `PORT` (5050), `FORCE_HTTPS` (false), `BEHIND_PROXY` (false), `CLOUDFLARED_ENABLED` (false), `CORS_ALLOWED_ORIGINS` (empty)
+- File handling: `MAX_UPLOAD_SIZE` (100 GB), `UPLOAD_CHUNK_SIZE` (10 MB), `SEGMENT_TARGET_SIZE` (15 MB), `TELEGRAM_MAX_FILE_SIZE` (20 MB)
+- Playback cache: `SEGMENT_CACHE_SIZE_MB` (200), `SEGMENT_PREFETCH_COUNT` (3), `SEGMENT_PREFETCH_MIN_FREE_BYTES` (0 = no check)
+- HLS/encoding: `HLS_SEGMENT_DURATION` (4 s), `VIDEO_BITRATE` (4M), `AUDIO_BITRATE` (128k)
+- Hardware acceleration: `ENABLE_HARDWARE_ACCELERATION` (true), `PREFERRED_ENCODER` (vaapi), `VAAPI_DEVICE` (empty = auto-detect highest /dev/dri/renderD*), `MAX_PARALLEL_ENCODES` (2)
+- ABR: `ABR_ENABLED` (true), `ENABLE_COPY_MODE` (true — passthrough if source is h264/hevc), `ABR_TIERS` (1080p/10M, 720p/5M, 480p/2M, 360p/1200k), `TIER0_BITRATES`, `TIER0_BITRATE_DEFAULT`
+- Reliability/cleanup: `JOB_TIMEOUT_SECONDS` (7200), `PENDING_UPLOAD_TTL_SECONDS` (86400), `PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (300), `JOB_RETENTION_DAYS` (0), `MAX_CONCURRENT_JOBS` (1)
+- Rate limiting (per IP): `UPLOAD_RATE_LIMIT_WINDOW` (60 s), `UPLOAD_RATE_LIMIT_MAX_REQUESTS` (100), `MAX_PENDING_UPLOADS_PER_IP` (5)
+- Watch folder: `WATCH_ENABLED` (false), `WATCH_ROOT`, `WATCH_DONE_DIR`, `WATCH_POLL_SECONDS` (5), `WATCH_STABLE_SECONDS` (30), `WATCH_VIDEO_EXTENSIONS`, `WATCH_IGNORE_SUFFIXES`
+- Telegram: `UPLOAD_PARALLELISM` (8), `BOTS` dynamically loaded from `TELEGRAM_BOT_TOKEN_1`…`_N` + `TELEGRAM_CHANNEL_ID_1`…`_N` (no hardcoded upper limit)
+- Runtime: `Config.load_from_db()` applies DB-persisted overrides; `Config.reload()` re-reads .env + DB; `Config.to_dict()` returns all 31 configurable settings for the settings API
 - Creates `uploads/` and `processing/` directories on import
 
 ### `database.py`
 - SQLite via standard `sqlite3`, thread-safe with connection pooling
-- Tables: `jobs`, `tracks`, `segments`, `schema_migrations`
+- Tables: `jobs`, `tracks`, `segments`, `settings`, `bots`, `schema_migrations`
+- `jobs` stores job metadata including `media_type`, `series_name`, `has_thumbnail`, `is_series`, `season_number`, `episode_number`, `part_number`
 - `tracks` stores video tiers (with width, height, bitrate), audio tracks, and subtitle tracks
 - `segments` stores `(job_id, segment_key, file_id, bot_index)` — maps HLS keys to Telegram file_ids
+- `settings` stores key-value config overrides applied at runtime (persisted across restarts)
+- `bots` stores dynamically registered bots (beyond .env-defined bots)
 - Indexed for fast lookup; cascade delete on job removal
-- Schema migration framework with `schema_migrations` tracking (revisions 1-3 implemented)
+- Schema migration framework with `schema_migrations` tracking (revisions 1-6 implemented)
 
 ### `stream_analyzer.py`
 - Runs `ffprobe -v quiet -print_format json -show_streams`
@@ -111,32 +132,42 @@ HLS playback: /hls/<job_id>/master.m3u8
 
 ### `video_processor.py`
 - `process(analysis, job_id, progress_callback)` → `ProcessingResult`
-- `_detect_hw_encoder()` performs test encodes for VAAPI, NVENC, QSV in that order; falls back to libx264
-- Adaptive bitrate: tier 0 is always re-encoded at a high CBR chosen from source resolution; additional tiers re-encode at lower resolutions (1080p, 720p, 480p, 360p) — only tiers ≤ source height are produced
-- Audio is always re-encoded to AAC at `AUDIO_BITRATE` (default 128k) for HLS compatibility
+- `_detect_hw_encoder()` performs test encodes for VAAPI (auto-detecting `/dev/dri/renderD*`), NVENC, QSV in that order; falls back to libx264/libx265
+- Copy mode (`ENABLE_COPY_MODE=true`): tier 0 uses `-c:v copy` passthrough if source is already h264/hevc, avoiding unnecessary re-encode
+- Adaptive bitrate: tier 0 at source resolution (high CBR from `TIER0_BITRATES`); additional tiers at 1080p/720p/480p/360p — only tiers ≤ source height produced
+- Video tiers encoded in parallel via `ThreadPoolExecutor` limited by `MAX_PARALLEL_ENCODES`
+- Audio always re-encoded to AAC at `AUDIO_BITRATE` (128k default); only text-based subtitle formats extracted to WebVTT
+- Oversized segment handling: scans `.ts` files exceeding `TELEGRAM_MAX_FILE_SIZE`; re-encodes in-place at computed target bitrate
+- Thumbnail extraction: frame at 10% of duration (min 2 s), 640 px wide; non-fatal if it fails; stored as `thumbnail.jpg` and uploaded to Telegram
 - `_run_ffmpeg_with_progress()` reports within-step FFmpeg progress via `-progress pipe:1`
-- Separate FFmpeg invocations for each video tier, each audio track, each subtitle track
+- `ProcessingResult` includes `.video_playlists`, `.audio_playlists`, `.subtitle_files`, `.segment_durations`, `.thumbnail_path`
 - `cleanup(job_id)` removes the `processing/<job_id>/` directory
 
 ### `telegram_uploader.py`
-- `TelegramUploader` wraps up to 8 `python-telegram-bot` Bot instances
-- `upload_files()` / `upload_job()` distribute uploads across bots with per-bot serialization
-- `UploadedSegment(file_id, bot_index)` — bot_index stored so segments can be retrieved from correct bot
-- Retry: exponential backoff on `RetryAfter` (rate limit) and `TimedOut` errors
+- `TelegramUploader` wraps any number of `python-telegram-bot` Bot instances (from `.env` or DB)
+- `upload_files()` / `upload_job()` distribute uploads across bots with per-bot serialization and cross-bot parallelism
+- `UploadedSegment(file_id, bot_index, file_name, file_size)` — bot_index stored so segments can be retrieved from correct bot
+- Retry: exponential backoff on `RetryAfter` (rate limit), `TimedOut`, and `NetworkError`; `BadRequest`/`Forbidden` fail immediately
+- Upload integrity check: validates file_size match post-upload
+- Includes thumbnail upload as part of `upload_job()`
+- `probe_health()` — async verification that all bots can access their channels; returns per-bot status dict
+- `reload_bots()` — rebuilds bot list from `Config.BOTS` at runtime without restart (for live bot management)
+- Metrics tracking: upload/download counts, error counts, and cumulative durations (thread-safe `threading.Lock`)
 - Async throughout (asyncio + aiohttp)
 
 ### `hls_manager.py`
 - `generate_master_playlist(job_id, base_url)` → master M3U8 string
-- Multi-variant ABR: `#EXT-X-MEDIA:TYPE=VIDEO` entries with named tiers — tier 0 labeled "Original (1080p)" / "Original (4K)", lower tiers labeled "1080p", "720p", etc.
-- Audio and subtitle groups referenced by name via `#EXT-X-MEDIA`
+- Standard ABR: one `#EXT-X-STREAM-INF` per video quality tier (BANDWIDTH, RESOLUTION, CODECS, AUDIO, SUBTITLES) — tier 0 labeled "Original (4K)" / "Original (1080p)", lower tiers labeled "1080p", "720p", etc.
+- Audio groups via `#EXT-X-MEDIA:TYPE=AUDIO`; subtitle groups via `#EXT-X-MEDIA:TYPE=SUBTITLES`
 - `generate_media_playlist(job_id, stream_type, stream_index)` → per-stream M3U8
 - Legacy support for single-stream jobs without video tracks in DB
 
 ### `templates/index.html`
-- Single-page UI, no JavaScript framework
+- Multi-page UI (vanilla JS, no framework); pages: `/` (upload + job list), `/settings` (live config + bot management), `/watch/<job_id>` (job detail / watch folder)
 - Chunked uploader: splits file client-side, sends chunks sequentially with per-chunk retry (5 retries, exponential backoff)
 - Displays upload speed, ETA, detected tracks, resulting M3U8 URL
-- Lists previous jobs with metadata (audio/subtitle counts, segment counts)
+- Lists previous jobs with metadata (audio/subtitle counts, segment counts, series grouping)
+- Settings page reads `/api/settings` and `/api/bots`, allows live edits and bot add/remove
 
 ---
 
@@ -149,35 +180,60 @@ Copy `.env.example` to `.env` and populate:
 LOCAL_HOST=0.0.0.0
 LOCAL_PORT=5050
 FORCE_HTTPS=false
-BEHIND_PROXY=true
+BEHIND_PROXY=false
+CORS_ALLOWED_ORIGINS=          # comma-separated origins, or * for all
 
-# Telegram bots (1 required, up to 8 supported)
+# Cloudflare tunnel
+CLOUDFLARED_ENABLED=false
+
+# Telegram bots (1 required; add _2…_N for more)
 TELEGRAM_BOT_TOKEN_1=...
 TELEGRAM_CHANNEL_ID_1=-100...
-TELEGRAM_BOT_TOKEN_2=...       # optional
-TELEGRAM_CHANNEL_ID_2=-100...
 
-# Limits (defaults shown)
+# File handling (defaults shown)
 MAX_UPLOAD_SIZE=107374182400   # 100 GB
 UPLOAD_CHUNK_SIZE=10485760     # 10 MB
 SEGMENT_TARGET_SIZE=15728640   # 15 MB preferred segment target
 TELEGRAM_MAX_FILE_SIZE=20971520 # 20 MB hard upload ceiling
-SEGMENT_CACHE_SIZE_MB=512
-SEGMENT_PREFETCH_COUNT=2
-SEGMENT_PREFETCH_MIN_FREE_BYTES=134217728
+SEGMENT_CACHE_SIZE_MB=200
+SEGMENT_PREFETCH_COUNT=3
+SEGMENT_PREFETCH_MIN_FREE_BYTES=0
 
 # Encoding
 HLS_SEGMENT_DURATION=4
 ENABLE_HARDWARE_ACCELERATION=true
 PREFERRED_ENCODER=vaapi        # vaapi | nvenc | qsv
+VAAPI_DEVICE=                  # empty = auto-detect /dev/dri/renderD*
+MAX_PARALLEL_ENCODES=2
 VIDEO_BITRATE=4M
 AUDIO_BITRATE=128k
 
 # Adaptive Bitrate
 ABR_ENABLED=true               # source-res tier 0 + re-encoded lower tiers
+ENABLE_COPY_MODE=true          # passthrough for h264/hevc (skip re-encode)
 # ABR_TIERS=1080:10M,720:5M,480:2M,360:1200k
 # TIER0_BITRATES=2160:60M,1080:30M,720:15M,480:5M
 # TIER0_BITRATE_DEFAULT=15M
+
+# Reliability / cleanup
+JOB_TIMEOUT_SECONDS=7200
+PENDING_UPLOAD_TTL_SECONDS=86400
+PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS=300
+JOB_RETENTION_DAYS=0           # 0 = keep forever
+MAX_CONCURRENT_JOBS=1
+
+# Rate limiting (per IP)
+UPLOAD_RATE_LIMIT_WINDOW=60
+UPLOAD_RATE_LIMIT_MAX_REQUESTS=100
+MAX_PENDING_UPLOADS_PER_IP=5
+
+# Watch folder (auto-ingest)
+WATCH_ENABLED=false
+# WATCH_ROOT=/path/to/watch
+# WATCH_DONE_DIR=              # defaults to WATCH_ROOT/done
+
+# Telegram upload
+UPLOAD_PARALLELISM=8
 
 # App-level authentication is intentionally unsupported.
 ```
@@ -240,8 +296,8 @@ For end-to-end validation, upload a sample video through the web UI and verify H
 
 ### HLS
 - Segment URLs in playlists point to `/segment/<job_id>/<segment_key>` (proxied, never direct Telegram URLs)
-- Master playlist defines `#EXT-X-MEDIA` groups for video (named quality tiers), audio, and subtitles before `#EXT-X-STREAM-INF` entries
-- Video tiers use `#EXT-X-MEDIA:TYPE=VIDEO` with `NAME` attributes (e.g. "Original (4K)", "1080p") so players can distinguish lossless from re-encoded
+- Master playlist defines `#EXT-X-MEDIA` groups for audio and subtitles, then `#EXT-X-STREAM-INF` entries for each video quality tier
+- Video tier names (e.g. "Original (4K)", "1080p") appear in `#EXT-X-STREAM-INF` BANDWIDTH/RESOLUTION attributes so players can present quality selection
 - Per-tier video playlists served at `/hls/<job_id>/video_<index>.m3u8`
 - WebVTT subtitles use single-segment playlists with duration-based `#EXT-X-TARGETDURATION`
 
@@ -273,7 +329,9 @@ Add route to `app.py`. Query `database.py` functions for data. No new files need
 Update `.env` values `SEGMENT_TARGET_SIZE`, `TELEGRAM_MAX_FILE_SIZE`, `HLS_SEGMENT_DURATION`, and optionally the segment cache settings. No code changes needed.
 
 ### Adding a New Bot
-Add `TELEGRAM_BOT_TOKEN_N` and `TELEGRAM_CHANNEL_ID_N` to `.env` (N = 1–8). `config.py` loads them automatically.
+Two options:
+1. **Via `.env`**: Add `TELEGRAM_BOT_TOKEN_N` and `TELEGRAM_CHANNEL_ID_N` (N = any number). `config.py` loads them automatically on next restart.
+2. **Via UI**: Use the Settings page (`/settings`) → Bot Management → Add Bot. Token/channel are validated live via `POST /api/bots/add` and persisted to the `bots` DB table (no restart needed).
 
 ---
 
@@ -298,7 +356,7 @@ Segment sizing is driven by FFmpeg `-hls_segment_size` planning plus forced 1-se
 ## Roadmap
 
 See `todo.md` for the full prioritized backlog. Key items for next season:
-1. Add metrics for cache hit rate, Telegram latency, and active jobs (P5)
-2. Add backup/export workflow for `streamer.db` (P5)
-3. Thumbnail generation (P6)
+1. Add backup/export workflow for `streamer.db` (P5)
+2. Thumbnail UI polish — extraction, upload, and proxy are done; dedicated display improvements in the job browser (P6)
+3. Job re-processing without re-upload (P6)
 4. Optional shared cache backend if multi-worker deployment becomes necessary
