@@ -6,6 +6,12 @@ Policy: application-level authentication is intentionally out of scope and shoul
 ## P0 — Critical Bugs
 
 - [x] `video_processor.py`: copy mode + ABR interaction fixed — when `ENABLE_COPY_MODE=true`, ABR tiers are now filtered to strictly lower resolutions than the source (same-resolution tiers are excluded since tier 0 already covers it via passthrough).
+- [ ] `hls_manager.py`: segment_key values are embedded in M3U8 playlist lines without escaping — a key containing `\n` or `#` corrupts the playlist and breaks playback for the affected job.
+- [ ] `hls_manager.py`: subtitle playlists emit `#EXTINF:0.000,` when job duration is NULL or 0, which is invalid per the HLS spec and causes players to reject or skip the subtitle track.
+- [ ] `hls_manager.py`: `BANDWIDTH` attribute in the master playlist is set to `file_size * 8` (un-divided) when duration is 0 or NULL, producing an astronomically large value that causes player quality-selection failures.
+- [ ] `app.py`: the global `_aiohttp_session` is recreated without a lock — multiple concurrent coroutines can each create a new `ClientSession`, leaking the earlier sessions as open sockets until the OS reclaims them, eventually exhausting the connection pool.
+- [ ] `app.py`: temp files created by `tempfile.mkstemp()` inside the segment download path are not reliably cleaned up when the download task is cancelled or times out, leading to gradual disk exhaustion.
+- [ ] `stream_analyzer.py`: `stream["index"]` uses bare dict access; if ffprobe omits the `index` field for any stream object (seen with some containers), an unhandled `KeyError` crashes the analysis stage and permanently fails the job.
 
 ## P1 — Performance (High Impact)
 
