@@ -129,6 +129,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Returns `MediaAnalysis` with `.video`, `.audio[]`, `.subtitles[]`
 - `MediaAnalysis.is_copy_compatible` → True if video/audio already suitable for HLS (skip re-encode)
 - Filters out album art streams (codec_name == "mjpeg", disposition attached_pic)
+- Tolerates missing ffprobe stream `index` fields by falling back to the stream's enumerate position (prevents analysis crashes on malformed container metadata)
 
 ### `video_processor.py`
 - `process(analysis, job_id, progress_callback)` → `ProcessingResult`

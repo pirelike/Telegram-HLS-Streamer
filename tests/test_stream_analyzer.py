@@ -301,6 +301,38 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(result.audio_streams[0].sample_rate, 48000)
         self.assertFalse(result.has_subtitles)
 
+    @patch("stream_analyzer.subprocess.run")
+    def test_analyze_tolerates_missing_stream_index(self, mock_run):
+        payload = {
+            "format": {"duration": "12.5", "size": "1024"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "disposition": {"attached_pic": 0},
+                    "tags": {},
+                },
+                {
+                    "index": 3,
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "channels": 2,
+                    "sample_rate": "48000",
+                    "tags": {},
+                },
+            ],
+        }
+        mock_run.return_value = Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        result = sa.analyze("missing_index.mkv")
+
+        self.assertEqual(len(result.video_streams), 1)
+        self.assertEqual(len(result.audio_streams), 1)
+        self.assertEqual(result.video_streams[0].index, 0)
+        self.assertEqual(result.audio_streams[0].index, 3)
+
     @patch("stream_analyzer.subprocess.run", side_effect=FileNotFoundError)
     def test_analyze_ffprobe_missing(self, _):
         with self.assertRaisesRegex(RuntimeError, "ffprobe not found"):

@@ -48,7 +48,7 @@ The project is designed for self-hosted personal media delivery with:
 ### Core modules
 
 - `app.py` — Flask app, upload endpoints, job lifecycle, HLS and segment routes.
-- `stream_analyzer.py` — wraps `ffprobe`; detects video/audio/subtitle streams, codec metadata.
+- `stream_analyzer.py` — wraps `ffprobe`; detects video/audio/subtitle streams, codec metadata, and safely falls back when stream `index` is omitted.
 - `video_processor.py` — wraps `ffmpeg`; builds HLS video/audio playlists and VTT subtitles.
 - `telegram_uploader.py` — async uploader with multi-bot round-robin and retry/backoff.
 - `hls_manager.py` — generates master/media playlists and resolves segment metadata.

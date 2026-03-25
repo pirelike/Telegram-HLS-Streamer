@@ -141,11 +141,12 @@ def analyze(file_path: str) -> MediaAnalysis:
 
     analysis = MediaAnalysis(file_path, duration, file_size)
 
-    for stream in data.get("streams", []):
+    for fallback_index, stream in enumerate(data.get("streams", [])):
         codec_type = stream.get("codec_type")
         tags = stream.get("tags", {})
+        stream_index = _safe_int(stream.get("index"), fallback_index)
         common = {
-            "index": stream["index"],
+            "index": stream_index,
             "codec_name": stream.get("codec_name", "unknown"),
             "language": tags.get("language"),
             "title": tags.get("title"),
