@@ -242,6 +242,67 @@ class Config:
         "telegram": "Telegram",
     }
 
+
+    @classmethod
+    def setting_type_map(cls):
+        """Return a map of configurable key -> type hint."""
+        return {entry[0]: entry[2] for entry in cls.CONFIGURABLE_SETTINGS}
+
+    @classmethod
+    def parse_setting_value(cls, key, raw_value):
+        """Parse a raw setting payload value into the runtime Python value."""
+        type_hint = cls.setting_type_map().get(key)
+        if type_hint is None:
+            raise KeyError(key)
+        if type_hint == "int":
+            return int(raw_value)
+        if type_hint == "bool":
+            if isinstance(raw_value, bool):
+                return raw_value
+            return str(raw_value).lower() == "true"
+        if type_hint == "tiers":
+            parsed = _parse_tiers(str(raw_value), as_dict=(key == "TIER0_BITRATES"))
+            if parsed is None:
+                raise ValueError("tiers value cannot be empty")
+            return parsed
+        if key in ("WATCH_VIDEO_EXTENSIONS", "WATCH_IGNORE_SUFFIXES"):
+            return tuple(s.strip() for s in str(raw_value).split(",") if s.strip())
+        if key == "CORS_ALLOWED_ORIGINS":
+            return [s.strip() for s in str(raw_value).split(",") if s.strip()]
+        return str(raw_value)
+
+    @classmethod
+    def stringify_setting_value(cls, key, parsed_value):
+        """Normalize a parsed runtime value into DB storage string form."""
+        type_hint = cls.setting_type_map().get(key)
+        if type_hint is None:
+            raise KeyError(key)
+        if type_hint == "bool":
+            return "true" if bool(parsed_value) else "false"
+        if type_hint == "tiers":
+            if isinstance(parsed_value, dict):
+                return ",".join(f"{h}:{b}" for h, b in parsed_value.items())
+            if isinstance(parsed_value, list):
+                return ",".join(f"{t['height']}:{t['bitrate']}" for t in parsed_value)
+            return str(parsed_value)
+        if key in ("WATCH_VIDEO_EXTENSIONS", "WATCH_IGNORE_SUFFIXES") and isinstance(parsed_value, tuple):
+            return ",".join(parsed_value)
+        if key == "CORS_ALLOWED_ORIGINS" and isinstance(parsed_value, list):
+            return ",".join(parsed_value)
+        return str(parsed_value)
+
+    @classmethod
+    def apply_runtime_settings(cls, updates):
+        """Apply already-parsed setting values to Config class attributes."""
+        for key, value in updates.items():
+            setattr(cls, key, value)
+
+    @classmethod
+    def settings_require_bot_reload(cls, changed_keys):
+        """Return whether changed setting keys require Telegram bot client rebuild."""
+        bot_reload_keys = set()
+        return bool(set(changed_keys) & bot_reload_keys)
+
     @classmethod
     def load_bots(cls):
         cls.BOTS = []

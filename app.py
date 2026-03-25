@@ -856,31 +856,27 @@ def api_settings():
     if not isinstance(incoming, dict):
         return jsonify({"error": "Expected {settings: {KEY: value}}"}), 400
 
-    allowed_keys = {entry[0]: entry[2] for entry in Config.CONFIGURABLE_SETTINGS}
-    validated = {}
+    allowed_keys = Config.setting_type_map()
+    changed_runtime = {}
+    validated_for_db = {}
     for key, raw_value in incoming.items():
         if key not in allowed_keys:
             return jsonify({"error": f"Unknown setting: {key!r}"}), 400
-        type_hint = allowed_keys[key]
         try:
-            if type_hint == "int":
-                validated[key] = str(int(raw_value))
-            elif type_hint == "bool":
-                if isinstance(raw_value, bool):
-                    validated[key] = "true" if raw_value else "false"
-                else:
-                    validated[key] = "true" if str(raw_value).lower() == "true" else "false"
-            elif type_hint == "tiers":
-                from config import _parse_tiers  # noqa: PLC0415
-                _parse_tiers(str(raw_value))  # validate only
-                validated[key] = str(raw_value)
-            else:
-                validated[key] = str(raw_value)
+            parsed = Config.parse_setting_value(key, raw_value)
         except (ValueError, TypeError) as exc:
             return jsonify({"error": f"Invalid value for {key}: {exc}"}), 400
 
-    db.set_settings(validated)
-    Config.reload()
+        if parsed != getattr(Config, key):
+            changed_runtime[key] = parsed
+            validated_for_db[key] = Config.stringify_setting_value(key, parsed)
+
+    if validated_for_db:
+        db.set_settings(validated_for_db)
+        Config.apply_runtime_settings(changed_runtime)
+        if Config.settings_require_bot_reload(changed_runtime.keys()):
+            _telegram_uploader.reload_bots()
+
     return jsonify({"message": "Settings saved. Changes apply to new jobs only.", "settings": Config.to_dict()})
 
 
@@ -1904,14 +1900,41 @@ class _SegmentCache:
         size = len(data)
         if self._max_bytes == 0 or size > self._max_bytes:
             return
+
+        keys_to_evict = []
         with self._lock:
-            if key in self._data:
-                self._current_bytes -= len(self._data[key])
-                del self._data[key]
-            while self._current_bytes + size > self._max_bytes and self._data:
-                _, v = self._data.popitem(last=False)
-                self._current_bytes -= len(v)
+            current_bytes = self._current_bytes
+            existing = self._data.get(key)
+            if existing is not None:
+                current_bytes -= len(existing)
+
+            projected = current_bytes + size
+            if projected > self._max_bytes:
+                for candidate_key, candidate_value in self._data.items():
+                    if candidate_key == key:
+                        continue
+                    keys_to_evict.append(candidate_key)
+                    projected -= len(candidate_value)
+                    if projected <= self._max_bytes:
+                        break
+
+        with self._lock:
+            existing = self._data.pop(key, None)
+            if existing is not None:
+                self._current_bytes -= len(existing)
+
+            for evict_key in keys_to_evict:
+                evicted = self._data.pop(evict_key, None)
+                if evicted is None:
+                    continue
+                self._current_bytes -= len(evicted)
                 self._evictions += 1
+
+            while self._current_bytes + size > self._max_bytes and self._data:
+                _, evicted = self._data.popitem(last=False)
+                self._current_bytes -= len(evicted)
+                self._evictions += 1
+
             self._data[key] = data
             self._current_bytes += size
 

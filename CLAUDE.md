@@ -110,7 +110,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Rate limiting (per IP): `UPLOAD_RATE_LIMIT_WINDOW` (60 s), `UPLOAD_RATE_LIMIT_MAX_REQUESTS` (100), `MAX_PENDING_UPLOADS_PER_IP` (5)
 - Watch folder: `WATCH_ENABLED` (false), `WATCH_ROOT`, `WATCH_DONE_DIR`, `WATCH_POLL_SECONDS` (5), `WATCH_STABLE_SECONDS` (30), `WATCH_VIDEO_EXTENSIONS`, `WATCH_IGNORE_SUFFIXES`
 - Telegram: `UPLOAD_PARALLELISM` (8), `BOTS` dynamically loaded from `TELEGRAM_BOT_TOKEN_1`…`_N` + `TELEGRAM_CHANNEL_ID_1`…`_N` (no hardcoded upper limit)
-- Runtime: `Config.load_from_db()` applies DB-persisted overrides; `Config.reload()` re-reads .env + DB; `Config.to_dict()` returns all 31 configurable settings for the settings API
+- Runtime: `Config.load_from_db()` applies DB-persisted overrides; `POST /api/settings` now applies changed values in-place (no full `.env` re-read) and only triggers bot reloads for bot-related setting changes; `Config.reload()` remains the full re-read path used by bot add/remove and reset flows; `Config.to_dict()` returns all 31 configurable settings for the settings API
 - Creates `uploads/` and `processing/` directories on import
 
 ### `database.py`
@@ -351,7 +351,7 @@ These are documented in `todo.md` with priorities. Key points for contributors:
 Flask is synchronous while Telegram operations remain async. `app.py` now bridges that with a persistent background event loop, which removes the earlier per-request event loop churn. The longer-term architectural tradeoff is still that async Telegram I/O and sync Flask request handling live in the same process.
 
 ### Process-Local Segment Caching
-The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch for Telegram-backed reads. Cache misses stream through a temp-file backed single-flight download path, so one request fetches from Telegram while same-key followers wait and then reuse the completed artifact. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
+The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch for Telegram-backed reads. Cache misses stream through a temp-file backed single-flight download path, so one request fetches from Telegram while same-key followers wait and then reuse the completed artifact. `_SegmentCache.put()` also stages eviction planning before the mutation pass to shrink lock hold time during heavy eviction bursts. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
 
 ### Segment Size Depends on Encoder Planning
 Segment sizing is driven by FFmpeg `-hls_segment_size` planning plus forced 1-second keyframes. `SEGMENT_TARGET_SIZE` is the preferred size, while `TELEGRAM_MAX_FILE_SIZE` remains the hard upload limit if generated output still overshoots.
