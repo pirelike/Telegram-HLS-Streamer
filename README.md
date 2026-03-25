@@ -444,6 +444,8 @@ If the source codec is not h264/hevc, copy mode falls back to re-encoding tier 0
 ### Cleanup behavior
 
 - completed jobs remove temporary files from `uploads/` and `processing/`
+- ABR tier encoding failures trigger post-executor `cleanup(job_id)` before the failure is re-raised, reducing risk of partial tier artifacts contaminating retries
+- `video_processor.cleanup()` is defensive: failed `shutil.rmtree()` calls are logged as warnings and do not mask the original processing error
 - watch-folder jobs move successful source files into `WATCH_DONE_DIR` instead of deleting them
 - pending/incomplete uploads are cleaned by TTL (`PENDING_UPLOAD_TTL_SECONDS`)
 - long jobs can be force-marked as timed out via watcher (`JOB_TIMEOUT_SECONDS`)

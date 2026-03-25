@@ -142,12 +142,13 @@ HLS playback: /hls/<job_id>/master.m3u8
   - `ENABLE_COPY_MODE=false` + `ABR_ENABLED=false`: tier 0 CBR re-encode only.
 - Tier 0 bitrate selected from `TIER0_BITRATES` by source height; ABR tiers from `ABR_TIERS`
 - Video tiers encoded in parallel via `ThreadPoolExecutor` limited by `MAX_PARALLEL_ENCODES`
+- If any parallel ABR tier fails, `process()` waits for the executor to exit, then calls `cleanup(job_id)` before re-raising to avoid leaving partial tier output behind
 - Audio always re-encoded to AAC at `AUDIO_BITRATE` (128k default); only text-based subtitle formats extracted to WebVTT
 - Oversized segment handling: scans `.ts` files exceeding `TELEGRAM_MAX_FILE_SIZE`; re-encodes in-place at computed target bitrate
 - Thumbnail extraction: frame at 10% of duration (min 2 s), 640 px wide; non-fatal if it fails; stored as `thumbnail.jpg` and uploaded to Telegram
 - `_run_ffmpeg_with_progress()` reports within-step FFmpeg progress via `-progress pipe:1`
 - `ProcessingResult` includes `.video_playlists`, `.audio_playlists`, `.subtitle_files`, `.segment_durations`, `.thumbnail_path`
-- `cleanup(job_id)` removes the `processing/<job_id>/` directory
+- `cleanup(job_id)` removes the `processing/<job_id>/` directory and logs (without raising) if deletion fails, so callers can safely invoke it from `finally` blocks
 
 ### `telegram_uploader.py`
 - `TelegramUploader` wraps any number of `python-telegram-bot` Bot instances (from `.env` or DB)

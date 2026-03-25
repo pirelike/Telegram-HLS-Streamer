@@ -930,6 +930,10 @@ def process(
                             cancel_event.set()
 
             if failed_exc is not None:
+                # Workers already running inside ThreadPoolExecutor cannot be
+                # force-cancelled, so ensure any partially written tier output
+                # is removed only after the executor has fully exited.
+                cleanup(job_id)
                 raise failed_exc
 
         # Assemble results in tier order to keep video_playlists sorted by quality
@@ -1023,5 +1027,13 @@ def cleanup(job_id: str):
     """Remove processing artifacts for a job."""
     output_dir = os.path.join(Config.PROCESSING_DIR, job_id)
     if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-        logger.info("Cleaned up processing dir for %s", job_id)
+        try:
+            shutil.rmtree(output_dir)
+            logger.info("Cleaned up processing dir for %s", job_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to clean up processing dir for %s (%s): %s",
+                job_id,
+                output_dir,
+                exc,
+            )
