@@ -108,6 +108,7 @@ class TelegramUploader:
         # Locks are created lazily inside the event loop to support Python 3.8/3.9,
         # where asyncio.Lock() cannot be created outside a running event loop.
         self._bot_locks: list | None = None
+        self._bot_state_lock = threading.Lock()
         self.metrics = {
             "upload_count": 0,
             "upload_errors": 0,
@@ -183,20 +184,35 @@ class TelegramUploader:
                 "channel_id": bot_config["channel_id"],
                 "index": i,
             })
-        self.bots = new_bots
-        self._bot_counter = 0
-        self._bot_locks = None  # will be recreated lazily on next use
-        logger.info("Reloaded %d Telegram bots", len(self.bots))
+        with self._bot_state_lock:
+            self.bots = new_bots
+            self._bot_counter = 0
+            self._bot_locks = None  # will be recreated lazily on next use
+            bot_count = len(self.bots)
+        logger.info("Reloaded %d Telegram bots", bot_count)
 
     def _next_bot(self):
         """Round-robin bot selection (counter is atomic enough for asyncio single-thread,
         but we use modular arithmetic to stay safe even with concurrent coroutines)."""
-        if not self.bots:
-            raise RuntimeError("No Telegram bots configured")
-        # Grab-and-increment; safe under asyncio (single-threaded event loop)
-        idx = self._bot_counter
-        self._bot_counter = (idx + 1) % len(self.bots)
-        return self.bots[idx % len(self.bots)]
+        with self._bot_state_lock:
+            if not self.bots:
+                raise RuntimeError("No Telegram bots configured")
+            # Grab-and-increment while holding lock so reload can't swap bot arrays.
+            idx = self._bot_counter
+            self._bot_counter = (idx + 1) % len(self.bots)
+            return self.bots[idx % len(self.bots)]
+
+    def _get_or_create_bot_locks(self, required_index=0):
+        """Create/resize per-bot asyncio locks under a single bot-state lock."""
+        with self._bot_state_lock:
+            required_size = max(len(self.bots), required_index + 1)
+            if self._bot_locks is None:
+                self._bot_locks = [asyncio.Lock() for _ in range(required_size)]
+            elif len(self._bot_locks) < required_size:
+                self._bot_locks.extend(
+                    asyncio.Lock() for _ in range(required_size - len(self._bot_locks))
+                )
+            return self._bot_locks
 
     def _record_metric(self, prefix, elapsed, error=False):
         """Increment operation counters under the metrics lock."""
@@ -319,10 +335,9 @@ class TelegramUploader:
 
     async def _upload_file_with_bot_lock(self, file_path, bot_entry, cancel_event=None):
         """Upload file while ensuring one in-flight upload per bot."""
-        if self._bot_locks is None:
-            self._bot_locks = [asyncio.Lock() for _ in self.bots]
         bot_index = bot_entry["index"]
-        async with self._bot_locks[bot_index]:
+        bot_locks = self._get_or_create_bot_locks(required_index=bot_index)
+        async with bot_locks[bot_index]:
             return await self._upload_file(file_path, bot_entry, cancel_event=cancel_event)
 
     async def upload_files(self, files, progress_callback=None, cancel_event=None):
@@ -336,11 +351,11 @@ class TelegramUploader:
             return {}
 
         # Create per-bot locks inside the running event loop (required for Python 3.8/3.9).
-        if self._bot_locks is None:
-            self._bot_locks = [asyncio.Lock() for _ in self.bots]
+        bot_locks = self._get_or_create_bot_locks()
+        bot_count = len(bot_locks)
 
         max_parallelism = min(
-            len(self.bots),
+            bot_count,
             max(1, Config.UPLOAD_PARALLELISM),
             len(files),
         )

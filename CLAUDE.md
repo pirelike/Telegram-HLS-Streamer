@@ -158,6 +158,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Includes thumbnail upload as part of `upload_job()`
 - `probe_health()` — async verification that all bots can access their channels; returns per-bot status dict
 - `reload_bots()` — rebuilds bot list from `Config.BOTS` at runtime without restart (for live bot management)
+- Bot state synchronization: `reload_bots()`, `_next_bot()`, and lazy per-bot lock initialization are guarded by one `threading.Lock` to avoid lock-list races and stale-index crashes during live bot reloads
 - Metrics tracking: upload/download counts, error counts, and cumulative durations (thread-safe `threading.Lock`)
 - Async throughout (asyncio + aiohttp)
 
