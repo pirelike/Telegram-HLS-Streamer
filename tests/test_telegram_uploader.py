@@ -525,6 +525,33 @@ class TestReloadBots(unittest.TestCase):
                 uploader.reload_bots()
                 self.assertIsNone(uploader._bot_locks)
 
+    def test_reload_bots_preserves_old_bot_index_locking_capacity(self):
+        with patch.object(tu.Config, "BOTS", [
+            {"token": "t1", "channel_id": -1001},
+            {"token": "t2", "channel_id": -1002},
+        ]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader = tu.TelegramUploader()
+
+        # Simulate an in-flight upload that already chose bot index 1.
+        old_bot_entry = {"bot": Mock(), "channel_id": -1002, "index": 1}
+
+        with patch.object(tu.Config, "BOTS", [{"token": "t1", "channel_id": -1001}]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader.reload_bots()
+
+        locks = uploader._get_or_create_bot_locks(required_index=old_bot_entry["index"])
+        self.assertGreaterEqual(len(locks), 2)
+
+    def test_get_or_create_bot_locks_initializes_once_and_reuses_list(self):
+        with patch.object(tu.Config, "BOTS", [{"token": "t1", "channel_id": -1001}]):
+            with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
+                uploader = tu.TelegramUploader()
+                locks_first = uploader._get_or_create_bot_locks()
+                locks_second = uploader._get_or_create_bot_locks()
+                self.assertIs(locks_first, locks_second)
+                self.assertEqual(len(locks_first), 1)
+
     def test_reload_bots_empty_config(self):
         with patch.object(tu.Config, "BOTS", [{"token": "t1", "channel_id": -1001}]):
             with patch("telegram_uploader.Bot", Mock()), patch("telegram_uploader.HTTPXRequest", Mock()):
