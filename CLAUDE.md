@@ -115,7 +115,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Creates `uploads/` and `processing/` directories on import
 
 ### `database.py`
-- SQLite via standard `sqlite3`, thread-safe with connection pooling
+- SQLite via standard `sqlite3`, thread-safe with per-thread connection pooling and one-time self-healing reconnect on stale-handle `OperationalError`
 - Tables: `jobs`, `tracks`, `segments`, `settings`, `bots`, `schema_migrations`
 - `jobs` stores job metadata including `media_type`, `series_name`, `has_thumbnail`, `is_series`, `season_number`, `episode_number`, `part_number`
 - `tracks` stores video tiers (with width, height, bitrate), audio tracks, and subtitle tracks

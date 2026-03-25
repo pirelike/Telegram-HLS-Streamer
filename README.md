@@ -224,6 +224,7 @@ TELEGRAM_CHANNEL_ID_8=
 - Upload finalize now enqueues first and only then drops pending-upload tracking, so failed enqueue attempts keep state/files consistent for retry instead of orphaning disk data.
 - Pending upload per-IP counters are removed when they reach zero, preventing long-lived memory growth from one-time client IPs.
 - Telegram bot pool reloads are synchronized with round-robin selection and per-bot lock creation, preventing stale-index crashes and preserving one-upload-at-a-time behavior per bot during live reloads.
+- SQLite thread-local connections self-heal after transient DB-handle failures: `_get_conn()` probes cached handles, resets stale ones on `sqlite3.OperationalError`, and retries opening once before surfacing the error.
 - When `WATCH_ENABLED=true`, the watcher scans `WATCH_ROOT` recursively, ignores the `done/` subtree plus partial-download suffixes, and only queues files whose size/mtime have stayed unchanged for `WATCH_STABLE_SECONDS`.
 - Watcher stability checks tolerate transient file disappear/permission races (`os.stat` failures are skipped instead of crashing the poll thread).
 - Successful watcher-ingested files are moved into `WATCH_DONE_DIR` after the full pipeline completes; failed files stay in place and will only be retried after they change.
