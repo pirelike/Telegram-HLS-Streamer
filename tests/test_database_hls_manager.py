@@ -137,6 +137,7 @@ class TestDatabaseMigrations(TestDatabaseBase):
                 (4, "add_media_metadata"),
                 (5, "add_series_episode_metadata"),
                 (6, "create_settings_and_bots_tables"),
+                (7, "add_listing_performance_indexes"),
             ],
         )
 
@@ -238,7 +239,7 @@ class TestDatabaseMigrations(TestDatabaseBase):
         database.init_db()
         conn = database._get_conn()
         rows = conn.execute("SELECT revision FROM schema_migrations ORDER BY revision").fetchall()
-        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6])
+        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6, 7])
 
     def test_init_db_fails_for_newer_schema_revision(self):
         self._reset_db_file()

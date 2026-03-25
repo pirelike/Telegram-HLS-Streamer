@@ -94,7 +94,13 @@ def _sanitize_segment_uri_path(segment_key):
         return None
 
     cleaned = str(segment_key).replace("\r", "").replace("\n", "")
-    if not cleaned or cleaned.startswith("#"):
+    if not cleaned:
+        return None
+
+    # Reject entire keys or individual path components that begin with '#'
+    # so they cannot be interpreted as comments/tags by HLS parsers.
+    path_parts = cleaned.split("/")
+    if any(part.startswith("#") for part in path_parts):
         return None
 
     # Keep path separators and RFC3986 unreserved chars; encode everything else.
