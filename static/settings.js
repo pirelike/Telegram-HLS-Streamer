@@ -109,7 +109,6 @@ function renderField(setting) {
         const descEl = document.createElement('div');
         descEl.className = 'field-description';
         descEl.textContent = setting.description;
-        wrap.appendChild(labelRow.cloneNode ? null : null); // already appended
         wrap.appendChild(input);
         wrap.appendChild(descEl);
         return wrap;
