@@ -10,6 +10,7 @@ import functools
 import logging
 import math
 import os
+from urllib.parse import quote
 
 import database as db
 from config import Config
@@ -82,6 +83,42 @@ def _sanitize_hls_attribute(value):
     return val
 
 
+def _sanitize_segment_uri_path(segment_key):
+    """Return a safe URI path component for segment references.
+
+    - Strip CR/LF to prevent line injection.
+    - Reject keys that start with '#'.
+    - Percent-encode unsafe URI characters.
+    """
+    if segment_key is None:
+        return None
+
+    cleaned = str(segment_key).replace("\r", "").replace("\n", "")
+    if not cleaned or cleaned.startswith("#"):
+        return None
+
+    # Keep path separators and RFC3986 unreserved chars; encode everything else.
+    return quote(cleaned, safe="/-._~")
+
+
+def _compute_bandwidth(file_size, duration, explicit_bitrate=None):
+    """Compute a safe BANDWIDTH value for HLS master playlists."""
+    if explicit_bitrate and explicit_bitrate > 0:
+        return explicit_bitrate
+
+    effective_duration = duration or 0
+    if effective_duration <= 0:
+        effective_duration = max(float(Config.HLS_SEGMENT_DURATION), 1.0)
+
+    estimated = int((max(file_size or 0, 0) * 8) / effective_duration)
+    return min(max(estimated, 32_000), 50_000_000)
+
+
+def _compute_subtitle_duration(duration):
+    """Return a non-zero EXTINF duration for subtitle playlists."""
+    return max(duration or 0, Config.HLS_SEGMENT_DURATION, 0.001)
+
+
 def generate_master_playlist(job_id, base_url):
     """Generate a master M3U8 playlist with multi-audio and subtitle variants."""
     job = db.get_job(job_id)
@@ -126,14 +163,16 @@ def generate_master_playlist(job_id, base_url):
     # Video variant streams (one per quality tier)
     video_tracks = db.get_job_tracks(job_id, "video")
     video_group = "video"
-    duration = job["duration"] or 1
+    duration = job["duration"]
 
     if video_tracks:
         # Standard ABR: one STREAM-INF per quality tier (no EXT-X-MEDIA:TYPE=VIDEO)
         for t in video_tracks:
-            bw = _parse_bitrate(t["bitrate"]) if t["bitrate"] else 0
-            if bw == 0:
-                bw = int(job["file_size"] * 8 / duration) if duration > 0 else 0
+            bw = _compute_bandwidth(
+                job["file_size"],
+                duration,
+                explicit_bitrate=_parse_bitrate(t["bitrate"]) if t["bitrate"] else 0,
+            )
 
             stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bw}"
             if t["width"] and t["height"]:
@@ -148,9 +187,7 @@ def generate_master_playlist(job_id, base_url):
             lines.append(f"{base_url}/hls/{job_id}/video_{t['track_index']}.m3u8")
     else:
         # Legacy: single video stream (no video tracks in DB)
-        bandwidth = job["file_size"] * 8
-        if duration > 0:
-            bandwidth = int(bandwidth / duration)
+        bandwidth = _compute_bandwidth(job["file_size"], duration)
 
         stream_inf = f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}"
         if job["video_width"] and job["video_height"]:
@@ -273,9 +310,18 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
 
+    emitted_segments = 0
     for seg, dur in zip(segments, durations):
+        segment_uri = _sanitize_segment_uri_path(seg["segment_key"])
+        if not segment_uri:
+            logger.warning("Skipping unsafe segment key for job %s: %r", job_id, seg["segment_key"])
+            continue
         lines.append(f"#EXTINF:{dur:.6f},")
-        lines.append(f"/segment/{job_id}/{seg['segment_key']}")
+        lines.append(f"/segment/{job_id}/{segment_uri}")
+        emitted_segments += 1
+
+    if emitted_segments == 0:
+        return None
 
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
@@ -283,21 +329,24 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
 
 def _generate_subtitle_playlist(job_id, job, sub_index):
     """Generate a playlist for a subtitle track (single VTT file)."""
-    duration = job["duration"] or 0
+    subtitle_duration = _compute_subtitle_duration(job["duration"])
+    target_duration = max(1, math.ceil(subtitle_duration))
 
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:4",
         "#EXT-X-PLAYLIST-TYPE:VOD",
-        f"#EXT-X-TARGETDURATION:{int(duration) + 1}",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
 
     key = f"sub_{sub_index}/subtitles.vtt"
     info = db.get_segment(job_id, key)
     if info:
-        lines.append(f"#EXTINF:{duration:.3f},")
-        lines.append(f"/segment/{job_id}/{key}")
+        segment_uri = _sanitize_segment_uri_path(key)
+        if segment_uri:
+            lines.append(f"#EXTINF:{subtitle_duration:.3f},")
+            lines.append(f"/segment/{job_id}/{segment_uri}")
 
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
