@@ -97,6 +97,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Series/episode metadata: `PATCH /api/jobs/<job_id>` sets `media_type`, `series_name`, season/episode/part numbers
 - Optional Cloudflared tunnel (`CLOUDFLARED_ENABLED`) with auto-restart and DNS readiness check
 - Persistent async loop for Telegram reads plus a bounded worker queue for processing jobs (`MAX_CONCURRENT_JOBS`)
+- Reliability guards: shared aiohttp session recreation is serialized via a thread lock and always created on the persistent async loop; upload finalization removes pending-tracking only after successful queueing; watcher `os.stat()` races are treated as non-fatal skips; and cancel flow now drains in-flight upload futures briefly when `future.cancel()` cannot preempt immediately.
 
 ### `config.py`
 - All settings loaded from environment variables (via `python-dotenv`)

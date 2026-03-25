@@ -221,7 +221,10 @@ TELEGRAM_CHANNEL_ID_8=
 - `SEGMENT_PREFETCH_COUNT` controls how many upcoming segments are warmed per active playback flow.
 - `SEGMENT_PREFETCH_MIN_FREE_BYTES` stops prefetch when the cache is close to full, reducing churn on smaller home servers.
 - `UPLOAD_CHUNK_SIZE` must match frontend expectation if using bundled UI (currently 10MB).
+- Upload finalize now enqueues first and only then drops pending-upload tracking, so failed enqueue attempts keep state/files consistent for retry instead of orphaning disk data.
+- Pending upload per-IP counters are removed when they reach zero, preventing long-lived memory growth from one-time client IPs.
 - When `WATCH_ENABLED=true`, the watcher scans `WATCH_ROOT` recursively, ignores the `done/` subtree plus partial-download suffixes, and only queues files whose size/mtime have stayed unchanged for `WATCH_STABLE_SECONDS`.
+- Watcher stability checks tolerate transient file disappear/permission races (`os.stat` failures are skipped instead of crashing the poll thread).
 - Successful watcher-ingested files are moved into `WATCH_DONE_DIR` after the full pipeline completes; failed files stay in place and will only be retried after they change.
 
 ---

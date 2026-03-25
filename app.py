@@ -12,6 +12,7 @@ import asyncio
 import atexit
 import collections
 import concurrent.futures
+import contextlib
 import json
 import logging
 import os
@@ -170,9 +171,33 @@ def _request_job_stop(job_id):
         futures = list(runtime.upload_futures)
 
     _terminate_process(proc, job_id)
+    pending_futures = []
     for future in futures:
-        if not future.done():
-            future.cancel()
+        if future.done():
+            continue
+        was_cancelled = future.cancel()
+        if not was_cancelled and not future.done():
+            pending_futures.append(future)
+
+    if not pending_futures:
+        return
+
+    try:
+        _run_async(_await_upload_futures_shutdown(pending_futures, timeout=2.0), timeout=3)
+    except Exception as exc:
+        logger.debug("Job %s: upload future drain timed out/failed: %s", job_id, exc)
+
+
+async def _await_upload_futures_shutdown(futures, timeout=2.0):
+    wrapped = [asyncio.wrap_future(fut) for fut in futures if not fut.done()]
+    if not wrapped:
+        return
+    done, pending = await asyncio.wait(wrapped, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    for task in done:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 def _get_client_ip():
@@ -330,6 +355,7 @@ _async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
 _async_loop_thread = None
 _aiohttp_session = None
 _aiohttp_session_lock = None
+_aiohttp_session_recreate_lock = Lock()
 _loop_ready = threading.Event()
 _segment_downloads = {}
 _segment_download_lock = Lock()
@@ -404,12 +430,7 @@ def _run_async(coro, timeout=30):
 
 
 def _start_persistent_loop():
-    global _async_loop_thread, _aiohttp_session, _aiohttp_session_lock
-
-    async def _init():
-        global _aiohttp_session, _aiohttp_session_lock
-        _aiohttp_session_lock = asyncio.Lock()
-        _aiohttp_session = aiohttp.ClientSession()
+    global _async_loop_thread
 
     def run_loop():
         asyncio.set_event_loop(_async_loop)
@@ -419,7 +440,24 @@ def _start_persistent_loop():
     _async_loop_thread = Thread(target=run_loop, daemon=True, name="async-loop")
     _async_loop_thread.start()
     _loop_ready.wait(timeout=5)
-    asyncio.run_coroutine_threadsafe(_init(), _async_loop).result(timeout=10)
+    _ensure_aiohttp_session()
+
+
+async def _create_aiohttp_session():
+    global _aiohttp_session, _aiohttp_session_lock
+    if _aiohttp_session_lock is None:
+        _aiohttp_session_lock = asyncio.Lock()
+    async with _aiohttp_session_lock:
+        if _aiohttp_session is None or _aiohttp_session.closed:
+            _aiohttp_session = aiohttp.ClientSession()
+    return _aiohttp_session
+
+
+def _ensure_aiohttp_session():
+    with _aiohttp_session_recreate_lock:
+        if _aiohttp_session is not None and not _aiohttp_session.closed:
+            return _aiohttp_session
+        return _run_async(_create_aiohttp_session(), timeout=10)
 
 
 def _shutdown_persistent_loop():
@@ -467,8 +505,7 @@ def _cleanup_expired_pending_uploads(force=False):
             _pending_filenames.pop(info.get("dedup_key"), None)
             _upload_locks.pop(upload_id, None)
             ip = info.get("client_ip", "unknown")
-            if _pending_uploads_per_ip[ip] > 0:
-                _pending_uploads_per_ip[ip] -= 1
+            _decrement_pending_uploads_for_ip(ip)
             path = info.get("path")
             if path:
                 paths_to_remove.append((upload_id, info.get("filename"), path))
@@ -1221,9 +1258,15 @@ def _remove_pending_upload(upload_id):
         _pending_filenames.pop(upload.get("dedup_key"), None)
         _upload_locks.pop(upload_id, None)
         ip = upload.get("client_ip", "unknown")
-        if _pending_uploads_per_ip[ip] > 0:
-            _pending_uploads_per_ip[ip] -= 1
+        _decrement_pending_uploads_for_ip(ip)
         return upload
+
+
+def _decrement_pending_uploads_for_ip(ip):
+    if _pending_uploads_per_ip[ip] > 0:
+        _pending_uploads_per_ip[ip] -= 1
+    if _pending_uploads_per_ip[ip] == 0:
+        del _pending_uploads_per_ip[ip]
 
 
 def _queue_local_file(file_path, *, filename=None, source_mode="upload", skip_disk_check=False,
@@ -1278,7 +1321,10 @@ def _path_is_within(path, root):
 
 
 def _watch_file_signature(path):
-    stat_result = os.stat(path)
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
     return stat_result.st_size, stat_result.st_mtime_ns
 
 
@@ -1323,14 +1369,19 @@ def _iter_watch_video_files():
 
 def _claim_watch_file_if_stable(path):
     """Claim a watched file once it has stopped changing for the quiet period."""
-    now = time.time()
     signature = _watch_file_signature(path)
+    if signature is None:
+        with _watch_state_lock:
+            _watch_candidates.pop(path, None)
+            _watch_failed_signatures.pop(path, None)
+        return False
     with _watch_state_lock:
         if path in _watch_claimed_paths:
             return False
         if _watch_failed_signatures.get(path) == signature:
             return False
 
+        now = time.time()
         entry = _watch_candidates.get(path)
         if not entry or entry["signature"] != signature:
             _watch_candidates[path] = {
@@ -1470,9 +1521,6 @@ def upload_finalize():
             logger.warning("Job rejected due to disk space: %s", msg)
             return jsonify({"error": msg}), 507
 
-        removed = _remove_pending_upload(upload_id)
-        if removed is None:
-            return jsonify({"error": "Unknown upload_id"}), 404
         job_id, actual_size = _queue_local_file(
             file_path,
             filename=filename,
@@ -1485,6 +1533,13 @@ def upload_finalize():
             episode_number=episode_number,
             part_number=part_number,
         )
+        removed = _remove_pending_upload(upload_id)
+        if removed is None:
+            logger.warning(
+                "Upload %s queued as job %s, but pending metadata was already removed",
+                upload_id,
+                job_id,
+            )
 
     logger.info("Upload finalized: %s -> job %s (%d bytes)", upload_id, job_id, actual_size)
     return jsonify({"job_id": job_id, "status": "queued"})
@@ -2040,16 +2095,10 @@ def _cache_segment_from_file(cache_key, temp_path):
 
 async def _get_or_create_aiohttp_session():
     """Get a shared aiohttp session, creating it once under an async lock."""
-    global _aiohttp_session, _aiohttp_session_lock
-
-    if _aiohttp_session_lock is None:
-        _aiohttp_session_lock = asyncio.Lock()
-
-    async with _aiohttp_session_lock:
-        if _aiohttp_session is None or _aiohttp_session.closed:
-            logger.warning("aiohttp session closed, recreating")
-            _aiohttp_session = aiohttp.ClientSession()
-        return _aiohttp_session
+    if _aiohttp_session is None or _aiohttp_session.closed:
+        logger.warning("aiohttp session closed, recreating")
+        await asyncio.to_thread(_ensure_aiohttp_session)
+    return _aiohttp_session
 
 
 async def _download_segment_to_state(file_id, bot_index, cache_key, state):
