@@ -4,14 +4,18 @@ let _settingsData = null;
 
 function loadSettings() {
     fetch('/api/settings')
-        .then(r => r.json())
+        .then(async r => {
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            return data;
+        })
         .then(data => {
             _settingsData = data;
             renderAllSettings(data);
         })
-        .catch(() => {
+        .catch((err) => {
             document.getElementById('settingsContainer').innerHTML =
-                '<div class="page-card"><p style="color:var(--danger)">Failed to load settings.</p></div>';
+                `<div class="page-card"><p style="color:var(--danger)">Failed to load settings: ${escHtml(err.message || 'Unknown error')}.</p></div>`;
         });
 }
 
@@ -409,6 +413,44 @@ function saveWatchSettings() {
         if (!r.ok) throw new Error(d.error || 'Could not save.');
         applyWatchSettings(d);
     }).catch(e=>setWatchSettingsStatus(e.message,'error')).finally(()=>{ btn.disabled=false; });
+}
+
+// ─── Database Load ─────────────────────────────────────────────────────────────
+
+function loadDatabaseFromFile() {
+    const fileInput = document.getElementById('databaseFileInput');
+    const statusEl = document.getElementById('databaseLoadStatus');
+    const btn = document.getElementById('databaseLoadBtn');
+    const file = fileInput?.files?.[0];
+
+    if (!file) {
+        statusEl.textContent = 'Choose a database file first.';
+        statusEl.className = 'settings-status error';
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('database', file);
+    btn.disabled = true;
+    statusEl.textContent = 'Loading database…';
+    statusEl.className = 'settings-status';
+
+    fetch('/api/database/load', {
+        method: 'POST',
+        body: formData,
+    }).then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'Failed to load database');
+        statusEl.textContent = `Loaded. Backup saved at ${data.backup_path || 'server backup path unavailable'}.`;
+        statusEl.className = 'settings-status ok';
+        loadSettings();
+        loadBots();
+    }).catch((err) => {
+        statusEl.textContent = err.message || 'Failed to load database';
+        statusEl.className = 'settings-status error';
+    }).finally(() => {
+        btn.disabled = false;
+    });
 }
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────

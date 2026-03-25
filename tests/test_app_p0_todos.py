@@ -5,6 +5,7 @@ import threading
 import time
 import types
 import unittest
+import io
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch, ANY
 
 # Provide a lightweight telegram stub so importing app works in test envs.
@@ -265,7 +266,38 @@ class TestP0TodoFixes(unittest.TestCase):
                  patch.object(app_module._telegram_uploader, "probe_health", new=AsyncMock(return_value=bot_results)):
                 response = self.client.get("/health")
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(database.open_connection_count(), 0)
+        self.assertEqual(database.open_connection_count(), 0)
+
+    def test_database_load_requires_file(self):
+        response = self.client.post("/api/database/load", data={})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Attach a SQLite database file", response.get_json()["error"])
+
+    def test_database_load_rejects_unknown_extension(self):
+        response = self.client.post(
+            "/api/database/load",
+            data={"database": (io.BytesIO(b"SQLite format 3\x00demo"), "not_allowed.txt")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported file extension", response.get_json()["error"])
+
+    def test_database_load_success_reloads_config_and_bots(self):
+        with patch.object(app_module.db, "replace_database_file", return_value={"backup_path": "/tmp/backup.db", "schema_revision": 7}) as replace_mock, \
+             patch.object(app_module.Config, "reload") as reload_mock, \
+             patch.object(app_module._telegram_uploader, "reload_bots") as reload_bots_mock:
+            response = self.client.post(
+                "/api/database/load",
+                data={"database": (io.BytesIO(b"SQLite format 3\x00demo"), "restore.db")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["schema_revision"], 7)
+        replace_mock.assert_called_once()
+        reload_mock.assert_called_once()
+        reload_bots_mock.assert_called_once()
 
     # ─── /api/upload/init ───
 

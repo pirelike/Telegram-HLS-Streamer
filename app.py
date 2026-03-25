@@ -934,6 +934,43 @@ def api_settings_reset():
     return jsonify({"message": "Setting reset to default.", "settings": Config.to_dict()})
 
 
+@app.route("/api/database/load", methods=["POST"])
+def api_database_load():
+    """Replace streamer.db from an uploaded SQLite database file."""
+    uploaded = request.files.get("database")
+    if uploaded is None or not uploaded.filename:
+        return jsonify({"error": "Attach a SQLite database file in the 'database' field."}), 400
+
+    filename = secure_filename(uploaded.filename)
+    if not filename.lower().endswith((".db", ".sqlite", ".sqlite3")):
+        return jsonify({"error": "Unsupported file extension. Use .db, .sqlite, or .sqlite3"}), 400
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as handle:
+            uploaded.save(handle)
+            temp_path = handle.name
+
+        result = db.replace_database_file(temp_path)
+        temp_path = None
+        Config.reload()
+        _telegram_uploader.reload_bots()
+        return jsonify({
+            "message": "Database loaded successfully.",
+            "backup_path": result.get("backup_path"),
+            "schema_revision": result.get("schema_revision"),
+        })
+    except (ValueError, FileNotFoundError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to load database from UI upload: %s", exc)
+        return jsonify({"error": "Failed to load database file."}), 500
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
+
+
 # ─── Bot Management API ──────────────────────────────────────────────────────
 
 @app.route("/api/bots")
