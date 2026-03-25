@@ -6,15 +6,15 @@ Policy: application-level authentication is intentionally out of scope and shoul
 ## P0 — Critical Bugs
 
 - [x] `video_processor.py`: copy mode + ABR interaction fixed — when `ENABLE_COPY_MODE=true`, ABR tiers are now filtered to strictly lower resolutions than the source (same-resolution tiers are excluded since tier 0 already covers it via passthrough).
-- [ ] `hls_manager.py`: segment_key values are embedded in M3U8 playlist lines without escaping — a key containing `\n` or `#` corrupts the playlist and breaks playback for the affected job.
+- [x] `hls_manager.py`: segment_key values are embedded in M3U8 playlist lines without escaping — a key containing `\n` or `#` corrupts the playlist and breaks playback for the affected job.
   - Plan: add a dedicated segment-path sanitizer (e.g., `_sanitize_segment_uri_path`) that strips CR/LF, rejects leading `#`, and percent-encodes unsafe URI characters before writing playlist lines.
   - Plan: use the sanitizer in both `generate_media_playlist()` and `_generate_subtitle_playlist()` when appending `/segment/{job_id}/{segment_key}` URIs.
   - Plan: add regression tests in `tests/test_database_hls_manager.py` covering malicious keys (`\n`, `\r`, `#`, spaces, `?`) and asserting one URI per `#EXTINF` entry with no injected tags.
-- [ ] `hls_manager.py`: subtitle playlists emit `#EXTINF:0.000,` when job duration is NULL or 0, which is invalid per the HLS spec and causes players to reject or skip the subtitle track.
+- [x] `hls_manager.py`: subtitle playlists emit `#EXTINF:0.000,` when job duration is NULL or 0, which is invalid per the HLS spec and causes players to reject or skip the subtitle track.
   - Plan: compute `subtitle_duration = max(job["duration"] or 0, Config.HLS_SEGMENT_DURATION, 0.001)` and use it for both `#EXTINF` and target-duration derivation.
   - Plan: keep subtitle target duration compliant via `math.ceil(subtitle_duration)` (minimum 1), avoiding `#EXT-X-TARGETDURATION:0`.
   - Plan: add tests for `duration=None`, `duration=0`, and positive duration to confirm non-zero `#EXTINF` output and stable playback metadata.
-- [ ] `hls_manager.py`: `BANDWIDTH` attribute in the master playlist is set to `file_size * 8` (un-divided) when duration is 0 or NULL, producing an astronomically large value that causes player quality-selection failures.
+- [x] `hls_manager.py`: `BANDWIDTH` attribute in the master playlist is set to `file_size * 8` (un-divided) when duration is 0 or NULL, producing an astronomically large value that causes player quality-selection failures.
   - Plan: centralize fallback bitrate logic in a helper that never divides by 0 and never returns raw `file_size * 8` as a final BANDWIDTH value.
   - Plan: when duration is missing/zero, estimate bitrate from configured segment duration (or clamp to a sane floor/ceiling) so values stay realistic for ABR selection.
   - Plan: add tests for zero/NULL duration in both video-track and legacy single-stream master playlist paths, asserting BANDWIDTH remains within expected range and is always positive.
