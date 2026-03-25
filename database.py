@@ -11,6 +11,7 @@ Schema:
 """
 
 import atexit
+import datetime
 import logging
 import os
 import sqlite3
@@ -403,6 +404,34 @@ def init_db():
             current_revision = revision
 
     logger.info("Database initialized at %s (schema revision %d)", DB_PATH, current_revision)
+
+
+def replace_database_file(source_path: str) -> dict:
+    """Replace the active SQLite file with a user-provided database file.
+
+    Returns metadata containing backup path and resulting schema revision.
+    """
+    if not source_path or not os.path.isfile(source_path):
+        raise FileNotFoundError("Database file was not found")
+
+    with open(source_path, "rb") as handle:
+        header = handle.read(16)
+    if not header.startswith(b"SQLite format 3"):
+        raise ValueError("Invalid SQLite file format")
+
+    _close_all_connections()
+    _local.conn = None
+
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    backup_path = f"{DB_PATH}.backup_{timestamp}"
+    if os.path.exists(DB_PATH):
+        os.replace(DB_PATH, backup_path)
+
+    os.replace(source_path, DB_PATH)
+    init_db()
+    conn = _get_conn()
+    revision = _get_recorded_schema_revision(conn)
+    return {"backup_path": backup_path, "schema_revision": revision}
 
 
 # ─── Jobs ───
