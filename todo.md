@@ -18,8 +18,8 @@ Policy: application-level authentication is intentionally out of scope and shoul
   - Plan: centralize fallback bitrate logic in a helper that never divides by 0 and never returns raw `file_size * 8` as a final BANDWIDTH value.
   - Plan: when duration is missing/zero, estimate bitrate from configured segment duration (or clamp to a sane floor/ceiling) so values stay realistic for ABR selection.
   - Plan: add tests for zero/NULL duration in both video-track and legacy single-stream master playlist paths, asserting BANDWIDTH remains within expected range and is always positive.
-- [ ] `app.py`: the global `_aiohttp_session` is recreated without a lock — multiple concurrent coroutines can each create a new `ClientSession`, leaking the earlier sessions as open sockets until the OS reclaims them, eventually exhausting the connection pool.
-- [ ] `app.py`: temp files created by `tempfile.mkstemp()` inside the segment download path are not reliably cleaned up when the download task is cancelled or times out, leading to gradual disk exhaustion.
+- [x] `app.py`: the global `_aiohttp_session` is recreated without a lock — multiple concurrent coroutines can each create a new `ClientSession`, leaking the earlier sessions as open sockets until the OS reclaims them, eventually exhausting the connection pool.
+- [x] `app.py`: temp files created by `tempfile.mkstemp()` inside the segment download path are not reliably cleaned up when the download task is cancelled or times out, leading to gradual disk exhaustion.
 - [ ] `stream_analyzer.py`: `stream["index"]` uses bare dict access; if ffprobe omits the `index` field for any stream object (seen with some containers), an unhandled `KeyError` crashes the analysis stage and permanently fails the job.
 
 ## P1 — Performance (High Impact)
