@@ -329,6 +329,7 @@ def _load_persisted_watch_settings():
 _async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
 _async_loop_thread = None
 _aiohttp_session = None
+_aiohttp_session_lock = None
 _loop_ready = threading.Event()
 _segment_downloads = {}
 _segment_download_lock = Lock()
@@ -403,10 +404,11 @@ def _run_async(coro, timeout=30):
 
 
 def _start_persistent_loop():
-    global _async_loop_thread, _aiohttp_session
+    global _async_loop_thread, _aiohttp_session, _aiohttp_session_lock
 
     async def _init():
-        global _aiohttp_session
+        global _aiohttp_session, _aiohttp_session_lock
+        _aiohttp_session_lock = asyncio.Lock()
         _aiohttp_session = aiohttp.ClientSession()
 
     def run_loop():
@@ -422,8 +424,15 @@ def _start_persistent_loop():
 
 def _shutdown_persistent_loop():
     async def _close():
-        if _aiohttp_session and not _aiohttp_session.closed:
-            await _aiohttp_session.close()
+        if _aiohttp_session_lock is None:
+            if _aiohttp_session and not _aiohttp_session.closed:
+                await _aiohttp_session.close()
+            return
+
+        async with _aiohttp_session_lock:
+            if _aiohttp_session and not _aiohttp_session.closed:
+                await _aiohttp_session.close()
+
     try:
         asyncio.run_coroutine_threadsafe(_close(), _async_loop).result(timeout=5)
     except Exception:
@@ -2006,13 +2015,23 @@ def _cache_segment_from_file(cache_key, temp_path):
     return True
 
 
+async def _get_or_create_aiohttp_session():
+    """Get a shared aiohttp session, creating it once under an async lock."""
+    global _aiohttp_session, _aiohttp_session_lock
+
+    if _aiohttp_session_lock is None:
+        _aiohttp_session_lock = asyncio.Lock()
+
+    async with _aiohttp_session_lock:
+        if _aiohttp_session is None or _aiohttp_session.closed:
+            logger.warning("aiohttp session closed, recreating")
+            _aiohttp_session = aiohttp.ClientSession()
+        return _aiohttp_session
+
+
 async def _download_segment_to_state(file_id, bot_index, cache_key, state):
     """Download a segment from Telegram to temp storage and optionally stream chunks."""
-    global _aiohttp_session
-
-    if _aiohttp_session is None or _aiohttp_session.closed:
-        logger.warning("aiohttp session closed, recreating")
-        _aiohttp_session = aiohttp.ClientSession()
+    session = await _get_or_create_aiohttp_session()
 
     url = await _telegram_uploader.get_file_url(file_id, bot_index)
     temp_fd, temp_path = tempfile.mkstemp(prefix="segment-", suffix=".tmp")
@@ -2021,7 +2040,7 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
     wrote_any = False
 
     try:
-        async with _aiohttp_session.get(url) as resp:
+        async with session.get(url) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"Telegram HTTP {resp.status}")
 
@@ -2047,6 +2066,16 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
             raise RuntimeError(f"Empty Telegram response for {cache_key}")
 
         state.cached = await asyncio.to_thread(_cache_segment_from_file, cache_key, temp_path)
+    except asyncio.CancelledError as exc:
+        state.error = exc
+        if state.stream_queue is not None:
+            await asyncio.to_thread(
+                _enqueue_stream_item,
+                state.stream_queue,
+                state.stream_abandoned,
+                _SegmentStreamError(exc),
+            )
+        raise
     except Exception as exc:
         state.error = exc
         if state.stream_queue is not None:
@@ -2057,6 +2086,16 @@ async def _download_segment_to_state(file_id, bot_index, cache_key, state):
                 _SegmentStreamError(exc),
             )
     finally:
+        if state.error is not None and state.temp_path:
+            try:
+                os.unlink(state.temp_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.debug("Failed to remove temp segment file %s: %s", state.temp_path, exc)
+            finally:
+                state.temp_path = None
+
         if state.stream_queue is not None and state.error is None:
             await asyncio.to_thread(
                 _enqueue_stream_item,
