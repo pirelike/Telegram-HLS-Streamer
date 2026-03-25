@@ -31,22 +31,33 @@ _all_connections_lock = threading.Lock()
 
 
 def _get_conn() -> sqlite3.Connection:
-    if not hasattr(_local, "conn") or _local.conn is None:
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-        except Exception:
+    for attempt in range(2):
+        if not hasattr(_local, "conn") or _local.conn is None:
+            conn = sqlite3.connect(DB_PATH)
             try:
-                conn.close()
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
             except Exception:
-                pass
-            raise
-        _local.conn = conn
-        with _all_connections_lock:
-            _all_connections.append(_local.conn)
-    return _local.conn
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise
+            _local.conn = conn
+            with _all_connections_lock:
+                _all_connections.append(_local.conn)
+            return _local.conn
+
+        try:
+            _local.conn.execute("SELECT 1")
+            return _local.conn
+        except sqlite3.OperationalError:
+            _reset_conn()
+            if attempt == 1:
+                raise
+
+    raise RuntimeError("Failed to initialize SQLite connection")
 
 
 def _reset_conn():

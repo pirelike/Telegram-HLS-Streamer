@@ -61,6 +61,16 @@ class TestDatabaseBase(unittest.TestCase):
 
 
 class TestDatabaseConnections(TestDatabaseBase):
+    class _BrokenConn:
+        def __init__(self):
+            self.closed = False
+
+        def execute(self, _query):
+            raise sqlite3.OperationalError("stale connection")
+
+        def close(self):
+            self.closed = True
+
     def test_get_conn_reuses_thread_connection(self):
         c1 = database._get_conn()
         c2 = database._get_conn()
@@ -100,6 +110,25 @@ class TestDatabaseConnections(TestDatabaseBase):
 
         database._get_conn()
         self.assertEqual(database.open_connection_count(), 1)
+
+    def test_get_conn_recovers_from_stale_thread_local_connection(self):
+        database.close_conn()
+        broken = self._BrokenConn()
+        database._local.conn = broken
+
+        conn = database._get_conn()
+
+        self.assertTrue(broken.closed)
+        self.assertIsInstance(conn, sqlite3.Connection)
+        self.assertIsNot(conn, broken)
+
+    def test_get_conn_retries_once_then_reraises_operational_error(self):
+        database.close_conn()
+        database._local.conn = self._BrokenConn()
+
+        with patch.object(database.sqlite3, "connect", side_effect=sqlite3.OperationalError("db unavailable")):
+            with self.assertRaises(sqlite3.OperationalError):
+                database._get_conn()
 
 
 class TestDatabaseMigrations(TestDatabaseBase):
