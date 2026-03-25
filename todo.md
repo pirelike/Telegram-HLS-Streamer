@@ -78,11 +78,11 @@ Policy: application-level authentication is intentionally out of scope and shoul
 ## P6 — New Features
 
 - [x] Thumbnail generation: FFmpeg extraction, Telegram upload, DB persistence (`has_thumbnail`), and proxy endpoint (`/thumbnail/<job_id>`) are all implemented.
-- [ ] Thumbnail UI polish: dedicated per-series/per-episode thumbnail display and fallback placeholder in the job browser could be improved.
-- [ ] Job re-processing: there is still no way to regenerate a completed job with new tiers/settings without re-uploading the source.
-- [ ] Webhook notifications: there is still no completion callback for external automation.
-- [ ] Configurable per-job ABR tiers: ABR settings are still global config only.
-- [ ] Download original: the system still cannot reconstruct and serve the original uploaded file from Telegram-backed artifacts.
+- [ ] `templates/watch.html` + `static/watch.js` + `static/app.css`: thumbnail UI polish — thumbnail is not displayed on the watch/detail page (`/watch/<job_id>`); the `has_thumbnail` flag and `/thumbnail/<job_id>` proxy exist but are only used in the job browser (`static/browse.js:221`). Setting `<video poster>` and showing the image in `renderInfoPanel()` would close this gap.
+- [ ] `app.py:678–711` + `video_processor.py:750`: job re-processing — no `POST /api/jobs/<job_id>/reprocess` endpoint exists; source file is deleted after success (`app.py:1530–1534`) so re-processing requires either source retention or re-encoding from existing Telegram-backed TS segments (lossy). Blocked on a design decision about source retention.
+- [ ] `app.py` + `config.py`: webhook notifications — no `WEBHOOK_URL` / `WEBHOOK_SECRET` config and no HTTP POST on job completion; clients must poll `/api/jobs/<job_id>`. Job completion is only tracked in the in-memory `_active_jobs` dict and the DB. Adding a fire-and-forget POST (non-fatal, one retry) after `save_job()` in `_process_job()` would implement this.
+- [ ] `video_processor.py:160–182` + `app.py:1417–1485`: configurable per-job ABR tiers — `_get_abr_tiers()` reads only from `Config.ABR_TIERS`; `process()` has no tiers parameter; `POST /api/upload/finalize` accepts metadata but not tier overrides. Threading an optional `abr_tiers` param through `_queue_local_file()` → `_enqueue_job()` → `_process_job()` → `process()` would implement this without DB schema changes.
+- [ ] `app.py` + `database.py:529–553`: download original — source file is deleted after processing; segments are HLS-encoded TS, not the original upload. `db.get_segments_for_prefix(job_id, "video_0")` can enumerate all `video_0/*.ts` segments in order; a `GET /download/<job_id>` endpoint streaming their concatenation as `video/mp2t` is feasible, though the result is not the original format.
 
 ## P7 — Code Quality
 
