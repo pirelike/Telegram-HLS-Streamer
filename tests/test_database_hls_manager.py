@@ -484,6 +484,23 @@ class TestHLSHelpers(unittest.TestCase):
     def test_parse_bitrate_invalid(self):
         self.assertEqual(hls_manager._parse_bitrate("abc"), 0)
 
+    def test_sanitize_segment_uri_path_encodes_unsafe_characters(self):
+        value = hls_manager._sanitize_segment_uri_path("video 1/seg?x#y.ts")
+        self.assertEqual(value, "video%201/seg%3Fx%23y.ts")
+
+    def test_sanitize_segment_uri_path_rejects_leading_hash(self):
+        self.assertIsNone(hls_manager._sanitize_segment_uri_path("#bad.ts"))
+
+    def test_compute_subtitle_duration_has_floor(self):
+        self.assertEqual(hls_manager._compute_subtitle_duration(None), 4)
+        self.assertEqual(hls_manager._compute_subtitle_duration(0), 4)
+        self.assertEqual(hls_manager._compute_subtitle_duration(12.5), 12.5)
+
+    def test_compute_bandwidth_uses_fallback_for_missing_duration(self):
+        bw = hls_manager._compute_bandwidth(10_000_000, 0)
+        self.assertGreater(bw, 0)
+        self.assertLess(bw, 50_000_001)
+
 
 class TestHLSManagerWithDB(TestDatabaseBase):
     def test_register_and_get_job(self):
@@ -662,6 +679,95 @@ class TestHLSManagerWithDB(TestDatabaseBase):
 
         playlist = hls_manager.generate_media_playlist("job5b", "video", 0)
         self.assertIn("/segment/job5b/video_0/video_0001.ts", playlist)
+
+    def test_generate_media_playlist_sanitizes_segment_keys(self):
+        analysis, processing, upload = self._sample_payload("job_key_sanitize")
+        upload.segments = {
+            "video/bad\n#EXT-X-INJECTED.ts": SimpleNamespace(file_id="f1", bot_index=0, file_size=100),
+            "video/seg\rb.ts": SimpleNamespace(file_id="f2", bot_index=0, file_size=100),
+            "video/seg with space.ts": SimpleNamespace(file_id="f3", bot_index=0, file_size=100),
+            "video/seg?query.ts": SimpleNamespace(file_id="f4", bot_index=0, file_size=100),
+            "video/#leading_hash.ts": SimpleNamespace(file_id="f5", bot_index=0, file_size=100),
+        }
+        hls_manager.register_job("job_key_sanitize", analysis, processing, upload)
+
+        playlist = hls_manager.generate_media_playlist("job_key_sanitize", "video")
+        self.assertIsNotNone(playlist)
+        self.assertNotIn("#EXT-X-INJECTED", playlist)
+        self.assertIn("/segment/job_key_sanitize/video/bad%23EXT-X-INJECTED.ts", playlist)
+        self.assertIn("/segment/job_key_sanitize/video/segb.ts", playlist)
+        self.assertIn("/segment/job_key_sanitize/video/seg%20with%20space.ts", playlist)
+        self.assertIn("/segment/job_key_sanitize/video/seg%3Fquery.ts", playlist)
+        self.assertNotIn("/segment/job_key_sanitize/video/%23leading_hash.ts", playlist)
+
+        extinf_count = playlist.count("#EXTINF:")
+        uri_count = sum(1 for line in playlist.splitlines() if line.startswith("/segment/job_key_sanitize/"))
+        self.assertEqual(extinf_count, uri_count)
+
+    def test_generate_subtitle_playlist_duration_floor_when_null_or_zero(self):
+        analysis, processing, upload = self._sample_payload("job_sub_floor")
+        analysis.duration = None
+        hls_manager.register_job("job_sub_floor", analysis, processing, upload)
+        job = database.get_job("job_sub_floor")
+
+        playlist = hls_manager._generate_subtitle_playlist("job_sub_floor", job, 0)
+        self.assertIn("#EXTINF:4.000,", playlist)
+        self.assertIn("#EXT-X-TARGETDURATION:4", playlist)
+
+        analysis2, processing2, upload2 = self._sample_payload("job_sub_zero")
+        analysis2.duration = 0
+        hls_manager.register_job("job_sub_zero", analysis2, processing2, upload2)
+        job2 = database.get_job("job_sub_zero")
+        playlist2 = hls_manager._generate_subtitle_playlist("job_sub_zero", job2, 0)
+        self.assertIn("#EXTINF:4.000,", playlist2)
+        self.assertIn("#EXT-X-TARGETDURATION:4", playlist2)
+
+    def test_generate_subtitle_playlist_uses_positive_job_duration(self):
+        analysis, processing, upload = self._sample_payload("job_sub_positive")
+        analysis.duration = 9.25
+        hls_manager.register_job("job_sub_positive", analysis, processing, upload)
+        job = database.get_job("job_sub_positive")
+
+        playlist = hls_manager._generate_subtitle_playlist("job_sub_positive", job, 0)
+        self.assertIn("#EXTINF:9.250,", playlist)
+        self.assertIn("#EXT-X-TARGETDURATION:10", playlist)
+
+    def test_generate_master_playlist_bandwidth_fallback_when_duration_missing(self):
+        analysis, processing, upload = self._sample_payload("job_bw_zero")
+        analysis.duration = 0
+        processing.video_playlists = [("v.m3u8", "/tmp/v", 1280, 720, "")]
+        analysis.file_size = 8_000_000
+        hls_manager.register_job("job_bw_zero", analysis, processing, upload)
+
+        playlist = hls_manager.generate_master_playlist("job_bw_zero", "https://cdn.example")
+        line = next(line for line in playlist.splitlines() if line.startswith("#EXT-X-STREAM-INF:"))
+        bandwidth = int(line.split("BANDWIDTH=")[1].split(",")[0])
+        self.assertGreater(bandwidth, 0)
+        self.assertLess(bandwidth, 50_000_001)
+        self.assertNotEqual(bandwidth, analysis.file_size * 8)
+
+    def test_generate_master_playlist_legacy_bandwidth_fallback_when_duration_missing(self):
+        analysis = SimpleNamespace(
+            file_path="/tmp/legacy_zero.mp4",
+            duration=0,
+            file_size=6_000_000,
+            has_video=True,
+            video_streams=[SimpleNamespace(codec_name="h264", width=640, height=480, index=0)],
+            audio_streams=[],
+            subtitle_streams=[],
+        )
+        processing = SimpleNamespace(video_playlists=[], audio_playlists=[], subtitle_files=[], segment_durations={})
+        upload = SimpleNamespace(segments={
+            "video/video_0001.ts": SimpleNamespace(file_id="fL", bot_index=0, file_size=10)
+        })
+        hls_manager.register_job("legacy_bw_zero", analysis, processing, upload)
+
+        playlist = hls_manager.generate_master_playlist("legacy_bw_zero", "https://cdn.example")
+        line = next(line for line in playlist.splitlines() if line.startswith("#EXT-X-STREAM-INF:"))
+        bandwidth = int(line.split("BANDWIDTH=")[1].split(",")[0])
+        self.assertGreater(bandwidth, 0)
+        self.assertLess(bandwidth, 50_000_001)
+        self.assertNotEqual(bandwidth, analysis.file_size * 8)
 
     def test_master_playlist_sanitizes_malicious_metadata(self):
         analysis, processing, upload = self._sample_payload("job_malicious")
