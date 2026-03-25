@@ -20,7 +20,8 @@ Policy: application-level authentication is intentionally out of scope and shoul
   - Plan: add tests for zero/NULL duration in both video-track and legacy single-stream master playlist paths, asserting BANDWIDTH remains within expected range and is always positive.
 - [x] `app.py`: the global `_aiohttp_session` is recreated without a lock — multiple concurrent coroutines can each create a new `ClientSession`, leaking the earlier sessions as open sockets until the OS reclaims them, eventually exhausting the connection pool.
 - [x] `app.py`: temp files created by `tempfile.mkstemp()` inside the segment download path are not reliably cleaned up when the download task is cancelled or times out, leading to gradual disk exhaustion.
-- [ ] `stream_analyzer.py`: `stream["index"]` uses bare dict access; if ffprobe omits the `index` field for any stream object (seen with some containers), an unhandled `KeyError` crashes the analysis stage and permanently fails the job.
+- [x] `stream_analyzer.py`: `stream["index"]` uses bare dict access; if ffprobe omits the `index` field for any stream object (seen with some containers), an unhandled `KeyError` crashes the analysis stage and permanently fails the job.
+  - Fixed: stream parsing now uses `stream.get("index")` with an enumerated fallback index, preventing `KeyError` and keeping analysis resilient across malformed/partial ffprobe stream objects.
 
 ## P1 — Performance (High Impact)
 
