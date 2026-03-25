@@ -5,6 +5,27 @@
 {% block body %}
 <main class="main sidebar-collapsed">
 
+    <!-- Database Load -->
+    <div class="page-card" id="databaseImportCard">
+        <div class="page-card-header">
+            <span class="page-card-title">Database Import</span>
+        </div>
+        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:1.5rem;">
+            Restore an existing <code>streamer.db</code> backup from your computer. The current server database is backed up before replacement.
+        </p>
+        <div class="settings-grid">
+            <div class="form-group">
+                <label class="form-label" for="databaseFileInput">SQLite database file</label>
+                <input class="form-input" type="file" id="databaseFileInput" accept=".db,.sqlite,.sqlite3,application/x-sqlite3,application/vnd.sqlite3">
+                <div class="field-description">Accepted extensions: .db, .sqlite, .sqlite3</div>
+            </div>
+        </div>
+        <div class="settings-actions">
+            <button class="settings-btn" id="databaseLoadBtn" onclick="loadDatabaseFromFile()">Load database</button>
+            <span class="settings-status" id="databaseLoadStatus"></span>
+        </div>
+    </div>
+
     <!-- Dynamic settings cards populated by JS from GET /api/settings -->
     <div id="settingsContainer"></div>
 
