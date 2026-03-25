@@ -1810,8 +1810,8 @@ class TestSettingsAPI(unittest.TestCase):
         self.assertIn("HOST", server_keys)
         self.assertIn("PORT", server_keys)
 
-    def test_settings_post_valid_saves_and_reloads(self):
-        with patch.object(app_module.Config, "reload"):
+    def test_settings_post_valid_saves_and_applies_runtime_changes(self):
+        with patch.object(app_module._telegram_uploader, "reload_bots") as reload_bots:
             resp = self.client.post(
                 "/api/settings",
                 json={"settings": {"HLS_SEGMENT_DURATION": "8"}},
@@ -1819,6 +1819,19 @@ class TestSettingsAPI(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertIn("message", data)
+        self.assertEqual(app_module.Config.HLS_SEGMENT_DURATION, 8)
+        reload_bots.assert_not_called()
+
+
+    def test_settings_post_unchanged_value_skips_db_write(self):
+        original = app_module.Config.HLS_SEGMENT_DURATION
+        with patch("app.db.set_settings") as set_settings:
+            resp = self.client.post(
+                "/api/settings",
+                json={"settings": {"HLS_SEGMENT_DURATION": original}},
+            )
+        self.assertEqual(resp.status_code, 200)
+        set_settings.assert_not_called()
 
     def test_settings_post_unknown_key_returns_400(self):
         resp = self.client.post(

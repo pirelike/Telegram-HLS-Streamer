@@ -359,7 +359,7 @@ This endpoint proxies the segment from Telegram with the original bot. Cache hit
 Returns all configurable settings with current values, defaults, and descriptions organized by category.
 
 #### `POST /api/settings`
-Saves one or more settings and applies them live without restart. Values are persisted to the `settings` table in SQLite.
+Saves one or more settings and applies them live without restart. The server diffs incoming keys against current runtime values, persists only changed keys to SQLite, and applies those changes in-place (avoiding a full `.env`/bot reload on routine settings edits).
 
 #### `POST /api/settings/reset`
 Resets a specific setting to its default by removing its DB override (reverts to `.env` value).
@@ -460,7 +460,7 @@ If running behind Nginx/Caddy/Traefik:
 
 ### Playback cache behavior
 
-The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. Sequential prefetch can warm upcoming segments into RAM for faster playback on the next requests. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
+The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. Sequential prefetch can warm upcoming segments into RAM for faster playback on the next requests. The cache eviction path now plans eviction candidates before the mutation pass to reduce lock hold time when evictions are frequent. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
 
 If you run multiple workers or multiple app instances, they will not share cached segments. Playback will still work, but hot segments may be re-downloaded from Telegram by each worker or node.
 
