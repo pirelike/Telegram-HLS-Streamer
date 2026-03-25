@@ -67,7 +67,7 @@ The database (`streamer.db`) is the source of truth for playback.
 - `schema_migrations`: ordered schema revision history applied on startup.
 
 If `segments` data is lost, the server cannot resolve files back from Telegram for streaming.
-On startup, the app upgrades older schemas in place (currently 6 revisions) and refuses to run against a newer unknown schema revision.
+On startup, the app upgrades older schemas in place (currently 7 revisions) and refuses to run against a newer unknown schema revision.
 
 ---
 

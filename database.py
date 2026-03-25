@@ -21,7 +21,7 @@ from typing import Set
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "streamer.db")
-LATEST_SCHEMA_REVISION = 6
+LATEST_SCHEMA_REVISION = 7
 
 # Thread-local connections for SQLite (which doesn't allow sharing across threads)
 _local = threading.local()
@@ -290,6 +290,13 @@ def _migration_006_create_settings_and_bots_tables(conn: sqlite3.Connection):
     """)
 
 
+def _migration_007_add_listing_performance_indexes(conn: sqlite3.Connection):
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_tracks_job_type ON tracks(job_id, track_type);
+        CREATE INDEX IF NOT EXISTS idx_jobs_series ON jobs(series_name);
+    """)
+
+
 MIGRATIONS = [
     (1, "create_base_schema", _migration_001_create_base_schema),
     (2, "add_track_dimensions_and_stream_index", _migration_002_add_track_dimensions_and_stream_index),
@@ -297,6 +304,7 @@ MIGRATIONS = [
     (4, "add_media_metadata", _migration_004_add_media_metadata),
     (5, "add_series_episode_metadata", _migration_005_add_series_episode_metadata),
     (6, "create_settings_and_bots_tables", _migration_006_create_settings_and_bots_tables),
+    (7, "add_listing_performance_indexes", _migration_007_add_listing_performance_indexes),
 ]
 
 
@@ -595,56 +603,144 @@ def list_jobs(limit=50, offset=0, search=None, category=None, group_by=None, ser
     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     
     if group_by == 'series':
-        # Group by series name, return a representative job_id for the thumbnail
-        # and total count of episodes in that series.
+        # Group by series name and select the latest job as representative.
         query = f"""
-            SELECT j.series_name, 
-                   COUNT(*) as episode_count,
-                   MAX(j.created_at) as last_updated,
-                   (SELECT j2.job_id FROM jobs j2 WHERE j2.series_name = j.series_name ORDER BY j2.created_at DESC LIMIT 1) as job_id,
-                   (SELECT j2.has_thumbnail FROM jobs j2 WHERE j2.series_name = j.series_name ORDER BY j2.created_at DESC LIMIT 1) as has_thumbnail,
-                   'Series' as media_type
-            FROM jobs j
-            {where_sql}
-            {"AND" if where_sql else "WHERE"} j.series_name IS NOT NULL AND j.series_name != ''
-            GROUP BY j.series_name
-            ORDER BY last_updated DESC
+            WITH filtered_jobs AS (
+                SELECT j.*
+                FROM jobs j
+                {where_sql}
+                {"AND" if where_sql else "WHERE"} j.series_name IS NOT NULL AND j.series_name != ''
+            ),
+            ranked_jobs AS (
+                SELECT
+                    fj.series_name,
+                    fj.job_id,
+                    fj.has_thumbnail,
+                    fj.created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY fj.series_name
+                        ORDER BY fj.created_at DESC
+                    ) AS row_num
+                FROM filtered_jobs fj
+            ),
+            grouped AS (
+                SELECT
+                    fj.series_name,
+                    COUNT(*) AS episode_count,
+                    MAX(fj.created_at) AS last_updated
+                FROM filtered_jobs fj
+                GROUP BY fj.series_name
+            )
+            SELECT
+                g.series_name,
+                g.episode_count,
+                g.last_updated,
+                rj.job_id,
+                rj.has_thumbnail,
+                'Series' AS media_type
+            FROM grouped g
+            JOIN ranked_jobs rj
+              ON rj.series_name = g.series_name
+             AND rj.row_num = 1
+            ORDER BY g.last_updated DESC
             LIMIT ? OFFSET ?
         """
     elif group_by == 'season':
         # Group by season for a specific series.
         query = f"""
-            SELECT j.series_name, j.season_number,
-                   COUNT(*) as episode_count,
-                   MAX(j.created_at) as last_updated,
-                   (SELECT j2.job_id FROM jobs j2 WHERE j2.series_name = j.series_name AND (j2.season_number = j.season_number OR (j2.season_number IS NULL AND j.season_number IS NULL)) ORDER BY j2.episode_number ASC LIMIT 1) as job_id,
-                   (SELECT j2.has_thumbnail FROM jobs j2 WHERE j2.series_name = j.series_name AND (j2.season_number = j.season_number OR (j2.season_number IS NULL AND j.season_number IS NULL)) ORDER BY j2.episode_number ASC LIMIT 1) as has_thumbnail,
-                   'Series' as media_type
-            FROM jobs j
-            {where_sql}
-            GROUP BY j.series_name, j.season_number
-            ORDER BY j.season_number ASC
+            WITH filtered_jobs AS (
+                SELECT j.*
+                FROM jobs j
+                {where_sql}
+            ),
+            ranked_jobs AS (
+                SELECT
+                    fj.series_name,
+                    fj.season_number,
+                    fj.job_id,
+                    fj.has_thumbnail,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY fj.series_name, fj.season_number
+                        ORDER BY fj.episode_number ASC
+                    ) AS row_num
+                FROM filtered_jobs fj
+            ),
+            grouped AS (
+                SELECT
+                    fj.series_name,
+                    fj.season_number,
+                    COUNT(*) AS episode_count,
+                    MAX(fj.created_at) AS last_updated
+                FROM filtered_jobs fj
+                GROUP BY fj.series_name, fj.season_number
+            )
+            SELECT
+                g.series_name,
+                g.season_number,
+                g.episode_count,
+                g.last_updated,
+                rj.job_id,
+                rj.has_thumbnail,
+                'Series' AS media_type
+            FROM grouped g
+            JOIN ranked_jobs rj
+              ON rj.series_name = g.series_name
+             AND (
+                    (rj.season_number = g.season_number)
+                    OR (rj.season_number IS NULL AND g.season_number IS NULL)
+                 )
+             AND rj.row_num = 1
+            ORDER BY g.season_number ASC
             LIMIT ? OFFSET ?
         """
     else:
         # Standard episode list.
         query = f"""
-            SELECT j.*,
-                   (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'audio') as audio_count,
-                   (SELECT COUNT(*) FROM tracks t WHERE t.job_id = j.job_id AND t.track_type = 'subtitle') as subtitle_count,
-                   (SELECT COUNT(*) FROM segments s WHERE s.job_id = j.job_id) as segment_count
-            FROM jobs j
-            {where_sql}
+            WITH filtered_jobs AS (
+                SELECT j.*
+                FROM jobs j
+                {where_sql}
+            ),
+            track_counts AS (
+                SELECT
+                    t.job_id,
+                    SUM(CASE WHEN t.track_type = 'audio' THEN 1 ELSE 0 END) AS audio_count,
+                    SUM(CASE WHEN t.track_type = 'subtitle' THEN 1 ELSE 0 END) AS subtitle_count
+                FROM tracks t
+                GROUP BY t.job_id
+            ),
+            segment_counts AS (
+                SELECT s.job_id, COUNT(*) AS segment_count
+                FROM segments s
+                GROUP BY s.job_id
+            ),
+            series_last_updated AS (
+                SELECT
+                    fj.series_name,
+                    MAX(fj.created_at) AS series_last_updated
+                FROM filtered_jobs fj
+                WHERE fj.series_name IS NOT NULL AND fj.series_name != ''
+                GROUP BY fj.series_name
+            )
+            SELECT
+                fj.*,
+                COALESCE(tc.audio_count, 0) AS audio_count,
+                COALESCE(tc.subtitle_count, 0) AS subtitle_count,
+                COALESCE(sc.segment_count, 0) AS segment_count
+            FROM filtered_jobs fj
+            LEFT JOIN track_counts tc ON tc.job_id = fj.job_id
+            LEFT JOIN segment_counts sc ON sc.job_id = fj.job_id
+            LEFT JOIN series_last_updated slu ON slu.series_name = fj.series_name
             ORDER BY 
-                CASE WHEN j.series_name IS NOT NULL AND j.series_name != ''
-                     THEN (SELECT MAX(created_at) FROM jobs j2 WHERE j2.series_name = j.series_name)
-                     ELSE j.created_at 
+                CASE WHEN fj.series_name IS NOT NULL AND fj.series_name != ''
+                     THEN slu.series_last_updated
+                     ELSE fj.created_at
                 END DESC,
-                j.series_name ASC,
-                j.season_number ASC,
-                j.episode_number ASC,
-                j.part_number ASC,
-                j.created_at DESC
+                fj.series_name ASC,
+                fj.season_number ASC,
+                fj.episode_number ASC,
+                fj.part_number ASC,
+                fj.created_at DESC
             LIMIT ? OFFSET ?
         """
         
@@ -685,7 +781,11 @@ def count_jobs(search=None, category=None, group_by=None, series_name=None, seas
     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     
     if group_by == 'series':
-        query = f"SELECT COUNT(DISTINCT series_name) AS cnt FROM jobs {where_sql} {"AND" if where_sql else "WHERE"} series_name IS NOT NULL AND series_name != ''"
+        series_filter_prefix = "AND" if where_sql else "WHERE"
+        query = (
+            f"SELECT COUNT(DISTINCT series_name) AS cnt FROM jobs {where_sql} "
+            f"{series_filter_prefix} series_name IS NOT NULL AND series_name != ''"
+        )
     elif group_by == 'season':
         query = f"SELECT COUNT(*) FROM (SELECT 1 FROM jobs {where_sql} GROUP BY series_name, season_number) as t"
     else:
