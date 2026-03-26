@@ -22,7 +22,8 @@ from typing import Set
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "streamer.db")
-LATEST_SCHEMA_REVISION = 7
+LATEST_SCHEMA_REVISION = 8
+VALID_MEDIA_TYPES = ("Film", "Series", "Anime Film", "Anime TV", "Anime")
 
 # Thread-local connections for SQLite (which doesn't allow sharing across threads)
 _local = threading.local()
@@ -207,6 +208,8 @@ def _bootstrap_legacy_schema_migrations(conn: sqlite3.Connection):
         3: "add_segment_duration",
         4: "add_media_metadata",
         5: "add_series_episode_metadata",
+        6: "create_settings_and_bots_tables",
+        7: "add_listing_performance_indexes",
     }
     for current_revision in range(1, revision + 1):
         _record_migration(conn, current_revision, names[current_revision])
@@ -309,6 +312,204 @@ def _migration_007_add_listing_performance_indexes(conn: sqlite3.Connection):
     """)
 
 
+def _migration_008_enforce_data_constraints(conn: sqlite3.Connection):
+    jobs_columns = _list_table_columns(conn, "jobs")
+    if "video_codec" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN video_codec TEXT")
+    if "duration" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN duration REAL DEFAULT 0")
+    if "file_size" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN file_size INTEGER DEFAULT 0")
+    if "video_width" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN video_width INTEGER DEFAULT 0")
+    if "video_height" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN video_height INTEGER DEFAULT 0")
+    if "status" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'complete'")
+    if "created_at" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN created_at TIMESTAMP")
+        conn.execute("UPDATE jobs SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+    if "media_type" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN media_type TEXT DEFAULT 'Film'")
+    if "series_name" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN series_name TEXT DEFAULT ''")
+    if "has_thumbnail" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN has_thumbnail INTEGER DEFAULT 0")
+    if "is_series" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN is_series INTEGER DEFAULT 0")
+    if "season_number" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN season_number INTEGER DEFAULT NULL")
+    if "episode_number" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN episode_number INTEGER DEFAULT NULL")
+    if "part_number" not in jobs_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN part_number INTEGER DEFAULT NULL")
+
+    valid_media = ", ".join(f"'{value}'" for value in VALID_MEDIA_TYPES)
+    conn.executescript(f"""
+        UPDATE jobs SET filename = COALESCE(filename, '');
+        UPDATE jobs SET video_codec = COALESCE(NULLIF(video_codec, ''), 'unknown');
+        UPDATE jobs SET media_type = CASE
+            WHEN media_type IN ({valid_media}) THEN media_type
+            ELSE 'Film'
+        END;
+        UPDATE jobs SET has_thumbnail = CASE WHEN has_thumbnail = 1 THEN 1 ELSE 0 END;
+        UPDATE jobs SET is_series = CASE WHEN is_series = 1 THEN 1 ELSE 0 END;
+        UPDATE jobs
+        SET season_number = NULL,
+            episode_number = NULL,
+            part_number = NULL
+        WHERE COALESCE(is_series, 0) != 1;
+
+        CREATE TABLE jobs_new (
+            job_id          TEXT PRIMARY KEY,
+            filename        TEXT NOT NULL,
+            duration        REAL DEFAULT 0,
+            file_size       INTEGER DEFAULT 0,
+            video_codec     TEXT NOT NULL DEFAULT 'unknown',
+            video_width     INTEGER DEFAULT 0,
+            video_height    INTEGER DEFAULT 0,
+            status          TEXT DEFAULT 'complete',
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            media_type      TEXT NOT NULL DEFAULT 'Film' CHECK(media_type IN ({valid_media})),
+            series_name     TEXT DEFAULT '',
+            has_thumbnail   INTEGER NOT NULL DEFAULT 0 CHECK(has_thumbnail IN (0, 1)),
+            is_series       INTEGER NOT NULL DEFAULT 0 CHECK(is_series IN (0, 1)),
+            season_number   INTEGER DEFAULT NULL,
+            episode_number  INTEGER DEFAULT NULL,
+            part_number     INTEGER DEFAULT NULL,
+            CHECK (
+                is_series = 1 OR (
+                    season_number IS NULL AND
+                    episode_number IS NULL AND
+                    part_number IS NULL
+                )
+            )
+        );
+        INSERT INTO jobs_new
+        SELECT
+            job_id,
+            filename,
+            duration,
+            file_size,
+            video_codec,
+            video_width,
+            video_height,
+            status,
+            created_at,
+            media_type,
+            series_name,
+            has_thumbnail,
+            is_series,
+            season_number,
+            episode_number,
+            part_number
+        FROM jobs;
+        DROP TABLE jobs;
+        ALTER TABLE jobs_new RENAME TO jobs;
+
+        UPDATE tracks SET codec = COALESCE(NULLIF(codec, ''), 'unknown');
+        UPDATE tracks SET bitrate = COALESCE(NULLIF(bitrate, ''), '0');
+        UPDATE tracks SET original_stream_index = CASE
+            WHEN original_stream_index IS NULL OR original_stream_index < -1 THEN -1
+            ELSE original_stream_index
+        END;
+        DELETE FROM tracks WHERE track_type NOT IN ('video', 'audio', 'subtitle');
+        CREATE TABLE tracks_new (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id                 TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+            track_type             TEXT NOT NULL CHECK(track_type IN ('video', 'audio', 'subtitle')),
+            track_index            INTEGER NOT NULL,
+            codec                  TEXT NOT NULL DEFAULT 'unknown',
+            language               TEXT DEFAULT 'und',
+            title                  TEXT DEFAULT '',
+            channels               INTEGER DEFAULT 2,
+            width                  INTEGER DEFAULT 0,
+            height                 INTEGER DEFAULT 0,
+            bitrate                TEXT NOT NULL DEFAULT '0',
+            original_stream_index  INTEGER NOT NULL DEFAULT -1 CHECK(original_stream_index >= -1),
+            UNIQUE(job_id, track_type, track_index)
+        );
+        INSERT INTO tracks_new
+        SELECT
+            id,
+            job_id,
+            track_type,
+            track_index,
+            codec,
+            language,
+            title,
+            channels,
+            width,
+            height,
+            bitrate,
+            original_stream_index
+        FROM tracks;
+        DROP TABLE tracks;
+        ALTER TABLE tracks_new RENAME TO tracks;
+
+        UPDATE segments
+        SET duration = NULL
+        WHERE duration IS NOT NULL AND duration <= 0;
+        DELETE FROM segments
+        WHERE segment_key NOT GLOB '*/*'
+           OR bot_index < 0;
+        CREATE TABLE segments_new (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id       TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+            segment_key  TEXT NOT NULL CHECK(segment_key GLOB '*/*'),
+            file_id      TEXT NOT NULL,
+            bot_index    INTEGER NOT NULL CHECK(bot_index >= 0),
+            file_size    INTEGER DEFAULT 0,
+            duration     REAL DEFAULT NULL,
+            UNIQUE(job_id, segment_key)
+        );
+        INSERT INTO segments_new
+        SELECT
+            id,
+            job_id,
+            segment_key,
+            file_id,
+            bot_index,
+            file_size,
+            duration
+        FROM segments;
+        DROP TABLE segments;
+        ALTER TABLE segments_new RENAME TO segments;
+
+        DELETE FROM bots WHERE channel_id >= 0;
+        CREATE TABLE bots_new (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            token      TEXT NOT NULL UNIQUE,
+            channel_id INTEGER NOT NULL CHECK(channel_id < 0),
+            label      TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO bots_new SELECT id, token, channel_id, label, created_at FROM bots;
+        DROP TABLE bots;
+        ALTER TABLE bots_new RENAME TO bots;
+
+        CREATE INDEX IF NOT EXISTS idx_segments_job ON segments(job_id);
+        CREATE INDEX IF NOT EXISTS idx_tracks_job ON tracks(job_id);
+        CREATE INDEX IF NOT EXISTS idx_tracks_job_type ON tracks(job_id, track_type);
+        CREATE INDEX IF NOT EXISTS idx_jobs_series ON jobs(series_name);
+        CREATE INDEX IF NOT EXISTS idx_jobs_media_type ON jobs(media_type);
+        CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
+    """)
+
+    try:
+        from config import Config  # noqa: PLC0415
+        valid_setting_keys = sorted(Config.setting_type_map().keys())
+    except Exception:
+        valid_setting_keys = []
+
+    if valid_setting_keys:
+        placeholders = ",".join(["?"] * len(valid_setting_keys))
+        conn.execute(
+            f"DELETE FROM settings WHERE key NOT IN ({placeholders})",
+            valid_setting_keys,
+        )
+
+
 MIGRATIONS = [
     (1, "create_base_schema", _migration_001_create_base_schema),
     (2, "add_track_dimensions_and_stream_index", _migration_002_add_track_dimensions_and_stream_index),
@@ -317,6 +518,7 @@ MIGRATIONS = [
     (5, "add_series_episode_metadata", _migration_005_add_series_episode_metadata),
     (6, "create_settings_and_bots_tables", _migration_006_create_settings_and_bots_tables),
     (7, "add_listing_performance_indexes", _migration_007_add_listing_performance_indexes),
+    (8, "enforce_data_constraints", _migration_008_enforce_data_constraints),
 ]
 
 
@@ -448,6 +650,13 @@ def save_job(job_id, analysis, processing_result, upload_result,
     try:
         with conn:
             video = analysis.video_streams[0] if analysis.has_video else None
+            normalized_is_series = 1 if is_series else 0
+            normalized_series_name = (series_name or "").strip()
+            normalized_media_type = media_type if media_type in VALID_MEDIA_TYPES else "Film"
+            if normalized_is_series != 1:
+                season_number = None
+                episode_number = None
+                part_number = None
 
             conn.execute(
                 """INSERT OR REPLACE INTO jobs
@@ -459,12 +668,12 @@ def save_job(job_id, analysis, processing_result, upload_result,
                     os.path.basename(analysis.file_path),
                     analysis.duration,
                     analysis.file_size,
-                    video.codec_name if video else None,
+                    video.codec_name if video else "unknown",
                     video.width if video else 0,
                     video.height if video else 0,
-                    media_type or "Film",
-                    series_name or "",
-                    1 if is_series else 0,
+                    normalized_media_type,
+                    normalized_series_name,
+                    normalized_is_series,
                     season_number,
                     episode_number,
                     part_number,
@@ -505,10 +714,11 @@ def save_job(job_id, analysis, processing_result, upload_result,
                     (job_id, enum_idx, lang, title, orig_idx),
                 )
 
-            # Save all segment mappings (the critical Telegram file_id references)
+            # Save all segment mappings (the critical Telegram file_id references).
+            # bot_index is a positional index into the runtime Config.BOTS pool, not a DB FK.
             segment_durations = getattr(processing_result, "segment_durations", {})
             for key, seg in upload_result.segments.items():
-                dur = segment_durations.get(key, 0)
+                dur = segment_durations.get(key)
                 conn.execute(
                     """INSERT OR REPLACE INTO segments
                        (job_id, segment_key, file_id, bot_index, file_size, duration)
@@ -538,6 +748,14 @@ def update_job_metadata(job_id, media_type=None, series_name=None,
                         is_series=None, season_number=None, episode_number=None, part_number=None,
                         title=None):
     """Update metadata for an existing job."""
+    normalized_is_series = 1 if is_series else 0
+    normalized_media_type = media_type if media_type in VALID_MEDIA_TYPES else "Film"
+    normalized_series_name = (series_name or "").strip()
+    if normalized_is_series != 1:
+        season_number = None
+        episode_number = None
+        part_number = None
+
     conn = _get_conn()
     with conn:
         conn.execute(
@@ -546,7 +764,7 @@ def update_job_metadata(job_id, media_type=None, series_name=None,
                    media_type = ?, series_name = ?, is_series = ?,
                    season_number = ?, episode_number = ?, part_number = ?
                WHERE job_id = ?""",
-            (title, media_type, series_name, is_series,
+            (title, normalized_media_type, normalized_series_name, normalized_is_series,
              season_number, episode_number, part_number, job_id)
         )
 
@@ -599,7 +817,7 @@ def get_segments_for_prefix(job_id, prefix):
         "SELECT segment_key, duration, file_id, bot_index FROM segments WHERE job_id = ? AND segment_key LIKE ? ORDER BY segment_key",
         (job_id, f"{prefix}/%"),
     ).fetchall()
-    return [{"segment_key": r["segment_key"], "duration": r["duration"] or 0,
+    return [{"segment_key": r["segment_key"], "duration": r["duration"],
              "file_id": r["file_id"], "bot_index": r["bot_index"]} for r in rows]
 
 
@@ -882,6 +1100,10 @@ def get_all_settings() -> dict:
 
 def set_setting(key: str, value: str):
     """Insert or replace a single setting."""
+    from config import Config  # noqa: PLC0415
+    if key not in Config.setting_type_map():
+        raise ValueError(f"Unknown setting key: {key}")
+
     conn = _get_conn()
     with conn:
         conn.execute(
@@ -892,6 +1114,12 @@ def set_setting(key: str, value: str):
 
 def set_settings(mapping: dict):
     """Bulk upsert multiple settings in a single transaction."""
+    from config import Config  # noqa: PLC0415
+    allowed_keys = set(Config.setting_type_map().keys())
+    unknown_keys = [k for k in mapping if k not in allowed_keys]
+    if unknown_keys:
+        raise ValueError(f"Unknown setting keys: {sorted(unknown_keys)}")
+
     conn = _get_conn()
     with conn:
         conn.executemany(

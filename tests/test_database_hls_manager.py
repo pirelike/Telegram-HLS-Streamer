@@ -167,6 +167,7 @@ class TestDatabaseMigrations(TestDatabaseBase):
                 (5, "add_series_episode_metadata"),
                 (6, "create_settings_and_bots_tables"),
                 (7, "add_listing_performance_indexes"),
+                (8, "enforce_data_constraints"),
             ],
         )
 
@@ -268,7 +269,14 @@ class TestDatabaseMigrations(TestDatabaseBase):
         database.init_db()
         conn = database._get_conn()
         rows = conn.execute("SELECT revision FROM schema_migrations ORDER BY revision").fetchall()
-        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6, 7, 8])
+
+    def test_migration_adds_new_indexes(self):
+        conn = database._get_conn()
+        index_rows = conn.execute("PRAGMA index_list(jobs)").fetchall()
+        index_names = {row["name"] for row in index_rows}
+        self.assertIn("idx_jobs_media_type", index_names)
+        self.assertIn("idx_jobs_created_at", index_names)
 
     def test_init_db_fails_for_newer_schema_revision(self):
         self._reset_db_file()
@@ -354,7 +362,7 @@ class TestDatabaseCRUD(TestDatabaseBase):
         segments = database.get_segments_for_prefix("job1", "audio_0")
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["segment_key"], "audio_0/audio_0001.ts")
-        self.assertEqual(segments[0]["duration"], 0)
+        self.assertIsNone(segments[0]["duration"])
 
     def test_get_segments_for_prefix_empty(self):
         analysis, processing, upload = self._sample_payload()
@@ -469,7 +477,7 @@ class TestDatabaseCRUD(TestDatabaseBase):
         database.save_job("jobaudio", analysis, processing, upload)
         job = database.get_job("jobaudio")
         self.assertIsNotNone(job)
-        self.assertIsNone(job["video_codec"])
+        self.assertEqual(job["video_codec"], "unknown")
         self.assertEqual(job["video_width"], 0)
 
 
@@ -1102,16 +1110,20 @@ class TestSettingsCRUD(TestDatabaseBase):
         self.assertEqual(result["MAX_PARALLEL_ENCODES"], "4")
 
     def test_set_settings_bulk(self):
-        database.set_settings({"KEY_A": "val1", "KEY_B": "val2"})
+        database.set_settings({"VIDEO_BITRATE": "4M", "AUDIO_BITRATE": "128k"})
         result = database.get_all_settings()
-        self.assertEqual(result["KEY_A"], "val1")
-        self.assertEqual(result["KEY_B"], "val2")
+        self.assertEqual(result["VIDEO_BITRATE"], "4M")
+        self.assertEqual(result["AUDIO_BITRATE"], "128k")
+
+    def test_set_setting_rejects_unknown_key(self):
+        with self.assertRaises(ValueError):
+            database.set_setting("KEY_A", "val1")
 
     def test_delete_setting(self):
-        database.set_setting("TO_DELETE", "yes")
-        database.delete_setting("TO_DELETE")
+        database.set_setting("VIDEO_BITRATE", "2M")
+        database.delete_setting("VIDEO_BITRATE")
         result = database.get_all_settings()
-        self.assertNotIn("TO_DELETE", result)
+        self.assertNotIn("VIDEO_BITRATE", result)
 
     def test_delete_nonexistent_setting_does_not_raise(self):
         database.delete_setting("NONEXISTENT_KEY")  # should not raise
@@ -1141,6 +1153,11 @@ class TestBotsCRUD(TestDatabaseBase):
         import sqlite3
         with self.assertRaises(sqlite3.IntegrityError):
             database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100456)
+
+    def test_add_bot_positive_channel_id_rejected(self):
+        import sqlite3
+        with self.assertRaises(sqlite3.IntegrityError):
+            database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", 100123)
 
     def test_delete_bot(self):
         bot_id = database.add_bot("123456789:ABCdefGHIjklMNOpqrSTUvwXYZ012345678", -100123)

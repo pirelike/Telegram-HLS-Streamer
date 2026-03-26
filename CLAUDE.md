@@ -123,7 +123,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - `settings` stores key-value config overrides applied at runtime (persisted across restarts)
 - `bots` stores dynamically registered bots (beyond .env-defined bots)
 - Indexed for fast lookup; cascade delete on job removal
-- Schema migration framework with `schema_migrations` tracking (revisions 1-7 implemented)
+- Schema migration framework with `schema_migrations` tracking (revisions 1-8 implemented, including strict CHECK/NOT NULL constraints and listing indexes on `jobs(media_type)` + `jobs(created_at DESC)`)
 
 ### `stream_analyzer.py`
 - Runs `ffprobe -v quiet -print_format json -show_streams`
