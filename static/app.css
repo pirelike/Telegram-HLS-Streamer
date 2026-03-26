@@ -483,6 +483,7 @@ html[data-theme="dark"] .navbar { background: rgba(0, 0, 0, 0.72); }
 /* ── Settings ── */
 .settings-grid { display: flex; flex-direction: column; gap: 1.5rem; }
 .settings-page { display: flex; flex-direction: column; gap: 1.25rem; }
+.settings-stack { display: flex; flex-direction: column; gap: 1.25rem; }
 .settings-inline { display: flex; align-items: center; gap: 1rem; }
 .settings-inline input[type="checkbox"] { width: 1.4rem; height: 1.4rem; accent-color: var(--accent); cursor: pointer; }
 .settings-inline label { cursor: pointer; font-weight: 500; font-size: 0.95rem; }
