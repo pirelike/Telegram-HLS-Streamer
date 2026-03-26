@@ -751,6 +751,10 @@ def update_job_metadata_endpoint(job_id):
     season_number = _int_or_none(data.get("season_number"))
     episode_number = _int_or_none(data.get("episode_number"))
     part_number = _int_or_none(data.get("part_number"))
+    if not is_series:
+        season_number = None
+        episode_number = None
+        part_number = None
 
     db.update_job_metadata(
         job_id, media_type, series_name, is_series,
@@ -898,10 +902,11 @@ def api_settings():
         return jsonify({"error": "Expected {settings: {KEY: value}}"}), 400
 
     allowed_keys = Config.setting_type_map()
+    known_setting_keys = set(Config.setting_type_map().keys())
     changed_runtime = {}
     validated_for_db = {}
     for key, raw_value in incoming.items():
-        if key not in allowed_keys:
+        if key not in allowed_keys or key not in known_setting_keys:
             return jsonify({"error": f"Unknown setting: {key!r}"}), 400
         try:
             parsed = Config.parse_setting_value(key, raw_value)
@@ -1540,6 +1545,10 @@ def upload_finalize():
     season_number = _int_or_none((data or {}).get("season_number"))
     episode_number = _int_or_none((data or {}).get("episode_number"))
     part_number = _int_or_none((data or {}).get("part_number"))
+    if not is_series:
+        season_number = None
+        episode_number = None
+        part_number = None
 
     with _pending_uploads_lock:
         if not upload_id or upload_id not in _pending_uploads:

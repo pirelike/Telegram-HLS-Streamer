@@ -125,6 +125,15 @@ def _compute_subtitle_duration(duration):
     return max(duration or 0, Config.HLS_SEGMENT_DURATION, 0.001)
 
 
+def _resolve_segment_duration(duration, fallback):
+    """Resolve persisted segment duration, using a non-zero fallback when unknown."""
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        value = 0.0
+    return value if value > 0 else max(float(fallback), 0.001)
+
+
 def generate_master_playlist(job_id, base_url):
     """Generate a master M3U8 playlist with multi-audio and subtitle variants."""
     job = db.get_job(job_id)
@@ -305,7 +314,7 @@ def generate_media_playlist(job_id, stream_type, stream_index=None):
         return None
 
     fallback = Config.HLS_SEGMENT_DURATION
-    durations = [s["duration"] if s["duration"] > 0 else fallback for s in segments]
+    durations = [_resolve_segment_duration(s["duration"], fallback) for s in segments]
     target_duration = math.ceil(max(durations)) if durations else fallback
 
     lines = [
