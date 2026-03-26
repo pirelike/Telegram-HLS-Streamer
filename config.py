@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from urllib.parse import urlsplit
 
 try:
     from dotenv import load_dotenv
@@ -74,12 +75,33 @@ def _csv_env(name, default):
     return values
 
 
+def _parse_cors_allowed_origins(raw):
+    values = []
+    tuples = []
+    for entry in str(raw or "").split(","):
+        origin = entry.strip()
+        if not origin:
+            continue
+        if origin == "*":
+            values.append(origin)
+            continue
+        parsed = urlsplit(origin)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path not in {"", "/"}:
+            raise ValueError(
+                f"Invalid CORS_ALLOWED_ORIGINS entry {origin!r}: expected full origin like https://example.com"
+            )
+        values.append(origin)
+        tuples.append((parsed.scheme, parsed.netloc))
+    return values, tuples
+
+
 class Config:
     # Server
     HOST = os.getenv("LOCAL_HOST", "0.0.0.0")
     PORT = _int_env("LOCAL_PORT", 5050)
     FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
     BEHIND_PROXY = os.getenv("BEHIND_PROXY", "false").lower() == "true"
+    TRUSTED_PROXY_CIDRS = _csv_env("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")
 
     # Cloudflare tunnel
     CLOUDFLARED_ENABLED = os.getenv("CLOUDFLARED_ENABLED", "false").lower() == "true"
@@ -161,11 +183,9 @@ class Config:
 
     # Queue: max number of jobs processed concurrently
     MAX_CONCURRENT_JOBS = _int_env("MAX_CONCURRENT_JOBS", 1)
-    CORS_ALLOWED_ORIGINS = [
-        origin.strip()
-        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
-        if origin.strip()
-    ]
+    CORS_ALLOWED_ORIGINS, CORS_ALLOWED_ORIGIN_TUPLES = _parse_cors_allowed_origins(
+        os.getenv("CORS_ALLOWED_ORIGINS", "")
+    )
 
     # Rate limiting for upload endpoints (per IP)
     UPLOAD_RATE_LIMIT_WINDOW = _int_env("UPLOAD_RATE_LIMIT_WINDOW", 60)  # seconds
@@ -188,7 +208,8 @@ class Config:
         ("HOST", "LOCAL_HOST", "str", "server", "Bind address", "0.0.0.0"),
         ("PORT", "LOCAL_PORT", "int", "server", "Bind port", 5050),
         ("FORCE_HTTPS", "FORCE_HTTPS", "bool", "server", "Redirect HTTP to HTTPS", False),
-        ("BEHIND_PROXY", "BEHIND_PROXY", "bool", "server", "Trust X-Forwarded-For header (enable when behind reverse proxy)", False),
+        ("BEHIND_PROXY", "BEHIND_PROXY", "bool", "server", "Trust X-Forwarded-For only from TRUSTED_PROXY_CIDRS", False),
+        ("TRUSTED_PROXY_CIDRS", "TRUSTED_PROXY_CIDRS", "str", "server", "Comma-separated proxy CIDRs trusted to supply X-Forwarded-For", "127.0.0.1/32,::1/128"),
         ("CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_ORIGINS", "str", "server", "Comma-separated allowed CORS origins (empty = none)", ""),
         ("CLOUDFLARED_ENABLED", "CLOUDFLARED_ENABLED", "bool", "server", "Enable Cloudflare tunnel integration", False),
         # Files
@@ -201,7 +222,7 @@ class Config:
         ("SEGMENT_PREFETCH_MIN_FREE_BYTES", "SEGMENT_PREFETCH_MIN_FREE_BYTES", "int", "files", "Minimum free memory before prefetch is suspended (bytes, 0 = disabled)", 0),
         # HW Acceleration
         ("ENABLE_HW_ACCEL", "ENABLE_HARDWARE_ACCELERATION", "bool", "hw_accel", "Enable hardware-accelerated encoding (VAAPI/NVENC/QSV)", True),
-        ("PREFERRED_ENCODER", "PREFERRED_ENCODER", "str", "hw_accel", "Preferred HW encoder: vaapi | nvenc | qsv", "vaapi"),
+        ("PREFERRED_ENCODER", "PREFERRED_ENCODER", "str", "hw_accel", "Preferred encoder: vaapi | nvenc | qsv | cpu", "vaapi"),
         ("VAAPI_DEVICE", "VAAPI_DEVICE", "str", "hw_accel", "VAAPI render device path (empty = auto-detect)", ""),
         ("MAX_PARALLEL_ENCODES", "MAX_PARALLEL_ENCODES", "int", "hw_accel", "Maximum simultaneous FFmpeg video encodes", 2),
         ("VIDEO_BITRATE", "VIDEO_BITRATE", "str", "hw_accel", "Default video bitrate (e.g. 4M)", "4M"),
@@ -275,8 +296,11 @@ class Config:
             return parsed
         if key in ("WATCH_VIDEO_EXTENSIONS", "WATCH_IGNORE_SUFFIXES"):
             return tuple(s.strip() for s in str(raw_value).split(",") if s.strip())
-        if key == "CORS_ALLOWED_ORIGINS":
+        if key == "TRUSTED_PROXY_CIDRS":
             return [s.strip() for s in str(raw_value).split(",") if s.strip()]
+        if key == "CORS_ALLOWED_ORIGINS":
+            parsed, _ = _parse_cors_allowed_origins(str(raw_value))
+            return parsed
         return str(raw_value)
 
     @classmethod
@@ -294,6 +318,8 @@ class Config:
                 return ",".join(f"{t['height']}:{t['bitrate']}" for t in parsed_value)
             return str(parsed_value)
         if key in ("WATCH_VIDEO_EXTENSIONS", "WATCH_IGNORE_SUFFIXES") and isinstance(parsed_value, tuple):
+            return ",".join(parsed_value)
+        if key == "TRUSTED_PROXY_CIDRS" and isinstance(parsed_value, list):
             return ",".join(parsed_value)
         if key == "CORS_ALLOWED_ORIGINS" and isinstance(parsed_value, list):
             return ",".join(parsed_value)
@@ -379,9 +405,13 @@ class Config:
                 elif key in ("WATCH_VIDEO_EXTENSIONS", "WATCH_IGNORE_SUFFIXES"):
                     # Stored as CSV string; runtime attr is a tuple
                     setattr(cls, key, tuple(s.strip() for s in raw_value.split(",") if s.strip()))
+                elif key == "TRUSTED_PROXY_CIDRS":
+                    setattr(cls, key, [s.strip() for s in raw_value.split(",") if s.strip()])
                 elif key == "CORS_ALLOWED_ORIGINS":
                     # Stored as CSV string; runtime attr is a list
-                    setattr(cls, key, [s.strip() for s in raw_value.split(",") if s.strip()])
+                    parsed_origins, parsed_tuples = _parse_cors_allowed_origins(raw_value)
+                    setattr(cls, key, parsed_origins)
+                    setattr(cls, "CORS_ALLOWED_ORIGIN_TUPLES", parsed_tuples)
                 else:
                     setattr(cls, key, raw_value)
             except (ValueError, TypeError) as exc:
@@ -416,6 +446,7 @@ class Config:
         cls.PORT = _int_env("LOCAL_PORT", 5050)
         cls.FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
         cls.BEHIND_PROXY = os.getenv("BEHIND_PROXY", "false").lower() == "true"
+        cls.TRUSTED_PROXY_CIDRS = _csv_env("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")
         cls.CLOUDFLARED_ENABLED = os.getenv("CLOUDFLARED_ENABLED", "false").lower() == "true"
         cls.TELEGRAM_MAX_FILE_SIZE = _int_env("TELEGRAM_MAX_FILE_SIZE", 20971520)
         cls.MAX_UPLOAD_SIZE = _int_env("MAX_UPLOAD_SIZE", 107374182400)
@@ -452,11 +483,9 @@ class Config:
         cls.PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS = _int_env("PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS", 300)
         cls.JOB_RETENTION_DAYS = _int_env("JOB_RETENTION_DAYS", 0)
         cls.MAX_CONCURRENT_JOBS = _int_env("MAX_CONCURRENT_JOBS", 1)
-        cls.CORS_ALLOWED_ORIGINS = [
-            origin.strip()
-            for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
-            if origin.strip()
-        ]
+        cls.CORS_ALLOWED_ORIGINS, cls.CORS_ALLOWED_ORIGIN_TUPLES = _parse_cors_allowed_origins(
+            os.getenv("CORS_ALLOWED_ORIGINS", "")
+        )
         cls.UPLOAD_RATE_LIMIT_WINDOW = _int_env("UPLOAD_RATE_LIMIT_WINDOW", 60)
         cls.UPLOAD_RATE_LIMIT_MAX_REQUESTS = _int_env("UPLOAD_RATE_LIMIT_MAX_REQUESTS", 100)
         cls.MAX_PENDING_UPLOADS_PER_IP = _int_env("MAX_PENDING_UPLOADS_PER_IP", 5)

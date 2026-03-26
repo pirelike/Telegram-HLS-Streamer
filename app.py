@@ -18,6 +18,7 @@ import logging
 import os
 import queue
 import re
+import ipaddress
 import shutil
 import signal
 import socket
@@ -26,6 +27,7 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
 from threading import Lock, RLock, Thread
 
 import aiohttp
@@ -40,7 +42,7 @@ from flask import (
     Flask, jsonify, render_template, request, Response, stream_with_context,
 )
 
-from config import Config
+from config import Config, _BITRATE_RE
 from stream_analyzer import analyze
 from video_processor import process, cleanup, transcode_segment
 from telegram_uploader import TelegramUploader, UploadResult
@@ -204,11 +206,33 @@ async def _await_upload_futures_shutdown(futures, timeout=2.0):
 
 def _get_client_ip():
     """Return the client IP, respecting X-Forwarded-For when behind a proxy."""
-    if Config.BEHIND_PROXY:
+    trust_forwarded = Config.BEHIND_PROXY and (
+        not request.remote_addr or _is_trusted_proxy(request.remote_addr)
+    )
+    if trust_forwarded:
         forwarded = request.headers.get("X-Forwarded-For", "")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            candidate = forwarded.split(",")[0].strip()
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                logger.warning("Ignoring malformed X-Forwarded-For value from trusted proxy: %r", candidate)
     return request.remote_addr or "unknown"
+
+
+def _is_trusted_proxy(remote_addr):
+    if not remote_addr:
+        return False
+    try:
+        remote_ip = ipaddress.ip_address(remote_addr)
+    except ValueError:
+        return False
+    for cidr in Config.TRUSTED_PROXY_CIDRS:
+        with contextlib.suppress(ValueError):
+            if remote_ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+    return False
 
 
 def _check_rate_limit():
@@ -267,7 +291,48 @@ def _is_origin_allowed(origin: str) -> bool:
         return False
     if "*" in Config.CORS_ALLOWED_ORIGINS:
         return True
-    return origin in Config.CORS_ALLOWED_ORIGINS
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    allowed = getattr(Config, "CORS_ALLOWED_ORIGIN_TUPLES", None)
+    if allowed is None or (not allowed and Config.CORS_ALLOWED_ORIGINS):
+        allowed = []
+        for configured in Config.CORS_ALLOWED_ORIGINS:
+            with contextlib.suppress(Exception):
+                c = urlsplit(configured)
+                if c.scheme in {"http", "https"} and c.netloc:
+                    allowed.append((c.scheme, c.netloc))
+    return (parsed.scheme, parsed.netloc) in allowed
+
+
+_UUID4_RE = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$",
+    re.IGNORECASE,
+)
+_LEGACY_JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$", re.IGNORECASE)
+_SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_VALID_ENCODERS = {"vaapi", "nvenc", "qsv", "cpu"}
+_VAAPI_DEVICE_RE = re.compile(r"^/dev/dri/renderD\d+$")
+
+
+def _is_valid_job_id(job_id: str) -> bool:
+    value = str(job_id or "")
+    return bool(_UUID4_RE.match(value) or _LEGACY_JOB_ID_RE.match(value) or _SAFE_JOB_ID_RE.match(value))
+
+
+def _invalid_job_id_response():
+    return jsonify({"error": "Invalid job_id format"}), 400
+
+
+def _validate_ffmpeg_setting(key, parsed):
+    if key in {"VIDEO_BITRATE", "AUDIO_BITRATE"} and not _BITRATE_RE.match(str(parsed)):
+        raise ValueError(f"{key} must match bitrate format like 4M or 128k")
+    if key == "PREFERRED_ENCODER" and str(parsed).lower() not in _VALID_ENCODERS:
+        raise ValueError(f"PREFERRED_ENCODER must be one of: {', '.join(sorted(_VALID_ENCODERS))}")
+    if key == "VAAPI_DEVICE":
+        value = str(parsed).strip()
+        if value and not _VAAPI_DEVICE_RE.match(value):
+            raise ValueError("VAAPI_DEVICE must be empty or match /dev/dri/renderD*")
 
 
 def _normalize_watch_settings(data=None):
@@ -912,6 +977,7 @@ def api_settings():
             return jsonify({"error": f"Unknown setting: {key!r}"}), 400
         try:
             parsed = Config.parse_setting_value(key, raw_value)
+            _validate_ffmpeg_setting(key, parsed)
         except (ValueError, TypeError) as exc:
             return jsonify({"error": f"Invalid value for {key}: {exc}"}), 400
 
@@ -1018,8 +1084,9 @@ def api_bots_health():
     index = data.get("index")
     try:
         results = _run_async(_telegram_uploader.probe_health(), timeout=15)
-    except Exception as exc:
-        return jsonify({"error": f"Health check failed: {exc}"}), 500
+    except Exception:
+        logger.exception("Bot health check failed")
+        return jsonify({"error": "Health check failed"}), 500
     if index is not None:
         results = [r for r in results if r["index"] == index]
     return jsonify({"results": results})
@@ -1065,8 +1132,9 @@ def api_bots_add():
 
     try:
         _run_async(_test(), timeout=15)
-    except Exception as exc:
-        return jsonify({"error": f"Bot test failed: {exc}"}), 400
+    except Exception:
+        logger.exception("Bot validation failed for channel %s", channel_id)
+        return jsonify({"error": "Bot validation failed"}), 400
 
     db_id = db.add_bot(token, channel_id, label)
     Config.reload()
@@ -1536,7 +1604,7 @@ def _queue_local_file(file_path, *, filename=None, source_mode="upload", skip_di
         if not ok:
             raise RuntimeError(msg)
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = str(uuid.uuid4())
     _active_jobs[job_id] = {
         "status": "queued",
         "filename": filename or os.path.basename(file_path),
@@ -1672,13 +1740,18 @@ def _release_watch_file(path, *, success):
 
 
 def _build_done_destination(path):
-    root = _normalize_watch_path(Config.WATCH_ROOT)
-    done_dir = _normalize_watch_path(Config.WATCH_DONE_DIR)
-    rel_path = os.path.relpath(path, root)
+    root = os.path.realpath(_normalize_watch_path(Config.WATCH_ROOT))
+    done_dir = os.path.realpath(_normalize_watch_path(Config.WATCH_DONE_DIR))
+    source_path = os.path.realpath(_normalize_watch_path(path))
+
+    rel_path = os.path.relpath(source_path, root)
     if rel_path.startswith(".."):
-        rel_path = os.path.basename(path)
+        rel_path = os.path.basename(source_path)
 
     destination = os.path.join(done_dir, rel_path)
+    resolved_destination = os.path.realpath(destination)
+    if resolved_destination != done_dir and not resolved_destination.startswith(done_dir + os.sep):
+        raise ValueError("Resolved watch destination escapes WATCH_DONE_DIR")
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     if not os.path.exists(destination):
         return destination
@@ -1687,6 +1760,9 @@ def _build_done_destination(path):
     counter = 1
     while True:
         candidate = f"{base}_{counter}{ext}"
+        resolved_candidate = os.path.realpath(candidate)
+        if resolved_candidate != done_dir and not resolved_candidate.startswith(done_dir + os.sep):
+            raise ValueError("Resolved watch destination escapes WATCH_DONE_DIR")
         if not os.path.exists(candidate):
             return candidate
         counter += 1
@@ -1841,7 +1917,7 @@ def _finalize_source_file(job_id, file_path):
                     moved_to = _move_watched_file_to_done(source_path)
                     logger.info("Moved watched source to done/: %s -> %s", source_path, moved_to)
                     success = True
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     logger.warning("Could not move watched source to done/: %s", exc)
         _release_watch_file(source_path, success=success)
         return
@@ -2144,6 +2220,8 @@ def jobs_list():
 @app.route("/hls/<job_id>/master.m3u8")
 def master_playlist(job_id):
     """Serve master M3U8 playlist with multi-audio and subtitle variants."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     base_url = _get_base_url()
     playlist = generate_master_playlist(job_id, base_url)
     if not playlist:
@@ -2154,6 +2232,8 @@ def master_playlist(job_id):
 @app.route("/hls/<job_id>/video.m3u8")
 def video_playlist(job_id):
     """Serve video-only media playlist (legacy, single-tier)."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     playlist = generate_media_playlist(job_id, "video")
     if not playlist:
         return jsonify({"error": "Not found"}), 404
@@ -2163,6 +2243,8 @@ def video_playlist(job_id):
 @app.route("/hls/<job_id>/video_<int:index>.m3u8")
 def video_tier_playlist(job_id, index):
     """Serve video media playlist for a specific quality tier."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     playlist = generate_media_playlist(job_id, "video", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
@@ -2172,6 +2254,8 @@ def video_tier_playlist(job_id, index):
 @app.route("/hls/<job_id>/video_virtual_<int:target_height>.m3u8")
 def video_virtual_playlist(job_id, target_height):
     """Serve virtual on-demand media playlist for a lower-quality transcoded tier."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     playlist = generate_virtual_media_playlist(job_id, target_height)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
@@ -2181,6 +2265,8 @@ def video_virtual_playlist(job_id, target_height):
 @app.route("/hls/<job_id>/audio_<int:index>.m3u8")
 def audio_playlist(job_id, index):
     """Serve audio track media playlist."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     playlist = generate_media_playlist(job_id, "audio", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
@@ -2190,6 +2276,8 @@ def audio_playlist(job_id, index):
 @app.route("/hls/<job_id>/sub_<int:index>.m3u8")
 def subtitle_playlist(job_id, index):
     """Serve subtitle track playlist."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     playlist = generate_media_playlist(job_id, "sub", index)
     if not playlist:
         return jsonify({"error": "Not found"}), 404
@@ -2769,6 +2857,8 @@ def _serve_virtual_segment(job_id, segment_key):
 @app.route("/segment/<job_id>/<path:segment_key>")
 def serve_segment(job_id, segment_key):
     """Proxy a segment from Telegram."""
+    if not _is_valid_job_id(job_id):
+        return _invalid_job_id_response()
     if segment_key.startswith("virtual_"):
         return _serve_virtual_segment(job_id, segment_key)
 
