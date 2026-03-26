@@ -21,6 +21,7 @@ The project is designed for self-hosted personal media delivery with:
 - [Running the server](#running-the-server)
 - [Web UI workflow](#web-ui-workflow)
 - [HTTP API reference](#http-api-reference)
+- [Database export/import sync](#database-exportimport-sync)
 - [HLS output format](#hls-output-format)
 - [Storage, cleanup, and lifecycle](#storage-cleanup-and-lifecycle)
 - [Security and deployment notes](#security-and-deployment-notes)
@@ -193,6 +194,9 @@ MAX_PENDING_UPLOADS_PER_IP=5
 
 # Telegram upload behavior
 UPLOAD_PARALLELISM=8
+DB_AUTO_MERGE_INTERVAL_MINUTES=0
+DB_AUTO_MERGE_FILE_ID=
+DB_AUTO_MERGE_BOT_INDEX=0
 
 # Telegram bots/channels
 TELEGRAM_BOT_TOKEN_1=
@@ -228,6 +232,7 @@ TELEGRAM_CHANNEL_ID_8=
 - When `WATCH_ENABLED=true`, the watcher scans `WATCH_ROOT` recursively, ignores the `done/` subtree plus partial-download suffixes, and only queues files whose size/mtime have stayed unchanged for `WATCH_STABLE_SECONDS`.
 - Watcher stability checks tolerate transient file disappear/permission races (`os.stat` failures are skipped instead of crashing the poll thread).
 - Successful watcher-ingested files are moved into `WATCH_DONE_DIR` after the full pipeline completes; failed files stay in place and will only be retried after they change.
+- Automatic DB merge is disabled by default. Set `DB_AUTO_MERGE_INTERVAL_MINUTES > 0` plus a valid `DB_AUTO_MERGE_FILE_ID` and `DB_AUTO_MERGE_BOT_INDEX` to periodically import/merge from Telegram.
 
 ---
 
@@ -268,6 +273,51 @@ The UI uses this upload flow:
 ---
 
 ## HTTP API reference
+
+## Database export/import sync
+
+The app supports exporting DB content to Telegram and importing it on another instance.
+
+### `POST /api/db/export`
+Builds a JSON payload of `jobs`, `tracks`, and `segments` plus bot fingerprints, uploads it to Telegram, and returns:
+
+```json
+{
+  "file_id": "....",
+  "bot_index": 0,
+  "job_count": 123,
+  "segment_count": 4567,
+  "size_bytes": 987654
+}
+```
+
+### `POST /api/db/import`
+Downloads an export payload from Telegram and merges it into local DB with bot-index remapping.
+
+**Request JSON**
+```json
+{
+  "file_id": "telegram_file_id",
+  "bot_index": 0
+}
+```
+
+**Response JSON**
+```json
+{
+  "merged_jobs": 12,
+  "skipped_jobs": 4,
+  "merged_segments": 1200,
+  "total_jobs_in_export": 16
+}
+```
+
+**Automatic merge**
+- `DB_AUTO_MERGE_INTERVAL_MINUTES`: run interval in minutes (`0` = disabled).
+- `DB_AUTO_MERGE_FILE_ID`: Telegram file_id to import on each cycle.
+- `DB_AUTO_MERGE_BOT_INDEX`: bot index used to download the file_id.
+
+When enabled, a background worker runs continuously and performs the same import/merge validation logic used by `POST /api/db/import`.
 
 ### Upload APIs
 
