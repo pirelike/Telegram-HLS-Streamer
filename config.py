@@ -319,6 +319,7 @@ class Config:
         suffixes = sorted(
             (int(m.group(1)) for key in os.environ if (m := suffix_re.match(key))),
         )
+        seen_tokens = set()
         for i in suffixes:
             token = os.getenv(f"TELEGRAM_BOT_TOKEN_{i}")
             channel = os.getenv(f"TELEGRAM_CHANNEL_ID_{i}")
@@ -335,6 +336,14 @@ class Config:
                     raise ValueError(
                         f"Invalid TELEGRAM_CHANNEL_ID_{i}: expected negative integer, got {channel_id}"
                     )
+                if token in seen_tokens:
+                    _logger.warning(
+                        "Skipping duplicate Telegram bot token in TELEGRAM_BOT_TOKEN_%d; "
+                        "token already loaded from a lower suffix",
+                        i,
+                    )
+                    continue
+                seen_tokens.add(token)
                 cls.BOTS.append({"token": token, "channel_id": channel_id})
         return cls.BOTS
 

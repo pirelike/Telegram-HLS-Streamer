@@ -193,6 +193,26 @@ class TestConfigLoadBots(unittest.TestCase):
         self.assertEqual(bots[0]["channel_id"], -1003)
         self.assertEqual(bots[1]["channel_id"], -1010)
 
+    def test_load_bots_deduplicates_duplicate_tokens_and_logs_warning(self):
+        shared_token = "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN_1": shared_token,
+                "TELEGRAM_CHANNEL_ID_1": "-1001",
+                "TELEGRAM_BOT_TOKEN_4": shared_token,
+                "TELEGRAM_CHANNEL_ID_4": "-1004",
+            },
+            clear=True,
+        ):
+            with self.assertLogs("config", level="WARNING") as captured:
+                bots = config.Config.load_bots()
+        self.assertEqual(len(bots), 1)
+        self.assertEqual(bots[0]["channel_id"], -1001)
+        self.assertTrue(
+            any("Skipping duplicate Telegram bot token" in message for message in captured.output)
+        )
+
 
 class TestSegmentTargetConfig(unittest.TestCase):
     def test_segment_target_size_uses_default(self):
