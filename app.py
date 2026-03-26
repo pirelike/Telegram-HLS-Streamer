@@ -735,6 +735,10 @@ def update_job_metadata_endpoint(job_id):
     
     series_name = data.get("series_name", "")
     is_series = bool(data.get("is_series", 0))
+    raw_title = data.get("title")
+    title = str(raw_title).strip() if raw_title is not None else None
+    if title == "":
+        title = None
 
     def _int_or_none(val):
         if val is None or val == "":
@@ -750,7 +754,7 @@ def update_job_metadata_endpoint(job_id):
 
     db.update_job_metadata(
         job_id, media_type, series_name, is_series,
-        season_number, episode_number, part_number
+        season_number, episode_number, part_number, title
     )
     
     logger.info("Job %s metadata updated by user", job_id)

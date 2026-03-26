@@ -164,6 +164,7 @@ function openEditModal(jobId) {
     if (!currentJob || currentJob.job_id !== jobId) return;
 
     document.getElementById('editJobId').value = currentJob.job_id;
+    document.getElementById('editTitle').value = cleanTitle(currentJob.filename || currentJob.job_id);
     document.getElementById('editCategory').value = getCategoryFromJob(currentJob);
     document.getElementById('editSeriesName').value = currentJob.series_name || '';
     document.getElementById('editSeasonNumber').value = currentJob.season_number != null ? currentJob.season_number : '';
@@ -181,6 +182,7 @@ async function saveEditModal() {
 
     const dbFields = CATEGORY_DB[cat];
     const payload = {
+        title: document.getElementById('editTitle').value.trim(),
         media_type: dbFields.media_type,
         is_series: dbFields.is_series,
         series_name: document.getElementById('editSeriesName').value.trim()
@@ -209,6 +211,7 @@ async function saveEditModal() {
 
         // Update currentJob in-place
         Object.assign(currentJob, payload);
+        if (payload.title) currentJob.filename = payload.title;
         if (payload.part_number !== undefined) currentJob.part_number = payload.part_number ? parseInt(payload.part_number) : null;
         if (payload.season_number !== undefined) currentJob.season_number = payload.season_number ? parseInt(payload.season_number) : null;
         if (payload.episode_number !== undefined) currentJob.episode_number = payload.episode_number ? parseInt(payload.episode_number) : null;
