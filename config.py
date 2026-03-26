@@ -112,6 +112,7 @@ class Config:
     # Adaptive Bitrate Streaming
     ABR_ENABLED = os.getenv("ABR_ENABLED", "true").lower() == "true"
     ENABLE_COPY_MODE = os.getenv("ENABLE_COPY_MODE", "true").lower() == "true"
+    VIRTUAL_ABR_TIERS = os.getenv("VIRTUAL_ABR_TIERS", "false").lower() in ("true", "1", "yes")
     ABR_TIERS = _parse_tiers(os.getenv("ABR_TIERS")) or [
         {"height": 1080, "bitrate": "10M"},
         {"height": 720, "bitrate": "5M"},
@@ -207,6 +208,7 @@ class Config:
         # ABR
         ("ABR_ENABLED", "ABR_ENABLED", "bool", "abr", "Enable adaptive bitrate: produce multiple quality tiers", True),
         ("ENABLE_COPY_MODE", "ENABLE_COPY_MODE", "bool", "abr", "Skip re-encode when source stream is already HLS-compatible", True),
+        ("VIRTUAL_ABR_TIERS", "VIRTUAL_ABR_TIERS", "bool", "abr", "Transcode lower-quality tiers on demand at playback time (mutually exclusive with ABR_ENABLED)", False),
         ("ABR_TIERS", "ABR_TIERS", "tiers", "abr", "Comma-separated height:bitrate pairs for ABR tiers (e.g. 1080:10M,720:5M)", "1080:10M,720:5M,480:2M,360:1200k"),
         ("TIER0_BITRATES", "TIER0_BITRATES", "tiers", "abr", "Comma-separated height:bitrate pairs for source-quality tier 0 (e.g. 2160:60M,1080:30M)", "2160:60M,1080:30M,720:15M,480:5M"),
         ("TIER0_BITRATE_DEFAULT", "TIER0_BITRATE_DEFAULT", "str", "abr", "Fallback bitrate for tier 0 when source resolution is not listed", "15M"),
@@ -370,6 +372,12 @@ class Config:
             except (ValueError, TypeError) as exc:
                 _logger.warning("DB setting %s=%r is invalid, skipping: %s", key, raw_value, exc)
 
+        if cls.ABR_ENABLED and cls.VIRTUAL_ABR_TIERS:
+            _logger.warning(
+                "ABR_ENABLED and VIRTUAL_ABR_TIERS cannot both be true; disabling VIRTUAL_ABR_TIERS"
+            )
+            cls.VIRTUAL_ABR_TIERS = False
+
         # Merge DB bots (append after env bots, deduplicate by token)
         env_tokens = {b["token"] for b in cls.BOTS}
         try:
@@ -410,6 +418,7 @@ class Config:
         cls.HLS_SEGMENT_DURATION = _int_env("HLS_SEGMENT_DURATION", 4)
         cls.ABR_ENABLED = os.getenv("ABR_ENABLED", "true").lower() == "true"
         cls.ENABLE_COPY_MODE = os.getenv("ENABLE_COPY_MODE", "true").lower() == "true"
+        cls.VIRTUAL_ABR_TIERS = os.getenv("VIRTUAL_ABR_TIERS", "false").lower() in ("true", "1", "yes")
         cls.ABR_TIERS = _parse_tiers(os.getenv("ABR_TIERS")) or [
             {"height": 1080, "bitrate": "10M"},
             {"height": 720, "bitrate": "5M"},

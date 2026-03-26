@@ -200,6 +200,32 @@ def generate_master_playlist(job_id, base_url):
 
             lines.append(stream_inf)
             lines.append(f"{base_url}/hls/{job_id}/video_{t['track_index']}.m3u8")
+
+        # Virtual on-demand tiers: when only one real tier exists and VIRTUAL_ABR_TIERS
+        # is enabled, add lower-quality entries transcoded live at playback time.
+        if Config.VIRTUAL_ABR_TIERS and len(video_tracks) == 1:
+            source_h = video_tracks[0].get("height", 0)
+            if source_h > 0:
+                src_w = job.get("video_width") or 0
+                src_h_r = job.get("video_height") or source_h
+                for vt in [tier for tier in Config.ABR_TIERS if tier["height"] < source_h]:
+                    vt_h = vt["height"]
+                    vt_bw = _compute_bandwidth(
+                        0, duration, explicit_bitrate=_parse_bitrate(vt["bitrate"])
+                    )
+                    vt_w = (round(src_w * vt_h / src_h_r) & ~1) if src_w else (vt_h * 16 // 9 & ~1)
+                    vt_codecs = _h264_codec_string(vt_h, bool(audio_tracks))
+                    vt_inf = (
+                        f"#EXT-X-STREAM-INF:BANDWIDTH={vt_bw},"
+                        f"RESOLUTION={vt_w}x{vt_h},"
+                        f'CODECS="{vt_codecs}"'
+                    )
+                    if audio_tracks:
+                        vt_inf += f',AUDIO="{audio_group}"'
+                    if subtitle_tracks:
+                        vt_inf += f',SUBTITLES="{sub_group}"'
+                    lines.append(vt_inf)
+                    lines.append(f"{base_url}/hls/{job_id}/video_virtual_{vt_h}.m3u8")
     else:
         # Legacy: single video stream (no video tracks in DB)
         bandwidth = _compute_bandwidth(job["file_size"], duration)
@@ -374,3 +400,68 @@ def _get_track(job_id, track_type, track_index):
         if track["track_index"] == track_index:
             return track
     return None
+
+
+def generate_virtual_media_playlist(job_id, target_height):
+    """Generate a VOD media playlist for a virtual on-demand transcoded tier.
+
+    Segment URIs point to /segment/<job_id>/virtual_<height>p/<filename>, which
+    the segment proxy will transcode on demand from the real tier-0 segment.
+    Returns None when the virtual tier is not applicable (disabled, wrong job
+    type, unconfigured height, or no segments found).
+    """
+    if not Config.VIRTUAL_ABR_TIERS:
+        return None
+
+    job = db.get_job(job_id)
+    if not job:
+        return None
+
+    video_tracks = db.get_job_tracks(job_id, "video")
+    if len(video_tracks) != 1:
+        return None
+    source_h = video_tracks[0].get("height", 0)
+    if source_h <= 0 or target_height >= source_h:
+        return None
+
+    tier_bitrate = next(
+        (t["bitrate"] for t in Config.ABR_TIERS if t["height"] == target_height), None
+    )
+    if tier_bitrate is None:
+        return None
+
+    segments = db.get_segments_for_prefix(job_id, "video_0")
+    if not segments:
+        return None
+
+    fallback = Config.HLS_SEGMENT_DURATION
+    durations = [_resolve_segment_duration(s["duration"], fallback) for s in segments]
+    target_duration = math.ceil(max(durations)) if durations else fallback
+
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:4",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+    ]
+
+    emitted = 0
+    for seg, dur in zip(segments, durations):
+        filename = seg["segment_key"].split("/", 1)[-1]
+        virtual_key = f"virtual_{target_height}p/{filename}"
+        segment_uri = _sanitize_segment_uri_path(virtual_key)
+        if not segment_uri:
+            logger.warning(
+                "Skipping unsafe virtual segment key for job %s: %r", job_id, virtual_key
+            )
+            continue
+        lines.append(f"#EXTINF:{dur:.6f},")
+        lines.append(f"/segment/{job_id}/{segment_uri}")
+        emitted += 1
+
+    if emitted == 0:
+        return None
+
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
