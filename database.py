@@ -535,16 +535,18 @@ def update_job_thumbnail(job_id):
 
 
 def update_job_metadata(job_id, media_type=None, series_name=None,
-                        is_series=None, season_number=None, episode_number=None, part_number=None):
+                        is_series=None, season_number=None, episode_number=None, part_number=None,
+                        title=None):
     """Update metadata for an existing job."""
     conn = _get_conn()
     with conn:
         conn.execute(
-            """UPDATE jobs
-               SET media_type = ?, series_name = ?, is_series = ?,
+               """UPDATE jobs
+               SET filename = COALESCE(?, filename),
+                   media_type = ?, series_name = ?, is_series = ?,
                    season_number = ?, episode_number = ?, part_number = ?
                WHERE job_id = ?""",
-            (media_type, series_name, is_series,
+            (title, media_type, series_name, is_series,
              season_number, episode_number, part_number, job_id)
         )
 

@@ -852,7 +852,7 @@ class TestP0TodoFixes(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 200)
         mock_update.assert_called_once_with(
-            "job123", "Anime TV", "Test", True, 2, 5, None
+            "job123", "Anime TV", "Test", True, 2, 5, None, None
         )
 
     def test_removed_token_endpoint_returns_404(self):

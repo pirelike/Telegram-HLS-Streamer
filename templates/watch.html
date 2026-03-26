@@ -33,6 +33,10 @@
         <div class="modal-body" style="padding: 1rem;">
             <input type="hidden" id="editJobId">
             <div style="margin-bottom: 1rem;">
+                <label style="display:block; margin-bottom:0.5rem; color:var(--text-muted); font-size:0.875rem;">Title</label>
+                <input type="text" id="editTitle" class="meta-input" style="width:100%;">
+            </div>
+            <div style="margin-bottom: 1rem;">
                 <label style="display:block; margin-bottom:0.5rem; color:var(--text-muted); font-size:0.875rem;">Category</label>
                 <select id="editCategory" class="meta-input" style="width:100%;" onchange="updateEditModalFields()">
                     <option value="Film">Film</option>
