@@ -2,10 +2,12 @@
 let shakaPlayer = null;
 let shakaUi = null;
 let currentJob = null;
+let attemptedQuotaRecovery = false;
 
 // ─── Player init ──────────────────────────────────────────────────────────────
 async function initPlayer(job) {
     currentJob = job;
+    attemptedQuotaRecovery = false;
     const videoEl = document.getElementById('videoEl');
     const m3u8Url = `${window.location.origin}/hls/${job.job_id}/master.m3u8`;
 
@@ -50,15 +52,43 @@ async function initPlayer(job) {
         });
 
         player.configure({
-            streaming: { bufferingGoal: 30 },
+            streaming: {
+                bufferingGoal: 15,
+                rebufferingGoal: 2,
+                bufferBehind: 20,
+            },
             preferredAudioLanguage: 'und',
             preferredTextLanguage: '',
         });
 
-        player.addEventListener('error', e => {
+        player.addEventListener('error', async e => {
             console.error('Shaka error', e.detail);
+            const code = e?.detail?.code;
+            const message = e?.detail?.message || String(code);
+
+            if (code === 3017 && !attemptedQuotaRecovery) {
+                attemptedQuotaRecovery = true;
+                document.getElementById('playerInfo').insertAdjacentHTML('afterbegin',
+                    `<p style="color:var(--warning);margin-bottom:0.5rem">Playback buffer was full (Shaka 3017). Retrying with a smaller buffer…</p>`);
+                player.configure({
+                    streaming: {
+                        bufferingGoal: 6,
+                        rebufferingGoal: 1,
+                        bufferBehind: 6,
+                    },
+                });
+                if (typeof player.retryStreaming === 'function') {
+                    try { await player.retryStreaming(); return; }
+                    catch (retryErr) { console.error('Shaka retryStreaming failed', retryErr); }
+                }
+            }
+
             document.getElementById('playerInfo').insertAdjacentHTML('afterbegin',
-                `<p style="color:var(--danger);margin-bottom:0.5rem">Playback error: ${escapeHtml(e.detail.message || String(e.detail.code))}</p>`);
+                `<p style="color:var(--danger);margin-bottom:0.5rem">Playback error: ${escapeHtml(message)}</p>`);
+            if (code === 3017) {
+                document.getElementById('playerInfo').insertAdjacentHTML('afterbegin',
+                    `<p style="color:var(--text-muted);margin-bottom:0.5rem">Tip: this usually means one or more HLS segments are too large for browser MSE memory. Re-process this video with smaller segments or disable copy mode.</p>`);
+            }
         });
 
         try { await player.load(m3u8Url); }
