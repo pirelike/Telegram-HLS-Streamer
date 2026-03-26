@@ -415,6 +415,18 @@ class TestTelegramUploader(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result.total_files, 1)
 
+    # ─── upload_document ───
+
+    async def test_upload_document_uses_first_bot(self):
+        segment = tu.UploadedSegment("doc123", 0, "db_export.json", 4)
+        with patch.object(self.uploader, "_upload_file_with_bot_lock", new=AsyncMock(return_value=segment)) as upload_mock:
+            result = await self.uploader.upload_document(b"test", "db_export.json")
+
+        self.assertEqual(result["file_id"], "doc123")
+        self.assertEqual(result["bot_index"], 0)
+        self.assertEqual(result["file_size"], 4)
+        self.assertEqual(upload_mock.await_args.args[1]["index"], 0)
+
     # ─── get_file_url / get_file_bytes ───
 
     async def test_get_file_url(self):

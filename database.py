@@ -636,6 +636,113 @@ def replace_database_file(source_path: str) -> dict:
     return {"backup_path": backup_path, "schema_revision": revision}
 
 
+def export_to_dict() -> dict:
+    """Export jobs, tracks, and segments tables to a serializable dict."""
+    conn = _get_conn()
+    jobs = [dict(row) for row in conn.execute("SELECT * FROM jobs").fetchall()]
+    tracks = [dict(row) for row in conn.execute("SELECT * FROM tracks").fetchall()]
+    segments = [dict(row) for row in conn.execute("SELECT * FROM segments").fetchall()]
+    return {
+        "version": 1,
+        "jobs": jobs,
+        "tracks": tracks,
+        "segments": segments,
+    }
+
+
+def merge_from_export(
+    jobs: list[dict],
+    tracks: list[dict],
+    segments: list[dict],
+    bot_index_map: dict[int, int],
+) -> dict:
+    """Merge an exported payload into this DB in one transaction."""
+    conn = _get_conn()
+    merged_jobs = 0
+    skipped_jobs = 0
+    merged_segments = 0
+
+    with conn:
+        for job in jobs:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO jobs
+                   (job_id, filename, duration, file_size, video_codec, video_width, video_height,
+                    status, created_at, media_type, series_name, has_thumbnail, is_series,
+                    season_number, episode_number, part_number)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    job.get("job_id"),
+                    job.get("filename"),
+                    job.get("duration", 0),
+                    job.get("file_size", 0),
+                    job.get("video_codec"),
+                    job.get("video_width", 0),
+                    job.get("video_height", 0),
+                    job.get("status", "complete"),
+                    job.get("created_at"),
+                    job.get("media_type", "Film"),
+                    job.get("series_name", ""),
+                    job.get("has_thumbnail", 0),
+                    job.get("is_series", 0),
+                    job.get("season_number"),
+                    job.get("episode_number"),
+                    job.get("part_number"),
+                ),
+            )
+            if cursor.rowcount == 1:
+                merged_jobs += 1
+            else:
+                skipped_jobs += 1
+
+        for track in tracks:
+            conn.execute(
+                """INSERT OR IGNORE INTO tracks
+                   (job_id, track_type, track_index, codec, language, title, channels,
+                    width, height, bitrate, original_stream_index)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    track.get("job_id"),
+                    track.get("track_type"),
+                    track.get("track_index"),
+                    track.get("codec"),
+                    track.get("language", "und"),
+                    track.get("title", ""),
+                    track.get("channels", 2),
+                    track.get("width", 0),
+                    track.get("height", 0),
+                    track.get("bitrate", "0"),
+                    track.get("original_stream_index", -1),
+                ),
+            )
+
+        for segment in segments:
+            source_bot_index = int(segment.get("bot_index", -1))
+            if source_bot_index not in bot_index_map:
+                raise ValueError(f"No bot index mapping for source bot index {source_bot_index}")
+            target_bot_index = bot_index_map[source_bot_index]
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO segments
+                   (job_id, segment_key, file_id, bot_index, file_size, duration)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    segment.get("job_id"),
+                    segment.get("segment_key"),
+                    segment.get("file_id"),
+                    target_bot_index,
+                    segment.get("file_size", 0),
+                    segment.get("duration"),
+                ),
+            )
+            if cursor.rowcount == 1:
+                merged_segments += 1
+
+    return {
+        "merged_jobs": merged_jobs,
+        "skipped_jobs": skipped_jobs,
+        "merged_segments": merged_segments,
+    }
+
+
 # ─── Jobs ───
 
 def save_job(job_id, analysis, processing_result, upload_result,

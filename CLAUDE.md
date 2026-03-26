@@ -91,6 +91,8 @@ HLS playback: /hls/<job_id>/master.m3u8
 - CORS headers on HLS/API endpoints (configurable via `CORS_ALLOWED_ORIGINS`)
 - Bot management: `GET /api/bots`, `POST /api/bots/health`, `POST /api/bots/add`, `DELETE /api/bots/<id>`
 - Live settings: `GET/POST /api/settings`, `POST /api/settings/reset` — changes applied without restart
+- DB transfer APIs: `POST /api/db/export` uploads a JSON snapshot (`jobs`/`tracks`/`segments`) to Telegram; `POST /api/db/import` downloads + merges with bot-index remapping
+- Automatic DB merge worker: controlled by config, periodically imports a configured Telegram export file (`DB_AUTO_MERGE_*`)
 - Watch-folder auto-ingest: polls `WATCH_ROOT` for stable video files, moves processed files to `WATCH_DONE_DIR`; `GET/POST /api/watch-settings`
 - Thumbnail proxy: `GET /thumbnail/<job_id>` — fetches `thumbnail/thumbnail.jpg` from Telegram, cached in the shared segment LRU cache, served as `image/jpeg`
 - Health and metrics: `GET /health`, `GET /api/metrics` (queue depth, cache stats, Telegram counters)
@@ -110,8 +112,8 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Reliability/cleanup: `JOB_TIMEOUT_SECONDS` (7200), `PENDING_UPLOAD_TTL_SECONDS` (86400), `PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (300), `JOB_RETENTION_DAYS` (0), `MAX_CONCURRENT_JOBS` (1)
 - Rate limiting (per IP): `UPLOAD_RATE_LIMIT_WINDOW` (60 s), `UPLOAD_RATE_LIMIT_MAX_REQUESTS` (100), `MAX_PENDING_UPLOADS_PER_IP` (5)
 - Watch folder: `WATCH_ENABLED` (false), `WATCH_ROOT`, `WATCH_DONE_DIR`, `WATCH_POLL_SECONDS` (5), `WATCH_STABLE_SECONDS` (30), `WATCH_VIDEO_EXTENSIONS`, `WATCH_IGNORE_SUFFIXES`
-- Telegram: `UPLOAD_PARALLELISM` (8), `BOTS` dynamically loaded from `TELEGRAM_BOT_TOKEN_1`…`_N` + `TELEGRAM_CHANNEL_ID_1`…`_N` (no hardcoded upper limit)
-- Runtime: `Config.load_from_db()` applies DB-persisted overrides; `POST /api/settings` now applies changed values in-place (no full `.env` re-read) and only triggers bot reloads for bot-related setting changes; `Config.reload()` remains the full re-read path used by bot add/remove and reset flows; `Config.to_dict()` returns all 31 configurable settings for the settings API
+- Telegram: `UPLOAD_PARALLELISM` (8), `DB_AUTO_MERGE_INTERVAL_MINUTES` (0 = disabled), `DB_AUTO_MERGE_FILE_ID`, `DB_AUTO_MERGE_BOT_INDEX`, and `BOTS` dynamically loaded from `TELEGRAM_BOT_TOKEN_1`…`_N` + `TELEGRAM_CHANNEL_ID_1`…`_N` (no hardcoded upper limit)
+- Runtime: `Config.load_from_db()` applies DB-persisted overrides; `POST /api/settings` now applies changed values in-place (no full `.env` re-read) and only triggers bot reloads for bot-related setting changes; `Config.reload()` remains the full re-read path used by bot add/remove and reset flows; `Config.to_dict()` returns all configurable settings for the settings API
 - Creates `uploads/` and `processing/` directories on import
 
 ### `database.py`
@@ -245,6 +247,9 @@ WATCH_ENABLED=false
 
 # Telegram upload
 UPLOAD_PARALLELISM=8
+DB_AUTO_MERGE_INTERVAL_MINUTES=0   # 0 disables automatic merge
+DB_AUTO_MERGE_FILE_ID=             # Telegram file_id to import
+DB_AUTO_MERGE_BOT_INDEX=0          # bot index used for download
 
 # App-level authentication is intentionally unsupported.
 ```
