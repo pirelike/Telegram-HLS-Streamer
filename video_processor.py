@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import threading
 
@@ -664,6 +665,70 @@ def _reencode_oversized_segment(segment_path, duration, hw_encoders, source_code
             "Segment still oversized after re-encode: %s (%d bytes)",
             os.path.basename(segment_path), final_size,
         )
+
+
+def transcode_segment(input_bytes: bytes, target_height: int, target_bitrate: str) -> bytes:
+    """Transcode raw TS bytes to a lower resolution/bitrate, returning TS bytes.
+
+    Used for on-demand virtual ABR tier serving. Input is typically a tier-0
+    video-only TS segment. Output is a lower-resolution/lower-bitrate TS segment.
+    Hardware acceleration is used when available, falling back to libx264.
+    Raises RuntimeError on transcode failure or empty output.
+    """
+    hw_encoder = _detect_hw_encoder()
+    h264_hw = hw_encoder.get("h264") if isinstance(hw_encoder, dict) else None
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".ts", prefix="virt-seg-")
+    try:
+        with os.fdopen(tmp_fd, "wb") as fh:
+            fh.write(input_bytes)
+
+        cmd = ["ffmpeg", "-y", "-i", tmp_path, "-map", "0:v:0", "-an", "-sn"]
+
+        if h264_hw:
+            enc_name, enc_flags = h264_hw
+            cmd += enc_flags + [
+                "-c:v", enc_name,
+                "-b:v", target_bitrate, "-minrate", target_bitrate,
+                "-maxrate", target_bitrate, "-bufsize", _double_bitrate(target_bitrate),
+            ]
+            if enc_name == "h264_vaapi":
+                cmd += ["-vf", f"format=nv12,hwupload,scale_vaapi=-2:{target_height}"]
+            else:
+                cmd += ["-vf", f"scale=-2:{target_height}"]
+        else:
+            cmd += [
+                "-c:v", "libx264", "-preset", "fast",
+                "-b:v", target_bitrate, "-minrate", target_bitrate,
+                "-maxrate", target_bitrate, "-bufsize", _double_bitrate(target_bitrate),
+                "-vf", f"scale=-2:{target_height}",
+            ]
+
+        cmd += ["-f", "mpegts", "pipe:1"]
+
+        logger.info(
+            "Virtual transcode: %dp at %s using %s",
+            target_height, target_bitrate,
+            h264_hw[0] if h264_hw else "libx264",
+        )
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = proc.communicate(timeout=120)
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg transcode failed (exit {proc.returncode}): "
+                f"{stderr[:500].decode('utf-8', errors='replace')}"
+            )
+        if not stdout:
+            raise RuntimeError("FFmpeg transcode produced empty output")
+
+        return stdout
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 class ProcessingResult:

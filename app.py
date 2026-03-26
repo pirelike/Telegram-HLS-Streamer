@@ -42,11 +42,11 @@ from flask import (
 
 from config import Config
 from stream_analyzer import analyze
-from video_processor import process, cleanup
+from video_processor import process, cleanup, transcode_segment
 from telegram_uploader import TelegramUploader, UploadResult
 from hls_manager import (
     register_job, generate_master_playlist, generate_media_playlist,
-    get_segment_info, list_jobs, get_job, count_jobs,
+    generate_virtual_media_playlist, get_segment_info, list_jobs, get_job, count_jobs,
 )
 import database as db
 
@@ -916,6 +916,12 @@ def api_settings():
         if parsed != getattr(Config, key):
             changed_runtime[key] = parsed
             validated_for_db[key] = Config.stringify_setting_value(key, parsed)
+
+    # Enforce mutual exclusivity of ABR_ENABLED and VIRTUAL_ABR_TIERS
+    proposed_abr = changed_runtime.get("ABR_ENABLED", Config.ABR_ENABLED)
+    proposed_virtual = changed_runtime.get("VIRTUAL_ABR_TIERS", Config.VIRTUAL_ABR_TIERS)
+    if proposed_abr and proposed_virtual:
+        return jsonify({"error": "ABR_ENABLED and VIRTUAL_ABR_TIERS cannot both be true"}), 400
 
     if validated_for_db:
         db.set_settings(validated_for_db)
@@ -1958,6 +1964,15 @@ def video_tier_playlist(job_id, index):
     return Response(playlist, content_type="application/vnd.apple.mpegurl")
 
 
+@app.route("/hls/<job_id>/video_virtual_<int:target_height>.m3u8")
+def video_virtual_playlist(job_id, target_height):
+    """Serve virtual on-demand media playlist for a lower-quality transcoded tier."""
+    playlist = generate_virtual_media_playlist(job_id, target_height)
+    if not playlist:
+        return jsonify({"error": "Not found"}), 404
+    return Response(playlist, content_type="application/vnd.apple.mpegurl")
+
+
 @app.route("/hls/<job_id>/audio_<int:index>.m3u8")
 def audio_playlist(job_id, index):
     """Serve audio track media playlist."""
@@ -2075,6 +2090,9 @@ class _SegmentCache:
 
 
 _segment_cache = _SegmentCache(max_bytes=Config.SEGMENT_CACHE_SIZE_MB * 1024 * 1024)
+
+# Limits concurrent on-demand transcodes for virtual ABR tiers.
+_transcode_semaphore = threading.Semaphore(Config.MAX_PARALLEL_ENCODES)
 
 
 def _get_segment_prefix(segment_key):
@@ -2235,6 +2253,31 @@ def _start_segment_download(file_id, bot_index, cache_key, state):
         _download_segment_to_state(file_id, bot_index, cache_key, state),
         _async_loop,
     )
+
+
+async def _fetch_segment_bytes(file_id, bot_index, cache_key):
+    """Download a segment from Telegram, populate the LRU cache, and return bytes.
+
+    Used by the virtual ABR tier path to fetch tier-0 data before transcoding.
+    If the segment is already in the LRU cache the download is skipped entirely.
+    """
+    cached = _segment_cache.get(cache_key)
+    if cached:
+        return cached
+    session = await _get_or_create_aiohttp_session()
+    url = await _telegram_uploader.get_file_url(file_id, bot_index)
+    buf = bytearray()
+    async with session.get(url) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"Telegram HTTP {resp.status} for {cache_key}")
+        async for chunk in resp.content.iter_chunked(65536):
+            if chunk:
+                buf.extend(chunk)
+    data = bytes(buf)
+    if not data:
+        raise RuntimeError(f"Empty Telegram response for {cache_key}")
+    _segment_cache.put(cache_key, data)
+    return data
 
 
 def _claim_segment_prefetch(cache_key):
@@ -2451,9 +2494,79 @@ def serve_thumbnail(job_id):
 
 # ─── Segment Proxy ───
 
+_VIRTUAL_KEY_RE = re.compile(r'^virtual_(\d+)p/(.+)$')
+
+
+def _serve_virtual_segment(job_id, segment_key):
+    """Serve a lower-quality segment transcoded on demand from the tier-0 source.
+
+    segment_key format: virtual_<height>p/<filename>  e.g. virtual_720p/video_0001.ts
+    The tier-0 segment is fetched from Telegram (or the LRU cache), transcoded via
+    FFmpeg to the target resolution/bitrate, cached, and returned as video/mp2t.
+    """
+    m = _VIRTUAL_KEY_RE.match(segment_key)
+    if not m:
+        return jsonify({"error": "Invalid virtual segment key"}), 400
+    target_height = int(m.group(1))
+    filename = m.group(2)
+
+    tier_bitrate = next(
+        (t["bitrate"] for t in Config.ABR_TIERS if t["height"] == target_height), None
+    )
+    if tier_bitrate is None:
+        return jsonify({"error": "Virtual tier not configured"}), 404
+
+    # 1. Return from virtual cache if already transcoded
+    virtual_cache_key = f"{job_id}/{segment_key}"
+    cached = _segment_cache.get(virtual_cache_key)
+    if cached is not None:
+        logger.debug("Virtual segment cache HIT: %s", virtual_cache_key)
+        return Response(cached, content_type="video/mp2t",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    # 2. Resolve tier-0 segment info from DB
+    tier0_key = f"video_0/{filename}"
+    info = get_segment_info(job_id, tier0_key)
+    if not info:
+        return jsonify({"error": "Tier-0 segment not found"}), 404
+
+    # 3. Fetch tier-0 bytes (LRU cache or Telegram download)
+    tier0_cache_key = f"{job_id}/{tier0_key}"
+    tier0_bytes = _segment_cache.get(tier0_cache_key)
+    if tier0_bytes is None:
+        try:
+            tier0_bytes = _run_async(
+                _fetch_segment_bytes(info["file_id"], info["bot_index"], tier0_cache_key),
+                timeout=60,
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch tier-0 segment %s: %s", tier0_key, exc)
+            return jsonify({"error": "Could not fetch source segment from Telegram"}), 500
+
+    # 4. Transcode with concurrency limit
+    if not _transcode_semaphore.acquire(timeout=30):
+        logger.warning("Transcode semaphore timeout for %s", virtual_cache_key)
+        return jsonify({"error": "Transcode queue full, retry later"}), 503
+    try:
+        transcoded = transcode_segment(tier0_bytes, target_height, tier_bitrate)
+    except RuntimeError as exc:
+        logger.error("transcode_segment failed for %s: %s", virtual_cache_key, exc)
+        return jsonify({"error": "Transcode failed"}), 500
+    finally:
+        _transcode_semaphore.release()
+
+    # 5. Cache and return
+    _segment_cache.put(virtual_cache_key, transcoded)
+    return Response(transcoded, content_type="video/mp2t",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.route("/segment/<job_id>/<path:segment_key>")
 def serve_segment(job_id, segment_key):
     """Proxy a segment from Telegram."""
+    if segment_key.startswith("virtual_"):
+        return _serve_virtual_segment(job_id, segment_key)
+
     info = get_segment_info(job_id, segment_key)
     if not info:
         return jsonify({"error": "Segment not found"}), 404
