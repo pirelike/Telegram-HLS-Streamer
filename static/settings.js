@@ -98,6 +98,7 @@ function renderField(setting) {
         inline.appendChild(input);
         inline.appendChild(lbl);
         wrap.appendChild(inline);
+        wrap.appendChild(buildDefaultHint(setting.default));
     } else if (setting.type === 'tiers') {
         input = document.createElement('textarea');
         input.id = `sf_${setting.key}`;
@@ -111,6 +112,7 @@ function renderField(setting) {
         descEl.textContent = setting.description;
         wrap.appendChild(input);
         wrap.appendChild(descEl);
+        wrap.appendChild(buildDefaultHint(setting.default));
         return wrap;
     } else {
         input = document.createElement('input');
@@ -129,9 +131,18 @@ function renderField(setting) {
         descEl.className = 'field-description';
         descEl.textContent = setting.description;
         wrap.appendChild(descEl);
+        wrap.appendChild(buildDefaultHint(setting.default));
     }
 
     return wrap;
+}
+
+function buildDefaultHint(defaultValue) {
+    const hintEl = document.createElement('div');
+    hintEl.className = 'field-description';
+    hintEl.style.color = 'var(--text-muted)';
+    hintEl.textContent = `Default: ${defaultValue}`;
+    return hintEl;
 }
 
 function collectCategoryValues(catKey) {

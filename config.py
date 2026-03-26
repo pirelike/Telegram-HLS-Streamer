@@ -195,7 +195,7 @@ class Config:
         ("TELEGRAM_MAX_FILE_SIZE", "TELEGRAM_MAX_FILE_SIZE", "int", "files", "Hard upload ceiling per file sent to Telegram (bytes)", 20971520),
         ("MAX_UPLOAD_SIZE", "MAX_UPLOAD_SIZE", "int", "files", "Maximum video upload size accepted from browser (bytes)", 107374182400),
         ("UPLOAD_CHUNK_SIZE", "UPLOAD_CHUNK_SIZE", "int", "files", "Client chunk size for chunked uploads (bytes)", 10485760),
-        ("SEGMENT_TARGET_SIZE", "SEGMENT_TARGET_SIZE", "int", "files", "Preferred HLS segment size target passed to FFmpeg (bytes)", 15728640),
+        ("SEGMENT_TARGET_SIZE", "SEGMENT_TARGET_SIZE", "int", "files", "Preferred max bytes per HLS segment (actual size varies by keyframes/bitrate)", 15728640),
         ("SEGMENT_CACHE_SIZE_MB", "SEGMENT_CACHE_SIZE_MB", "int", "files", "In-memory segment cache size (MB)", 200),
         ("SEGMENT_PREFETCH_COUNT", "SEGMENT_PREFETCH_COUNT", "int", "files", "Number of segments to prefetch ahead during playback", 3),
         ("SEGMENT_PREFETCH_MIN_FREE_BYTES", "SEGMENT_PREFETCH_MIN_FREE_BYTES", "int", "files", "Minimum free memory before prefetch is suspended (bytes, 0 = disabled)", 0),
@@ -207,7 +207,7 @@ class Config:
         ("VIDEO_BITRATE", "VIDEO_BITRATE", "str", "hw_accel", "Default video bitrate (e.g. 4M)", "4M"),
         ("AUDIO_BITRATE", "AUDIO_BITRATE", "str", "hw_accel", "Audio bitrate for AAC re-encode (e.g. 128k)", "128k"),
         # HLS
-        ("HLS_SEGMENT_DURATION", "HLS_SEGMENT_DURATION", "int", "hls", "Target HLS segment duration in seconds", 4),
+        ("HLS_SEGMENT_DURATION", "HLS_SEGMENT_DURATION", "int", "hls", "Target HLS segment duration in seconds for playlist timing (independent of byte-size target)", 4),
         # ABR
         ("ABR_ENABLED", "ABR_ENABLED", "bool", "abr", "Enable adaptive bitrate: produce multiple quality tiers", True),
         ("ENABLE_COPY_MODE", "ENABLE_COPY_MODE", "bool", "abr", "Skip re-encode when source stream is already HLS-compatible", True),
