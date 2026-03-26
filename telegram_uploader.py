@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 
@@ -468,6 +469,37 @@ class TelegramUploader:
             result.job_id, result.total_files, result.total_bytes,
         )
         return result
+
+    async def upload_document(self, data: bytes, filename: str) -> dict:
+        """Upload raw bytes as a Telegram document via bot index 0."""
+        if not self.bots:
+            raise RuntimeError("No Telegram bots configured")
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("data must be bytes")
+        safe_name = os.path.basename(filename or "document.bin")
+        if not safe_name:
+            safe_name = "document.bin"
+
+        bot_entry = self.bots[0]
+        suffix = os.path.splitext(safe_name)[1]
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as handle:
+                handle.write(bytes(data))
+                tmp_path = handle.name
+
+            segment = await self._upload_file_with_bot_lock(tmp_path, bot_entry)
+            return {
+                "file_id": segment.file_id,
+                "bot_index": segment.bot_index,
+                "file_size": segment.file_size,
+            }
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     async def get_file_url(self, file_id, bot_index):
         """Get a temporary download URL for a file from Telegram.

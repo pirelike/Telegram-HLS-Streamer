@@ -176,6 +176,9 @@ class Config:
     # Telegram bots
     BOTS = []
     UPLOAD_PARALLELISM = _int_env("UPLOAD_PARALLELISM", 8)
+    DB_AUTO_MERGE_INTERVAL_MINUTES = _int_env("DB_AUTO_MERGE_INTERVAL_MINUTES", 0)
+    DB_AUTO_MERGE_FILE_ID = os.getenv("DB_AUTO_MERGE_FILE_ID", "").strip()
+    DB_AUTO_MERGE_BOT_INDEX = _int_env("DB_AUTO_MERGE_BOT_INDEX", 0)
 
     # Registry of all UI-configurable settings.
     # Each entry: (attr_name, env_name, type_hint, category, description, default_value)
@@ -229,6 +232,9 @@ class Config:
         ("WATCH_IGNORE_SUFFIXES", "WATCH_IGNORE_SUFFIXES", "str", "watch", "Comma-separated suffixes to ignore (e.g. .part,.tmp)", ".part,.crdownload,.tmp,.partial"),
         # Telegram
         ("UPLOAD_PARALLELISM", "UPLOAD_PARALLELISM", "int", "telegram", "Max concurrent Telegram upload tasks per bot", 8),
+        ("DB_AUTO_MERGE_INTERVAL_MINUTES", "DB_AUTO_MERGE_INTERVAL_MINUTES", "int", "telegram", "How often to run automatic DB import merge (minutes, 0 = disabled)", 0),
+        ("DB_AUTO_MERGE_FILE_ID", "DB_AUTO_MERGE_FILE_ID", "str", "telegram", "Telegram file_id used by automatic DB merge import", ""),
+        ("DB_AUTO_MERGE_BOT_INDEX", "DB_AUTO_MERGE_BOT_INDEX", "int", "telegram", "Bot index to use when downloading DB_AUTO_MERGE_FILE_ID", 0),
     ]
 
     # Category display labels
@@ -455,6 +461,9 @@ class Config:
             suffix.lower() for suffix in _csv_env("WATCH_IGNORE_SUFFIXES", ".part,.crdownload,.tmp,.partial")
         )
         cls.UPLOAD_PARALLELISM = _int_env("UPLOAD_PARALLELISM", 8)
+        cls.DB_AUTO_MERGE_INTERVAL_MINUTES = _int_env("DB_AUTO_MERGE_INTERVAL_MINUTES", 0)
+        cls.DB_AUTO_MERGE_FILE_ID = os.getenv("DB_AUTO_MERGE_FILE_ID", "").strip()
+        cls.DB_AUTO_MERGE_BOT_INDEX = _int_env("DB_AUTO_MERGE_BOT_INDEX", 0)
         cls.load_bots()
         cls.load_from_db()
 

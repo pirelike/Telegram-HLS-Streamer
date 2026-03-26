@@ -78,6 +78,8 @@ _watch_state_lock = Lock()
 _watch_candidates = {}
 _watch_claimed_paths = set()
 _watch_failed_signatures = {}
+_db_auto_merge_started = False
+_db_auto_merge_lock = Lock()
 
 # ─── Upload Rate Limiting ───
 # Per-IP sliding window: maps IP -> deque of request timestamps
@@ -1097,6 +1099,209 @@ def api_bots_delete(bot_id):
 def _bots_configured():
     """Return True if at least one Telegram bot is configured."""
     return len(_telegram_uploader.bots) > 0
+
+
+def _bot_fingerprints(bots):
+    fingerprints = []
+    for i, bot in enumerate(bots):
+        token = str(bot.get("token", ""))
+        bot_id = token.split(":", 1)[0]
+        fingerprints.append({
+            "index": i,
+            "bot_id": bot_id,
+            "channel_id": bot.get("channel_id"),
+        })
+    return fingerprints
+
+
+def _import_db_from_telegram(file_id: str, bot_index: int) -> dict:
+    """Download an export JSON from Telegram, validate it, and merge it."""
+    try:
+        data = _run_async(_telegram_uploader.get_file_bytes(file_id, bot_index), timeout=120)
+        exported = json.loads(bytes(data).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Database import download/parse failed: %s", exc)
+        raise RuntimeError("Failed to download or parse import payload") from exc
+
+    required = {"bot_fingerprints", "jobs", "tracks", "segments"}
+    if exported.get("version") != 1:
+        raise ValueError("Unsupported export version")
+    if not required.issubset(exported.keys()):
+        missing = sorted(required - set(exported.keys()))
+        raise ValueError(f"Missing required keys: {missing}")
+
+    local_bots = {}
+    for i, bot in enumerate(Config.BOTS):
+        bot_id = str(bot.get("token", "")).split(":", 1)[0]
+        local_bots[bot_id] = i
+
+    missing_bot_ids = []
+    for fingerprint in exported["bot_fingerprints"]:
+        bot_id = str(fingerprint.get("bot_id", ""))
+        if bot_id not in local_bots:
+            missing_bot_ids.append(bot_id)
+    if missing_bot_ids:
+        raise LookupError(",".join(sorted(set(missing_bot_ids))))
+
+    bot_index_map = {}
+    for fingerprint in exported["bot_fingerprints"]:
+        source_index = int(fingerprint["index"])
+        bot_index_map[source_index] = local_bots[str(fingerprint["bot_id"])]
+
+    result = db.merge_from_export(
+        exported["jobs"],
+        exported["tracks"],
+        exported["segments"],
+        bot_index_map,
+    )
+    result["total_jobs_in_export"] = len(exported["jobs"])
+    return result
+
+
+def _start_db_auto_merge_worker():
+    """Periodically import/merge a configured Telegram DB export payload."""
+    global _db_auto_merge_started
+    with _db_auto_merge_lock:
+        if _db_auto_merge_started:
+            return
+        _db_auto_merge_started = True
+
+    def loop():
+        while True:
+            try:
+                interval_minutes = int(Config.DB_AUTO_MERGE_INTERVAL_MINUTES)
+            except Exception:
+                interval_minutes = 0
+
+            if interval_minutes <= 0:
+                time.sleep(30)
+                continue
+
+            sleep_seconds = max(60, interval_minutes * 60)
+            file_id = str(Config.DB_AUTO_MERGE_FILE_ID or "").strip()
+            bot_index = int(Config.DB_AUTO_MERGE_BOT_INDEX)
+
+            if not file_id:
+                logger.debug(
+                    "Auto DB merge enabled but DB_AUTO_MERGE_FILE_ID is empty; "
+                    "set it in settings/environment to activate imports."
+                )
+                time.sleep(sleep_seconds)
+                continue
+
+            if not re.match(r"^[a-zA-Z0-9_-]{50,255}$", file_id):
+                logger.warning("Auto DB merge skipped: invalid DB_AUTO_MERGE_FILE_ID format")
+                time.sleep(sleep_seconds)
+                continue
+
+            if bot_index < 0 or bot_index >= len(_telegram_uploader.bots):
+                logger.warning(
+                    "Auto DB merge skipped: DB_AUTO_MERGE_BOT_INDEX=%s out of range (%d bots)",
+                    bot_index,
+                    len(_telegram_uploader.bots),
+                )
+                time.sleep(sleep_seconds)
+                continue
+
+            try:
+                merged = _import_db_from_telegram(file_id, bot_index)
+                logger.info(
+                    "Auto DB merge completed: merged_jobs=%d skipped_jobs=%d merged_segments=%d total_jobs=%d",
+                    merged.get("merged_jobs", 0),
+                    merged.get("skipped_jobs", 0),
+                    merged.get("merged_segments", 0),
+                    merged.get("total_jobs_in_export", 0),
+                )
+            except LookupError as exc:
+                missing = [item for item in str(exc).split(",") if item]
+                logger.warning("Auto DB merge skipped: missing bot IDs %s", missing)
+            except ValueError as exc:
+                logger.warning("Auto DB merge skipped: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Auto DB merge failed: %s", exc)
+            finally:
+                db.close_conn()
+
+            time.sleep(sleep_seconds)
+
+    Thread(target=loop, daemon=True).start()
+    logger.info("Started automatic DB merge worker")
+
+
+_start_db_auto_merge_worker()
+
+
+@app.route("/api/db/export", methods=["POST"])
+def api_db_export():
+    """Export DB content to JSON and upload it to Telegram."""
+    if not Config.BOTS:
+        return jsonify({"error": "No Telegram bots configured."}), 503
+    try:
+        snapshot = db.export_to_dict()
+        payload = {
+            "version": 1,
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "bot_fingerprints": _bot_fingerprints(Config.BOTS),
+            "jobs": snapshot["jobs"],
+            "tracks": snapshot["tracks"],
+            "segments": snapshot["segments"],
+        }
+        export_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        uploaded = _run_async(
+            _telegram_uploader.upload_document(export_bytes, "db_export.json"),
+            timeout=120,
+        )
+        return jsonify({
+            "file_id": uploaded["file_id"],
+            "bot_index": uploaded["bot_index"],
+            "job_count": len(snapshot["jobs"]),
+            "segment_count": len(snapshot["segments"]),
+            "size_bytes": len(export_bytes),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Database export failed: %s", exc)
+        return jsonify({"error": "Failed to export database"}), 500
+
+
+@app.route("/api/db/import", methods=["POST"])
+def api_db_import():
+    """Import a DB export JSON from Telegram and merge into local DB."""
+    body = request.get_json() or {}
+    file_id = str(body.get("file_id", "")).strip()
+    bot_index = body.get("bot_index")
+
+    if not re.match(r"^[a-zA-Z0-9_-]{50,255}$", file_id):
+        return jsonify({"error": "Invalid or malformed Telegram file_id"}), 400
+    try:
+        bot_index = int(bot_index)
+    except (TypeError, ValueError):
+        return jsonify({"error": "bot_index must be an integer"}), 400
+    if bot_index < 0 or bot_index >= len(_telegram_uploader.bots):
+        return jsonify({"error": "bot_index out of range"}), 400
+
+    try:
+        result = _import_db_from_telegram(file_id, bot_index)
+    except LookupError as exc:
+        missing_bot_ids = [item for item in str(exc).split(",") if item]
+        return jsonify({
+            "error": "Missing bots required by export",
+            "missing_bot_ids": missing_bot_ids,
+        }), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Database merge failed: %s", exc)
+        return jsonify({"error": "Failed to merge import payload"}), 500
+
+    return jsonify({
+        "merged_jobs": result["merged_jobs"],
+        "skipped_jobs": result["skipped_jobs"],
+        "merged_segments": result["merged_segments"],
+        "total_jobs_in_export": result["total_jobs_in_export"],
+    })
+
 
 @app.route("/api/upload/init", methods=["POST"])
 def upload_init():

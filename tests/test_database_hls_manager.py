@@ -1093,6 +1093,132 @@ class TestSearchAndFiltering(TestDatabaseBase):
         self.assertEqual(len(jobs_empty), 0)
 
 
+class TestDatabaseExportMerge(TestDatabaseBase):
+    def test_export_to_dict_returns_jobs_tracks_segments(self):
+        analysis, processing, upload = self._sample_payload("job_export")
+        database.save_job("job_export", analysis, processing, upload)
+
+        exported = database.export_to_dict()
+
+        self.assertEqual(exported["version"], 1)
+        self.assertEqual(len(exported["jobs"]), 1)
+        self.assertEqual(len(exported["tracks"]), 3)
+        self.assertEqual(len(exported["segments"]), 3)
+
+    def test_merge_from_export_remaps_bot_indexes_and_skips_existing_jobs(self):
+        analysis, processing, upload = self._sample_payload("job_existing")
+        database.save_job("job_existing", analysis, processing, upload)
+
+        jobs = [
+            {
+                "job_id": "job_existing",
+                "filename": "old.mp4",
+                "duration": 10.0,
+                "file_size": 100,
+                "video_codec": "h264",
+                "video_width": 1280,
+                "video_height": 720,
+                "status": "complete",
+                "created_at": "2025-01-01 00:00:00",
+                "media_type": "Film",
+                "series_name": "",
+                "has_thumbnail": 0,
+                "is_series": 0,
+                "season_number": None,
+                "episode_number": None,
+                "part_number": None,
+            },
+            {
+                "job_id": "job_new",
+                "filename": "new.mp4",
+                "duration": 20.0,
+                "file_size": 200,
+                "video_codec": "h264",
+                "video_width": 1920,
+                "video_height": 1080,
+                "status": "complete",
+                "created_at": "2025-01-02 00:00:00",
+                "media_type": "Film",
+                "series_name": "",
+                "has_thumbnail": 0,
+                "is_series": 0,
+                "season_number": None,
+                "episode_number": None,
+                "part_number": None,
+            },
+        ]
+        tracks = [
+            {
+                "job_id": "job_new",
+                "track_type": "video",
+                "track_index": 0,
+                "codec": "h264",
+                "language": "und",
+                "title": "1920x1080",
+                "channels": 0,
+                "width": 1920,
+                "height": 1080,
+                "bitrate": "4000k",
+                "original_stream_index": 0,
+            },
+            {
+                "job_id": "job_new",
+                "track_type": "audio",
+                "track_index": 0,
+                "codec": "aac",
+                "language": "eng",
+                "title": "English",
+                "channels": 2,
+                "width": 0,
+                "height": 0,
+                "bitrate": "0",
+                "original_stream_index": 1,
+            },
+            {
+                "job_id": "job_new",
+                "track_type": "subtitle",
+                "track_index": 0,
+                "codec": "webvtt",
+                "language": "eng",
+                "title": "English",
+                "channels": 0,
+                "width": 0,
+                "height": 0,
+                "bitrate": "0",
+                "original_stream_index": 2,
+            },
+        ]
+        segments = []
+        for idx in range(10):
+            segments.append({
+                "job_id": "job_new",
+                "segment_key": f"video/video_{idx:04d}.ts",
+                "file_id": f"f{idx}",
+                "bot_index": 1,
+                "file_size": 100 + idx,
+                "duration": 4.0,
+            })
+
+        result = database.merge_from_export(jobs, tracks, segments, {1: 0})
+
+        self.assertEqual(result["merged_jobs"], 1)
+        self.assertEqual(result["skipped_jobs"], 1)
+        self.assertEqual(result["merged_segments"], 10)
+
+        merged_job = database.get_job("job_new")
+        self.assertIsNotNone(merged_job)
+        conn = database._get_conn()
+        bot_indexes = {
+            row["bot_index"]
+            for row in conn.execute(
+                "SELECT bot_index FROM segments WHERE job_id = ?",
+                ("job_new",),
+            ).fetchall()
+        }
+        self.assertEqual(bot_indexes, {0})
+
+
+
 class TestSettingsCRUD(TestDatabaseBase):
     def test_get_all_settings_empty(self):
         result = database.get_all_settings()

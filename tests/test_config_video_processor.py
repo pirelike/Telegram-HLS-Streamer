@@ -1089,6 +1089,13 @@ class TestConfigToDict(unittest.TestCase):
                 if s["type"] == "int":
                     self.assertIsInstance(s["value"], int, f"Int field {s['key']} is not int")
 
+    def test_to_dict_includes_auto_merge_settings(self):
+        result = config.Config.to_dict()
+        telegram_keys = {s["key"] for s in result["categories"]["telegram"]["settings"]}
+        self.assertIn("DB_AUTO_MERGE_INTERVAL_MINUTES", telegram_keys)
+        self.assertIn("DB_AUTO_MERGE_FILE_ID", telegram_keys)
+        self.assertIn("DB_AUTO_MERGE_BOT_INDEX", telegram_keys)
+
 
 class TestConfigLoadFromDb(unittest.TestCase):
     def test_load_from_db_overrides_int_setting(self):

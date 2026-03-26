@@ -299,6 +299,93 @@ class TestP0TodoFixes(unittest.TestCase):
         reload_mock.assert_called_once()
         reload_bots_mock.assert_called_once()
 
+    def test_api_db_export_uploads_payload_and_returns_counts(self):
+        exported = {
+            "version": 1,
+            "jobs": [{"job_id": "j1"}, {"job_id": "j2"}],
+            "tracks": [{"job_id": "j1"}],
+            "segments": [{"job_id": "j1"}, {"job_id": "j2"}, {"job_id": "j2"}],
+        }
+        with patch.object(app_module.db, "export_to_dict", return_value=exported), \
+             patch.object(app_module.Config, "BOTS", [{"token": "123:secret", "channel_id": -1001}]), \
+             patch.object(
+                 app_module._telegram_uploader,
+                 "upload_document",
+                 new=AsyncMock(return_value={"file_id": "A" * 50, "bot_index": 0, "file_size": 123}),
+             ):
+            response = self.client.post("/api/db/export")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["file_id"], "A" * 50)
+        self.assertEqual(payload["job_count"], 2)
+        self.assertEqual(payload["segment_count"], 3)
+        self.assertGreater(payload["size_bytes"], 0)
+
+    def test_api_db_import_round_trip_calls_merge_with_bot_remap(self):
+        export_payload = {
+            "version": 1,
+            "bot_fingerprints": [
+                {"index": 0, "bot_id": "222", "channel_id": -1002},
+                {"index": 1, "bot_id": "111", "channel_id": -1001},
+            ],
+            "jobs": [{"job_id": "j1"}],
+            "tracks": [{"job_id": "j1", "track_type": "video", "track_index": 0}],
+            "segments": [{"job_id": "j1", "segment_key": "video/v_0001.ts", "file_id": "F", "bot_index": 1}],
+        }
+        body_bytes = bytes(app_module.json.dumps(export_payload), "utf-8")
+        with patch.object(app_module.Config, "BOTS", [
+                {"token": "111:local_a", "channel_id": -1001},
+                {"token": "222:local_b", "channel_id": -1002},
+            ]), \
+            patch.object(app_module._telegram_uploader, "bots", [{"index": 0}, {"index": 1}]), \
+            patch.object(app_module._telegram_uploader, "get_file_bytes", new=AsyncMock(return_value=body_bytes)), \
+            patch.object(
+                app_module.db,
+                "merge_from_export",
+                return_value={"merged_jobs": 1, "skipped_jobs": 0, "merged_segments": 1},
+            ) as merge_mock:
+            response = self.client.post("/api/db/import", json={"file_id": "A" * 50, "bot_index": 0})
+
+        self.assertEqual(response.status_code, 200)
+        args = merge_mock.call_args.args
+        self.assertEqual(args[3], {0: 1, 1: 0})
+        self.assertEqual(response.get_json()["total_jobs_in_export"], 1)
+
+    def test_api_db_import_returns_409_for_missing_bots(self):
+        export_payload = {
+            "version": 1,
+            "bot_fingerprints": [{"index": 0, "bot_id": "999", "channel_id": -1009}],
+            "jobs": [],
+            "tracks": [],
+            "segments": [],
+        }
+        body_bytes = bytes(app_module.json.dumps(export_payload), "utf-8")
+        with patch.object(app_module.Config, "BOTS", [{"token": "111:local_a", "channel_id": -1001}]), \
+             patch.object(app_module._telegram_uploader, "bots", [{"index": 0}]), \
+             patch.object(app_module._telegram_uploader, "get_file_bytes", new=AsyncMock(return_value=body_bytes)):
+            response = self.client.post("/api/db/import", json={"file_id": "A" * 50, "bot_index": 0})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["missing_bot_ids"], ["999"])
+
+    def test_import_db_from_telegram_helper_merges_and_returns_totals(self):
+        export_payload = {
+            "version": 1,
+            "bot_fingerprints": [{"index": 0, "bot_id": "111", "channel_id": -1001}],
+            "jobs": [{"job_id": "j1"}],
+            "tracks": [],
+            "segments": [],
+        }
+        body_bytes = bytes(app_module.json.dumps(export_payload), "utf-8")
+        with patch.object(app_module.Config, "BOTS", [{"token": "111:local_a", "channel_id": -1001}]), \
+             patch.object(app_module._telegram_uploader, "get_file_bytes", new=AsyncMock(return_value=body_bytes)), \
+             patch.object(app_module.db, "merge_from_export", return_value={"merged_jobs": 1, "skipped_jobs": 0, "merged_segments": 0}):
+            result = app_module._import_db_from_telegram("A" * 50, 0)
+
+        self.assertEqual(result["merged_jobs"], 1)
+        self.assertEqual(result["total_jobs_in_export"], 1)
+
     # ─── /api/upload/init ───
 
     def test_upload_init_success(self):
