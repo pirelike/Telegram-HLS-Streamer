@@ -112,7 +112,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Reliability/cleanup: `JOB_TIMEOUT_SECONDS` (7200), `PENDING_UPLOAD_TTL_SECONDS` (86400), `PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (300), `JOB_RETENTION_DAYS` (0), `MAX_CONCURRENT_JOBS` (1)
 - Rate limiting (per IP): `UPLOAD_RATE_LIMIT_WINDOW` (60 s), `UPLOAD_RATE_LIMIT_MAX_REQUESTS` (100), `MAX_PENDING_UPLOADS_PER_IP` (5)
 - Watch folder: `WATCH_ENABLED` (false), `WATCH_ROOT`, `WATCH_DONE_DIR`, `WATCH_POLL_SECONDS` (5), `WATCH_STABLE_SECONDS` (30), `WATCH_VIDEO_EXTENSIONS`, `WATCH_IGNORE_SUFFIXES`
-- Telegram: `UPLOAD_PARALLELISM` (8), `DB_AUTO_MERGE_INTERVAL_MINUTES` (0 = disabled), `DB_AUTO_MERGE_FILE_ID`, `DB_AUTO_MERGE_BOT_INDEX`, and `BOTS` dynamically loaded from `TELEGRAM_BOT_TOKEN_1`…`_N` + `TELEGRAM_CHANNEL_ID_1`…`_N` (no hardcoded upper limit)
+- Telegram: `UPLOAD_PARALLELISM` (8), `DB_AUTO_MERGE_INTERVAL_MINUTES` (0 = disabled), `DB_AUTO_MERGE_FILE_ID`, `DB_AUTO_MERGE_BOT_INDEX`, and `BOTS` dynamically loaded from `TELEGRAM_BOT_TOKEN_1`…`_N` + `TELEGRAM_CHANNEL_ID_1`…`_N` (no hardcoded upper limit; duplicate tokens are skipped with a warning so each token appears once)
 - Runtime: `Config.load_from_db()` applies DB-persisted overrides; `POST /api/settings` now applies changed values in-place (no full `.env` re-read) and only triggers bot reloads for bot-related setting changes; `Config.reload()` remains the full re-read path used by bot add/remove and reset flows; `Config.to_dict()` returns all configurable settings for the settings API
 - Creates `uploads/` and `processing/` directories on import
 
@@ -346,7 +346,7 @@ Update `.env` values `SEGMENT_TARGET_SIZE`, `TELEGRAM_MAX_FILE_SIZE`, `HLS_SEGME
 
 ### Adding a New Bot
 Two options:
-1. **Via `.env`**: Add `TELEGRAM_BOT_TOKEN_N` and `TELEGRAM_CHANNEL_ID_N` (N = any number). `config.py` loads them automatically on next restart.
+1. **Via `.env`**: Add `TELEGRAM_BOT_TOKEN_N` and `TELEGRAM_CHANNEL_ID_N` (N = any number). `config.py` loads them automatically on next restart, deduplicating duplicate tokens by keeping the lowest suffix and warning for duplicates.
 2. **Via UI**: Use the Settings page (`/settings`) → Bot Management → Add Bot. Token/channel are validated live via `POST /api/bots/add` and persisted to the `bots` DB table (no restart needed).
 
 ---

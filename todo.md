@@ -60,7 +60,7 @@ Policy: application-level authentication is intentionally out of scope and shoul
 - [x] `database.py:241` — Missing index on `jobs(media_type)`. Fix: migration 8 adds `idx_jobs_media_type`.
 - [x] `database.py:215` — No index on `jobs(created_at)` despite `list_jobs()` sorting by `created_at DESC` on every request. Fix: migration 8 adds `idx_jobs_created_at`.
 - [x] `database.py:250,427,440` — `tracks.original_stream_index` defaults to `-1` as a sentinel but had no `CHECK(original_stream_index >= -1)` constraint. Fix: migration 8 adds the check and keeps the sentinel convention documented in schema/comments.
-- [ ] `config.py` (bot loading) — `Config.BOTS` is built from `TELEGRAM_BOT_TOKEN_*` env vars with no deduplication check. Accidentally duplicated tokens are silently accepted and inflate the round-robin pool, causing two entries to upload to the same bot in parallel and bypassing per-bot serialisation in `telegram_uploader.py`. Fix: deduplicate by token at load time and log a warning.
+- [x] `config.py` (bot loading) — `Config.BOTS` now deduplicates `TELEGRAM_BOT_TOKEN_*` entries by token at load time and logs a warning when a duplicate suffix is skipped, preventing accidental round-robin pool inflation and preserving per-bot serialisation in `telegram_uploader.py`.
 - [x] `database.py:278` — `settings.key` accepts arbitrary TEXT. A typo or renamed config key persists silently as a stale row and is reapplied on every `Config.reload()`, potentially overriding the intended value. Fix: `POST /api/settings` and DB write helpers validate keys against the configurable-settings keyset, and migration 8 purges orphaned keys.
 
 ## P4 — Security Hardening
