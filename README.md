@@ -140,6 +140,7 @@ LOCAL_PORT=5050
 FORCE_HTTPS=false
 BEHIND_PROXY=false
 CORS_ALLOWED_ORIGINS=
+TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 
 # Cloudflare tunnel
 CLOUDFLARED_ENABLED=false
@@ -160,7 +161,7 @@ AUDIO_BITRATE=128k
 
 # Hardware acceleration
 ENABLE_HARDWARE_ACCELERATION=true
-PREFERRED_ENCODER=vaapi
+PREFERRED_ENCODER=vaapi  # vaapi | nvenc | qsv | cpu
 VAAPI_DEVICE=
 
 # Adaptive bitrate
@@ -368,7 +369,7 @@ Finalize upload and enqueue processing.
 **Response JSON**
 ```json
 {
-  "job_id": "f0e1d2c3b4a5",
+  "job_id": "8f14e45f-ea6d-4d4f-97ca-2f8fda0a6f2d",
   "status": "queued"
 }
 ```
@@ -416,7 +417,7 @@ This endpoint proxies the segment from Telegram with the original bot. Cache hit
 Returns all configurable settings with current values, defaults, and descriptions organized by category.
 
 #### `POST /api/settings`
-Saves one or more settings and applies them live without restart. The server diffs incoming keys against current runtime values, persists only changed keys to SQLite, and applies those changes in-place (avoiding a full `.env`/bot reload on routine settings edits).
+Saves one or more settings and applies them live without restart. The server diffs incoming keys against current runtime values, persists only changed keys to SQLite, and applies those changes in-place (avoiding a full `.env`/bot reload on routine settings edits). FFmpeg-related values are validated: bitrate fields must match `<number><k|M|G>`, `PREFERRED_ENCODER` must be one of `vaapi|nvenc|qsv|cpu`, and `VAAPI_DEVICE` must be empty or `/dev/dri/renderD*`.
 
 #### `POST /api/settings/reset`
 Resets a specific setting to its default by removing its DB override (reverts to `.env` value).
@@ -425,10 +426,10 @@ Resets a specific setting to its default by removing its DB override (reverts to
 Lists all configured bots (tokens masked).
 
 #### `POST /api/bots/health`
-Probes all bot connections and returns per-bot reachability status.
+Probes all bot connections and returns per-bot reachability status. Failures return a generic client error while full exception details are logged server-side.
 
 #### `POST /api/bots/add`
-Validates a new bot token/channel pair (live `get_chat` check) and registers it.
+Validates a new bot token/channel pair (live `get_chat` check) and registers it. Validation failures return a generic client error while full exception details are logged server-side.
 
 #### `DELETE /api/bots/<id>`
 Removes a dynamically registered bot.

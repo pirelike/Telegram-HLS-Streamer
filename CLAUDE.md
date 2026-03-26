@@ -103,11 +103,11 @@ HLS playback: /hls/<job_id>/master.m3u8
 
 ### `config.py`
 - All settings loaded from environment variables (via `python-dotenv`)
-- Server: `HOST` (0.0.0.0), `PORT` (5050), `FORCE_HTTPS` (false), `BEHIND_PROXY` (false), `CLOUDFLARED_ENABLED` (false), `CORS_ALLOWED_ORIGINS` (empty)
+- Server: `HOST` (0.0.0.0), `PORT` (5050), `FORCE_HTTPS` (false), `BEHIND_PROXY` (false), `TRUSTED_PROXY_CIDRS` (localhost-only by default), `CLOUDFLARED_ENABLED` (false), `CORS_ALLOWED_ORIGINS` (empty; must be full `http(s)://host[:port]` origins or `*`)
 - File handling: `MAX_UPLOAD_SIZE` (100 GB), `UPLOAD_CHUNK_SIZE` (10 MB), `SEGMENT_TARGET_SIZE` (15 MB), `TELEGRAM_MAX_FILE_SIZE` (20 MB)
 - Playback cache: `SEGMENT_CACHE_SIZE_MB` (200), `SEGMENT_PREFETCH_COUNT` (3), `SEGMENT_PREFETCH_MIN_FREE_BYTES` (0 = no check)
 - HLS/encoding: `HLS_SEGMENT_DURATION` (4 s), `VIDEO_BITRATE` (4M), `AUDIO_BITRATE` (128k)
-- Hardware acceleration: `ENABLE_HARDWARE_ACCELERATION` (true), `PREFERRED_ENCODER` (vaapi), `VAAPI_DEVICE` (empty = auto-detect highest /dev/dri/renderD*), `MAX_PARALLEL_ENCODES` (2)
+- Hardware acceleration: `ENABLE_HARDWARE_ACCELERATION` (true), `PREFERRED_ENCODER` (`vaapi|nvenc|qsv|cpu`), `VAAPI_DEVICE` (empty = auto-detect highest /dev/dri/renderD*), `MAX_PARALLEL_ENCODES` (2)
 - ABR: `ABR_ENABLED` (true), `ENABLE_COPY_MODE` (true — passthrough tier 0 if source is h264/hevc; ABR tiers only at strictly lower resolutions), `ABR_TIERS` (1080p/10M, 720p/5M, 480p/2M, 360p/1200k), `TIER0_BITRATES`, `TIER0_BITRATE_DEFAULT`
 - Reliability/cleanup: `JOB_TIMEOUT_SECONDS` (7200), `PENDING_UPLOAD_TTL_SECONDS` (86400), `PENDING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (300), `JOB_RETENTION_DAYS` (0), `MAX_CONCURRENT_JOBS` (1)
 - Rate limiting (per IP): `UPLOAD_RATE_LIMIT_WINDOW` (60 s), `UPLOAD_RATE_LIMIT_MAX_REQUESTS` (100), `MAX_PENDING_UPLOADS_PER_IP` (5)
@@ -192,6 +192,7 @@ LOCAL_PORT=5050
 FORCE_HTTPS=false
 BEHIND_PROXY=false
 CORS_ALLOWED_ORIGINS=          # comma-separated origins, or * for all
+TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 
 # Cloudflare tunnel
 CLOUDFLARED_ENABLED=false
@@ -212,7 +213,7 @@ SEGMENT_PREFETCH_MIN_FREE_BYTES=0
 # Encoding
 HLS_SEGMENT_DURATION=4
 ENABLE_HARDWARE_ACCELERATION=true
-PREFERRED_ENCODER=vaapi        # vaapi | nvenc | qsv
+PREFERRED_ENCODER=vaapi        # vaapi | nvenc | qsv | cpu
 VAAPI_DEVICE=                  # empty = auto-detect /dev/dri/renderD*
 MAX_PARALLEL_ENCODES=2
 VIDEO_BITRATE=4M
