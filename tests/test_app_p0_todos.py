@@ -6,6 +6,7 @@ import time
 import types
 import unittest
 import io
+import concurrent.futures
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch, ANY
 
 # Provide a lightweight telegram stub so importing app works in test envs.
@@ -69,6 +70,11 @@ def _reset_state():
     app_module._segment_downloads.clear()
     app_module._segment_cache.clear()
     app_module._scheduled_segment_prefetches.clear()
+    with app_module._virtual_segment_futures_lock:
+        futures = list(app_module._virtual_segment_futures.values())
+        app_module._virtual_segment_futures.clear()
+    for future in futures:
+        future.cancel()
     app_module._last_player_segment.clear()
     app_module._watch_candidates.clear()
     app_module._watch_claimed_paths.clear()
@@ -1326,6 +1332,90 @@ class TestP0TodoFixes(unittest.TestCase):
         call_soon.assert_called_once()
         allow_chain_arg = call_soon.call_args[0][2]
         self.assertFalse(allow_chain_arg)
+
+    # ─── Virtual segment warmup ───
+
+    def test_schedule_virtual_segment_prefetch_starts_next_virtual_segments(self):
+        segments = [
+            {"segment_key": "video_0/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video_0/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
+            {"segment_key": "video_0/video_0003.ts", "duration": 4, "file_id": "fid3", "bot_index": 2},
+            {"segment_key": "video_0/video_0004.ts", "duration": 4, "file_id": "fid4", "bot_index": 3},
+        ]
+        done = concurrent.futures.Future()
+        done.set_result(b"ok")
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 2), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "has", side_effect=[False, False]), \
+             patch("app._ensure_virtual_segment_future", return_value=(done, True)) as ensure_future, \
+             patch.object(app_module._async_loop, "call_soon_threadsafe") as call_soon:
+            app_module._schedule_virtual_segment_prefetch("job1", "virtual_720p/video_0001.ts")
+
+        self.assertEqual(
+            [call.args[1] for call in ensure_future.call_args_list],
+            ["virtual_720p/video_0002.ts", "virtual_720p/video_0003.ts"],
+        )
+        self.assertEqual(call_soon.call_count, 2)
+
+    def test_schedule_virtual_segment_prefetch_counts_cached_and_inflight_virtual_segments(self):
+        segments = [
+            {"segment_key": "video_0/video_0001.ts", "duration": 4, "file_id": "fid1", "bot_index": 0},
+            {"segment_key": "video_0/video_0002.ts", "duration": 4, "file_id": "fid2", "bot_index": 1},
+            {"segment_key": "video_0/video_0003.ts", "duration": 4, "file_id": "fid3", "bot_index": 2},
+            {"segment_key": "video_0/video_0004.ts", "duration": 4, "file_id": "fid4", "bot_index": 3},
+            {"segment_key": "video_0/video_0005.ts", "duration": 4, "file_id": "fid5", "bot_index": 4},
+        ]
+        inflight = concurrent.futures.Future()
+        with app_module._virtual_segment_futures_lock:
+            app_module._virtual_segment_futures["job1/virtual_720p/video_0003.ts"] = inflight
+
+        done = concurrent.futures.Future()
+        done.set_result(b"ok")
+        with patch.object(app_module.Config, "SEGMENT_PREFETCH_COUNT", 3), \
+             patch.object(app_module.Config, "SEGMENT_PREFETCH_MIN_FREE_BYTES", 0), \
+             patch("app.db.get_segments_for_prefix", return_value=segments), \
+             patch.object(app_module._segment_cache, "has", side_effect=[True, False, False, False]), \
+             patch("app._ensure_virtual_segment_future", return_value=(done, True)) as ensure_future, \
+             patch.object(app_module._async_loop, "call_soon_threadsafe"):
+            app_module._schedule_virtual_segment_prefetch("job1", "virtual_720p/video_0001.ts")
+
+        self.assertEqual(
+            [call.args[1] for call in ensure_future.call_args_list],
+            ["virtual_720p/video_0004.ts"],
+        )
+
+    def test_serve_virtual_segment_cache_hit_schedules_prefetch_and_tracks_player_position(self):
+        with patch.object(app_module._segment_cache, "get", return_value=b"cached"), \
+             patch("app._schedule_virtual_segment_prefetch") as schedule_prefetch:
+            with app_module.app.test_request_context("/segment/job1/virtual_720p/video_0001.ts"):
+                resp = app_module._serve_virtual_segment("job1", "virtual_720p/video_0001.ts")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_data(), b"cached")
+        schedule_prefetch.assert_called_once_with("job1", "virtual_720p/video_0001.ts")
+        with app_module._last_player_segment_lock:
+            self.assertEqual(
+                app_module._last_player_segment.get(("job1", "virtual_720p")),
+                "virtual_720p/video_0001.ts",
+            )
+
+    def test_serve_virtual_segment_joins_inflight_transcode_and_schedules_prefetch(self):
+        future = concurrent.futures.Future()
+        future.set_result(b"virtual-bytes")
+        with app_module._virtual_segment_futures_lock:
+            app_module._virtual_segment_futures["job1/virtual_720p/video_0001.ts"] = future
+
+        with patch.object(app_module._segment_cache, "get", return_value=None), \
+             patch("app._schedule_virtual_segment_prefetch") as schedule_prefetch, \
+             patch("app._ensure_virtual_segment_future", wraps=app_module._ensure_virtual_segment_future) as ensure_future:
+            with app_module.app.test_request_context("/segment/job1/virtual_720p/video_0001.ts"):
+                resp = app_module._serve_virtual_segment("job1", "virtual_720p/video_0001.ts")
+
+        ensure_future.assert_called_once_with("job1", "virtual_720p/video_0001.ts", 720, "5M")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_data(), b"virtual-bytes")
+        schedule_prefetch.assert_called_once_with("job1", "virtual_720p/video_0001.ts")
 
     # ─── CORS headers ───
 

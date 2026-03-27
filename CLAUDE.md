@@ -88,6 +88,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Job cancellation: `POST /api/cancel/<job_id>` — terminates FFmpeg and cancels upload futures
 - HLS serving: `/hls/<job_id>/master.m3u8`, `/hls/<job_id>/video_<N>.m3u8`, audio/subtitle playlists
 - Segment proxy: `/segment/<job_id>/<segment_key>` — fetches TS/VTT from Telegram with in-memory LRU cache, single-flight dedup, and sequential prefetch
+- Virtual segment path: `virtual_<height>p/*.ts` requests now use shared single-flight transcode futures and virtual-tier ahead warmup bounded by `SEGMENT_PREFETCH_COUNT`
 - CORS headers on HLS/API endpoints (configurable via `CORS_ALLOWED_ORIGINS`)
 - Bot management: `GET /api/bots`, `POST /api/bots/health`, `POST /api/bots/add`, `DELETE /api/bots/<id>`
 - Live settings: `GET/POST /api/settings`, `POST /api/settings/reset` — changes applied without restart
@@ -106,6 +107,7 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Server: `HOST` (0.0.0.0), `PORT` (5050), `FORCE_HTTPS` (false), `BEHIND_PROXY` (false), `TRUSTED_PROXY_CIDRS` (localhost-only by default), `CLOUDFLARED_ENABLED` (false), `CORS_ALLOWED_ORIGINS` (empty; must be full `http(s)://host[:port]` origins or `*`)
 - File handling: `MAX_UPLOAD_SIZE` (100 GB), `UPLOAD_CHUNK_SIZE` (10 MB), `SEGMENT_TARGET_SIZE` (15 MB), `TELEGRAM_MAX_FILE_SIZE` (20 MB)
 - Playback cache: `SEGMENT_CACHE_SIZE_MB` (200), `SEGMENT_PREFETCH_COUNT` (3), `SEGMENT_PREFETCH_MIN_FREE_BYTES` (0 = no check)
+  - `SEGMENT_PREFETCH_COUNT` applies to both source segment warming and virtual-tier transcoded warming
 - HLS/encoding: `HLS_SEGMENT_DURATION` (4 s), `VIDEO_BITRATE` (4M), `AUDIO_BITRATE` (128k)
 - Hardware acceleration: `ENABLE_HARDWARE_ACCELERATION` (true), `PREFERRED_ENCODER` (`vaapi|nvenc|qsv|cpu`), `VAAPI_DEVICE` (empty = auto-detect highest /dev/dri/renderD*), `MAX_PARALLEL_ENCODES` (2)
 - ABR: `ABR_ENABLED` (true), `ENABLE_COPY_MODE` (true — passthrough tier 0 if source is h264/hevc; ABR tiers only at strictly lower resolutions), `ABR_TIERS` (1080p/10M, 720p/5M, 480p/2M, 360p/1200k), `TIER0_BITRATES`, `TIER0_BITRATE_DEFAULT`
@@ -360,7 +362,7 @@ These are documented in `todo.md` with priorities. Key points for contributors:
 Flask is synchronous while Telegram operations remain async. `app.py` now bridges that with a persistent background event loop, which removes the earlier per-request event loop churn. The longer-term architectural tradeoff is still that async Telegram I/O and sync Flask request handling live in the same process.
 
 ### Process-Local Segment Caching
-The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch for Telegram-backed reads. Cache misses stream through a temp-file backed single-flight download path, so one request fetches from Telegram while same-key followers wait and then reuse the completed artifact. `_SegmentCache.put()` also stages eviction planning before the mutation pass to shrink lock hold time during heavy eviction bursts. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
+The segment proxy (`/segment/`) now uses an in-memory LRU cache plus sequential prefetch. For Telegram-backed source reads, cache misses stream through a temp-file backed single-flight download path, so one request fetches from Telegram while same-key followers wait and then reuse the completed artifact. For virtual ABR reads (`virtual_<height>p/*.ts`), segment creation uses shared single-flight transcode futures and warmup keeps upcoming segments for the same requested virtual tier pre-transcoded and cached ahead, bounded by `SEGMENT_PREFETCH_COUNT`. `_SegmentCache.put()` also stages eviction planning before the mutation pass to shrink lock hold time during heavy eviction bursts. This is the intended setup for a single-process home deployment. If the app is ever scaled to multiple workers or nodes, each process will maintain its own cache and a shared backend such as Redis would be the follow-up path.
 
 ### Segment Size Depends on Encoder Planning
 Segment sizing is driven by FFmpeg `-hls_segment_size` planning plus forced 1-second keyframes. `SEGMENT_TARGET_SIZE` is the preferred size, while `TELEGRAM_MAX_FILE_SIZE` remains the hard upload limit if generated output still overshoots.
