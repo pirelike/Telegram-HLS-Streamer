@@ -7,7 +7,6 @@ let activeCategory = 'all';
 let searchQuery = '';
 let jobsPage = 1;
 let hasMoreJobs = false;
-let sidebarOpen = window.innerWidth > 1024;
 let navStack = [];
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
@@ -41,35 +40,9 @@ function renderBreadcrumbs() {
 }
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
-const hamburgerBtn = document.getElementById('hamburgerBtn');
-const sidebar = document.getElementById('sidebar');
-const mainContent = document.getElementById('mainContent');
 const searchInput = document.getElementById('searchInput');
 const videosContainer = document.getElementById('videosContainer');
 const loadMoreBtn = document.getElementById('loadMoreBtn');
-
-// ─── Sidebar ─────────────────────────────────────────────────────────────────
-function updateSidebar() {
-    if (window.innerWidth <= 1024) {
-        sidebar.classList.toggle('open', sidebarOpen);
-        sidebar.classList.remove('collapsed');
-        mainContent.classList.add('sidebar-collapsed');
-    } else {
-        sidebar.classList.remove('open');
-        sidebar.classList.toggle('collapsed', !sidebarOpen);
-        mainContent.classList.toggle('sidebar-collapsed', !sidebarOpen);
-        sidebar.style.transform = '';
-        mainContent.style.marginLeft = '';
-    }
-}
-
-hamburgerBtn.addEventListener('click', () => {
-    sidebarOpen = !sidebarOpen;
-    updateSidebar();
-});
-
-window.addEventListener('resize', () => { updateSidebar(); });
-updateSidebar();
 
 // ─── Category ────────────────────────────────────────────────────────────────
 function setCategory(cat) {
@@ -419,5 +392,10 @@ async function saveEditModal() {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-resetNav('Home');
-loadJobs();
+const _urlCategory = new URLSearchParams(location.search).get('category');
+if (_urlCategory) {
+    setCategory(_urlCategory);
+} else {
+    resetNav('Home');
+    loadJobs();
+}

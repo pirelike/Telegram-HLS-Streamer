@@ -85,3 +85,34 @@ themeToggleBtn.addEventListener('click', () => {
 });
 
 initTheme();
+
+// ─── Sidebar toggle (all pages) ──────────────────────────────────────────────
+let sidebarOpen = window.innerWidth > 1024;
+
+function updateSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const mainEl = document.getElementById('mainContent');
+    if (!sidebar) return;
+    if (window.innerWidth <= 1024) {
+        sidebar.classList.toggle('open', sidebarOpen);
+        sidebar.classList.remove('collapsed');
+        if (mainEl) mainEl.classList.add('sidebar-collapsed');
+    } else {
+        sidebar.classList.remove('open');
+        sidebar.classList.toggle('collapsed', !sidebarOpen);
+        if (mainEl) mainEl.classList.toggle('sidebar-collapsed', !sidebarOpen);
+        sidebar.style.transform = '';
+        if (mainEl) mainEl.style.marginLeft = '';
+    }
+}
+
+(function () {
+    const btn = document.getElementById('hamburgerBtn');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+        sidebarOpen = !sidebarOpen;
+        updateSidebar();
+    });
+    window.addEventListener('resize', updateSidebar);
+    updateSidebar();
+})();
