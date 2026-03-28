@@ -1624,9 +1624,6 @@ def upload_chunk():
       X-Chunk-Index: 0-based chunk number
     Body: raw binary chunk data
     """
-    rate_limited = _check_rate_limit()
-    if rate_limited:
-        return rate_limited
     _cleanup_expired_pending_uploads()
     upload_id = request.headers.get("X-Upload-Id")
     chunk_index = request.headers.get("X-Chunk-Index")
