@@ -1195,7 +1195,9 @@ def api_database_load():
 
 @app.route("/api/bots")
 def api_bots_list():
-    """List all configured bots with masked tokens."""
+    """List all configured bots with masked tokens and workload stats."""
+    workload = db.get_bot_workload_stats()
+    session_metrics = _telegram_uploader.get_metrics().get("per_bot", {})
     bots = []
     for i, bot_entry in enumerate(_telegram_uploader.bots):
         bot_config = Config.BOTS[i] if i < len(Config.BOTS) else {}
@@ -1204,12 +1206,23 @@ def api_bots_list():
         # "_db_id" is only set for DB-sourced bots by load_from_db()
         db_id = bot_config.get("_db_id")
         source = "db" if db_id is not None else "env"
+        w = workload.get(i, {})
+        s = session_metrics.get(i, {})
         bots.append({
             "index": i,
             "token_masked": masked,
             "channel_id": bot_entry["channel_id"],
             "source": source,
             "db_id": db_id,
+            "stats": {
+                "segment_count": w.get("segment_count", 0),
+                "total_bytes": w.get("total_bytes", 0),
+                "session_uploads": s.get("upload_count", 0),
+                "session_upload_bytes": s.get("upload_bytes", 0),
+                "session_downloads": s.get("download_count", 0),
+                "session_download_bytes": s.get("download_bytes", 0),
+                "session_errors": s.get("upload_errors", 0) + s.get("download_errors", 0),
+            },
         })
     return jsonify({"bots": bots})
 

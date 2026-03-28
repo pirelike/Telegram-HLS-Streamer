@@ -168,6 +168,7 @@ class TestDatabaseMigrations(TestDatabaseBase):
                 (6, "create_settings_and_bots_tables"),
                 (7, "add_listing_performance_indexes"),
                 (8, "enforce_data_constraints"),
+                (9, "add_bot_index_segment_index"),
             ],
         )
 
@@ -269,7 +270,7 @@ class TestDatabaseMigrations(TestDatabaseBase):
         database.init_db()
         conn = database._get_conn()
         rows = conn.execute("SELECT revision FROM schema_migrations ORDER BY revision").fetchall()
-        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([row["revision"] for row in rows], [1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     def test_migration_adds_new_indexes(self):
         conn = database._get_conn()

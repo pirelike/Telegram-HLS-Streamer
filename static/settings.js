@@ -227,6 +227,9 @@ function renderBotList(bots) {
         <th>#</th>
         <th>Token</th>
         <th>Channel ID</th>
+        <th>Segments</th>
+        <th>Storage</th>
+        <th>Session</th>
         <th>Status</th>
         <th>Actions</th>
     </tr></thead>`;
@@ -243,10 +246,20 @@ function renderBotList(bots) {
 function renderBotRow(bot) {
     const tr = document.createElement('tr');
     tr.id = `bot-row-${bot.index}`;
+    const stats = bot.stats || {};
+    const sessionLabel = stats.session_uploads > 0
+        ? `${stats.session_uploads}↑`
+        : '—';
+    const sessionTitle = stats.session_uploads > 0
+        ? `${stats.session_uploads} uploads (${formatBytes(stats.session_upload_bytes || 0)}), ${stats.session_downloads || 0} downloads, ${stats.session_errors || 0} errors`
+        : 'No uploads this session';
     tr.innerHTML = `
         <td>${bot.index}</td>
         <td><code>${escHtml(bot.token_masked)}</code>${bot.source === 'env' ? ' <span style="font-size:0.75rem;color:var(--text-muted)">(env)</span>' : ''}</td>
         <td><code>${bot.channel_id}</code></td>
+        <td style="font-size:0.85rem">${(stats.segment_count || 0).toLocaleString()}</td>
+        <td style="font-size:0.85rem">${formatBytes(stats.total_bytes || 0)}</td>
+        <td style="font-size:0.85rem" title="${escHtml(sessionTitle)}">${sessionLabel}${stats.session_errors > 0 ? ` <span style="color:var(--danger)">${stats.session_errors}✗</span>` : ''}</td>
         <td><span class="bot-status-dot" id="bot-dot-${bot.index}"></span><span id="bot-status-${bot.index}" style="font-size:0.85rem;color:var(--text-muted)">—</span></td>
         <td class="bot-actions">
             <button class="action-btn" onclick="checkBotHealth(${bot.index})">Check</button>
