@@ -15,9 +15,9 @@
 <nav class="navbar">
     <div class="navbar-left">
         {% block navbar_left %}
-        <a class="hamburger" href="/" title="Back to home" aria-label="Back to home">
+        <button class="hamburger" id="hamburgerBtn" title="Toggle sidebar" aria-label="Toggle sidebar">
             <i class="material-icons-round">menu</i>
-        </a>
+        </button>
         <a class="logo" href="/"><span>TG</span>HLS</a>
         {% endblock %}
     </div>
@@ -38,7 +38,21 @@
     </div>
 </nav>
 
+<div class="app-body">
+
+{% block sidebar %}
+<aside class="sidebar" id="sidebar">
+    <a class="sidebar-item" href="/"><i class="sidebar-icon material-icons-round">home</i> Home</a>
+    <a class="sidebar-item" href="/?category=Film"><i class="sidebar-icon material-icons-round">movie</i> Films</a>
+    <a class="sidebar-item" href="/?category=Series"><i class="sidebar-icon material-icons-round">tv</i> Series</a>
+    <a class="sidebar-item" href="/?category=Anime Film"><i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films</a>
+    <a class="sidebar-item" href="/?category=Anime TV"><i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV</a>
+</aside>
+{% endblock %}
+
 {% block body %}{% endblock %}
+
+</div>
 
 <script src="/static/shared.js"></script>
 {% block scripts %}{% endblock %}

@@ -16,28 +16,27 @@
 </div>
 {% endblock %}
 
+{% block sidebar %}
+<aside class="sidebar" id="sidebar">
+    <div class="sidebar-item active" data-category="all" onclick="setCategory('all')">
+        <i class="sidebar-icon material-icons-round">home</i> Home
+    </div>
+    <div class="sidebar-item" data-category="Film" onclick="setCategory('Film')">
+        <i class="sidebar-icon material-icons-round">movie</i> Films
+    </div>
+    <div class="sidebar-item" data-category="Series" onclick="setCategory('Series')">
+        <i class="sidebar-icon material-icons-round">tv</i> Series
+    </div>
+    <div class="sidebar-item" data-category="Anime Film" onclick="setCategory('Anime Film')">
+        <i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films
+    </div>
+    <div class="sidebar-item" data-category="Anime TV" onclick="setCategory('Anime TV')">
+        <i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV
+    </div>
+</aside>
+{% endblock %}
+
 {% block body %}
-<div class="app-body">
-
-    <!-- ── Sidebar ── -->
-    <aside class="sidebar" id="sidebar">
-        <div class="sidebar-item active" data-category="all" onclick="setCategory('all')">
-            <i class="sidebar-icon material-icons-round">home</i> Home
-        </div>
-        <div class="sidebar-item" data-category="Film" onclick="setCategory('Film')">
-            <i class="sidebar-icon material-icons-round">movie</i> Films
-        </div>
-        <div class="sidebar-item" data-category="Series" onclick="setCategory('Series')">
-            <i class="sidebar-icon material-icons-round">tv</i> Series
-        </div>
-        <div class="sidebar-item" data-category="Anime Film" onclick="setCategory('Anime Film')">
-            <i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films
-        </div>
-        <div class="sidebar-item" data-category="Anime TV" onclick="setCategory('Anime TV')">
-            <i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV
-        </div>
-    </aside>
-
     <!-- ── Main ── -->
     <main class="main" id="mainContent">
         <div class="browse-view" id="browseView">
@@ -45,8 +44,6 @@
             <button class="load-more-btn" id="loadMoreBtn" onclick="loadMoreJobs()">Load more</button>
         </div>
     </main>
-
-</div>
 
 <!-- ── Edit Metadata Modal ── -->
 <div class="modal-overlay" id="editModal">
