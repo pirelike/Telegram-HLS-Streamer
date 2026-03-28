@@ -181,6 +181,13 @@ HLS playback: /hls/<job_id>/master.m3u8
 - Lists previous jobs with metadata (audio/subtitle counts, segment counts, series grouping)
 - Settings page reads `/api/settings` and `/api/bots`, allows live edits and bot add/remove
 
+### `static/watch.js`
+- Drives the `/watch/<job_id>` page: fetches job metadata via `GET /api/jobs/<job_id>`, initialises Shaka Player, renders the info panel
+- `renderInfoPanel(job)` is called **before** `player.load()` so title/duration/track counts and action buttons appear immediately from the pre-fetched job object — not after the HLS manifest round-trip completes
+- Shaka is configured with `abr.defaultBandwidthEstimate: 10_000_000` (10 Mbps) so the player starts at the highest available ABR quality tier; ABR still adapts down if actual bandwidth is lower
+- Error recovery: handles Shaka error code 3017 (MSE quota exceeded) with a one-time buffer-size reduction and `retryStreaming()` before surfacing the error to the user
+- Edit Metadata modal (`openEditModal`, `saveEditModal`) patches job fields via `PATCH /api/jobs/<job_id>` and updates the in-memory `currentJob` object in-place without a page reload
+
 ---
 
 ## Configuration (`.env`)

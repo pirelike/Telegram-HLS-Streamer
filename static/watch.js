@@ -57,6 +57,9 @@ async function initPlayer(job) {
                 rebufferingGoal: 2,
                 bufferBehind: 20,
             },
+            abr: {
+                defaultBandwidthEstimate: 10_000_000,
+            },
             preferredAudioLanguage: 'und',
             preferredTextLanguage: '',
         });
@@ -91,6 +94,8 @@ async function initPlayer(job) {
             }
         });
 
+        renderInfoPanel(job);
+
         try { await player.load(m3u8Url); }
         catch (e) {
             console.error('Shaka load error', e);
@@ -98,8 +103,6 @@ async function initPlayer(job) {
                 `<p style="color:var(--danger);margin-bottom:0.5rem">Failed to load stream: ${escapeHtml(e.message || String(e))}</p>`);
         }
     }
-
-    renderInfoPanel(job);
 }
 
 function renderInfoPanel(job) {

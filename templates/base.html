@@ -15,6 +15,9 @@
 <nav class="navbar">
     <div class="navbar-left">
         {% block navbar_left %}
+        <a class="hamburger" href="/" title="Back to home" aria-label="Back to home">
+            <i class="material-icons-round">menu</i>
+        </a>
         <a class="logo" href="/"><span>TG</span>HLS</a>
         {% endblock %}
     </div>
@@ -22,8 +25,9 @@
         {% block navbar_center %}{% endblock %}
     </div>
     <div class="navbar-right">
-        <a href="/upload" class="upload-btn">
-            <i class="material-icons-round">add</i> Upload
+        <a href="/upload" class="upload-btn" aria-label="Upload">
+            <i class="material-icons-round">add</i>
+            <span class="upload-btn-text">Upload</span>
         </a>
         <button class="navbar-icon-btn" id="themeToggleBtn" title="Toggle dark mode">
             <i class="material-icons-round">dark_mode</i>
