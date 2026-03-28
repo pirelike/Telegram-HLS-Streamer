@@ -105,7 +105,7 @@ class TelegramUploader:
                 "channel_id": bot_config["channel_id"],
                 "index": i,
             })
-        self._bot_counter = 0
+        self._bot_counter = self._load_bot_counter()
         # Locks are created lazily inside the event loop to support Python 3.8/3.9,
         # where asyncio.Lock() cannot be created outside a running event loop.
         self._bot_locks: list | None = None
@@ -117,6 +117,7 @@ class TelegramUploader:
             "download_count": 0,
             "download_errors": 0,
             "download_total_seconds": 0.0,
+            "per_bot": {},
         }
         self._metrics_lock = threading.Lock()
 
@@ -187,7 +188,7 @@ class TelegramUploader:
             })
         with self._bot_state_lock:
             self.bots = new_bots
-            self._bot_counter = 0
+            self._bot_counter = self._load_bot_counter()
             self._bot_locks = None  # will be recreated lazily on next use
             bot_count = len(self.bots)
         logger.info("Reloaded %d Telegram bots", bot_count)
@@ -215,6 +216,20 @@ class TelegramUploader:
                 )
             return self._bot_locks
 
+    @staticmethod
+    def _load_bot_counter():
+        """Read the persisted last-used bot index from DB and return the next counter value."""
+        try:
+            import database  # noqa: PLC0415
+            last = database.get_last_bot_index()
+            from config import Config  # noqa: PLC0415
+            bot_count = len(Config.BOTS)
+            if bot_count == 0:
+                return 0
+            return (last + 1) % bot_count
+        except Exception:
+            return 0
+
     def _record_metric(self, prefix, elapsed, error=False):
         """Increment operation counters under the metrics lock."""
         with self._metrics_lock:
@@ -224,10 +239,31 @@ class TelegramUploader:
                 self.metrics[f"{prefix}_count"] += 1
                 self.metrics[f"{prefix}_total_seconds"] += elapsed
 
-    def get_metrics(self):
-        """Return a snapshot copy of the metrics dict."""
+    def _record_bot_metric(self, bot_index, prefix, file_size=0, error=False):
+        """Increment per-bot operation counters under the metrics lock."""
         with self._metrics_lock:
-            return dict(self.metrics)
+            entry = self.metrics["per_bot"].setdefault(bot_index, {
+                "upload_count": 0,
+                "upload_bytes": 0,
+                "upload_errors": 0,
+                "download_count": 0,
+                "download_bytes": 0,
+                "download_errors": 0,
+            })
+            if error:
+                entry[f"{prefix}_errors"] += 1
+            else:
+                entry[f"{prefix}_count"] += 1
+                entry[f"{prefix}_bytes"] += file_size
+
+    def get_metrics(self):
+        """Return a snapshot copy of the metrics dict (deep-copies per_bot)."""
+        with self._metrics_lock:
+            snapshot = {k: v for k, v in self.metrics.items() if k != "per_bot"}
+            snapshot["per_bot"] = {
+                idx: dict(stats) for idx, stats in self.metrics["per_bot"].items()
+            }
+            return snapshot
 
     @staticmethod
     def _raise_if_cancelled(cancel_event):
@@ -288,11 +324,13 @@ class TelegramUploader:
                     file_name, bot_entry["index"], file_id[:20],
                 )
                 self._record_metric("upload", time.monotonic() - t0)
+                self._record_bot_metric(bot_entry["index"], "upload", file_size=file_size)
                 return UploadedSegment(file_id, bot_entry["index"], file_name, file_size)
 
             except BadRequest as e:
                 logger.error("Bad request for %s (not retrying): %s", file_name, e)
                 self._record_metric("upload", time.monotonic() - t0, error=True)
+                self._record_bot_metric(bot_entry["index"], "upload", error=True)
                 raise RuntimeError(f"Telegram rejected upload for {file_name}: {e}") from e
             except Forbidden as e:
                 logger.error(
@@ -300,6 +338,7 @@ class TelegramUploader:
                     file_name, bot_entry["index"],
                 )
                 self._record_metric("upload", time.monotonic() - t0, error=True)
+                self._record_bot_metric(bot_entry["index"], "upload", error=True)
                 raise RuntimeError(
                     f"Bot {bot_entry['index']} is forbidden from channel {channel_id}"
                 ) from e
@@ -309,6 +348,7 @@ class TelegramUploader:
                     file_name,
                 )
                 self._record_metric("upload", time.monotonic() - t0, error=True)
+                self._record_bot_metric(bot_entry["index"], "upload", error=True)
                 raise
             except TimedOut:
                 wait = 2 ** attempt
@@ -329,9 +369,11 @@ class TelegramUploader:
                     await self._sleep_with_cancel(wait, cancel_event)
                 else:
                     self._record_metric("upload", time.monotonic() - t0, error=True)
+                    self._record_bot_metric(bot_entry["index"], "upload", error=True)
                     raise
 
         self._record_metric("upload", time.monotonic() - t0, error=True)
+        self._record_bot_metric(bot_entry["index"], "upload", error=True)
         raise RuntimeError(f"Failed to upload {file_path} after {retries} attempts")
 
     async def _upload_file_with_bot_lock(self, file_path, bot_entry, cancel_event=None):
@@ -464,6 +506,16 @@ class TelegramUploader:
         result.total_files = len(result.segments)
         result.total_bytes = sum(s.file_size for s in result.segments.values())
 
+        # Persist the round-robin counter so the next upload (or after a restart)
+        # continues from where we left off rather than resetting to bot 0.
+        try:
+            import database  # noqa: PLC0415
+            with self._bot_state_lock:
+                last_used = (self._bot_counter - 1) % max(len(self.bots), 1)
+            database.set_last_bot_index(last_used)
+        except Exception as exc:
+            logger.warning("Could not persist last bot index: %s", exc)
+
         logger.info(
             "Upload complete for %s: %d files, %d bytes",
             result.job_id, result.total_files, result.total_bytes,
@@ -538,6 +590,7 @@ class TelegramUploader:
                 file = await bot.get_file(file_id)
                 data = await file.download_as_bytearray()
                 self._record_metric("download", time.monotonic() - t0)
+                self._record_bot_metric(bot_index, "download", file_size=len(data))
                 return data
             except (TimedOut, NetworkError) as e:
                 if attempt < retries - 1:
@@ -547,4 +600,5 @@ class TelegramUploader:
                 else:
                     logger.error("Download failed after %d attempts for file_id=%s", retries, file_id[:20])
                     self._record_metric("download", time.monotonic() - t0, error=True)
+                    self._record_bot_metric(bot_index, "download", error=True)
                     raise

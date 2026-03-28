@@ -477,7 +477,10 @@ class TestTelegramUploaderMetrics(unittest.IsolatedAsyncioTestCase):
     def test_get_metrics_initial_values_are_zero(self):
         m = self.uploader.get_metrics()
         for key, val in m.items():
-            self.assertEqual(val, 0 if isinstance(val, int) else 0.0)
+            if key == "per_bot":
+                self.assertEqual(val, {})
+            else:
+                self.assertEqual(val, 0 if isinstance(val, int) else 0.0)
 
     def test_record_metric_success_increments_count_and_time(self):
         self.uploader._record_metric("upload", 1.5)

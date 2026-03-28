@@ -1072,6 +1072,7 @@ class TestUploadSizeGate(unittest.TestCase):
         uploader.metrics = {
             "upload_count": 0, "upload_errors": 0, "upload_total_seconds": 0.0,
             "download_count": 0, "download_errors": 0, "download_total_seconds": 0.0,
+            "per_bot": {},
         }
         uploader._metrics_lock = threading.Lock()
         return uploader

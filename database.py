@@ -22,7 +22,7 @@ from typing import Set
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "streamer.db")
-LATEST_SCHEMA_REVISION = 8
+LATEST_SCHEMA_REVISION = 9
 VALID_MEDIA_TYPES = ("Film", "Series", "Anime Film", "Anime TV", "Anime")
 
 # Thread-local connections for SQLite (which doesn't allow sharing across threads)
@@ -510,6 +510,12 @@ def _migration_008_enforce_data_constraints(conn: sqlite3.Connection):
         )
 
 
+def _migration_009_add_bot_index_segment_index(conn: sqlite3.Connection):
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_segments_bot_index ON segments(bot_index);
+    """)
+
+
 MIGRATIONS = [
     (1, "create_base_schema", _migration_001_create_base_schema),
     (2, "add_track_dimensions_and_stream_index", _migration_002_add_track_dimensions_and_stream_index),
@@ -519,6 +525,7 @@ MIGRATIONS = [
     (6, "create_settings_and_bots_tables", _migration_006_create_settings_and_bots_tables),
     (7, "add_listing_performance_indexes", _migration_007_add_listing_performance_indexes),
     (8, "enforce_data_constraints", _migration_008_enforce_data_constraints),
+    (9, "add_bot_index_segment_index", _migration_009_add_bot_index_segment_index),
 ]
 
 
@@ -926,6 +933,55 @@ def get_segments_for_prefix(job_id, prefix):
     ).fetchall()
     return [{"segment_key": r["segment_key"], "duration": r["duration"],
              "file_id": r["file_id"], "bot_index": r["bot_index"]} for r in rows]
+
+
+# ─── Bot round-robin state ────────────────────────────────────────────────────
+# These functions store/retrieve the last-used bot index so the uploader can
+# resume its round-robin counter across restarts.  The key is intentionally
+# prefixed with "_" to distinguish it from user-configurable settings.
+
+_LAST_BOT_INDEX_KEY = "_last_bot_index"
+
+
+def get_last_bot_index() -> int:
+    """Return the bot index last used by the uploader (0 if never set)."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = ?", (_LAST_BOT_INDEX_KEY,)
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["value"])
+    except (ValueError, TypeError):
+        return 0
+
+
+def set_last_bot_index(index: int):
+    """Persist the last-used bot index for round-robin continuity across restarts."""
+    conn = _get_conn()
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (_LAST_BOT_INDEX_KEY, str(int(index))),
+        )
+
+
+def get_bot_workload_stats() -> dict:
+    """Return per-bot aggregate upload stats from the segments table.
+
+    Returns a dict keyed by bot_index:
+        {bot_index: {"segment_count": int, "total_bytes": int}}
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT bot_index, COUNT(*) AS segment_count, COALESCE(SUM(file_size), 0) AS total_bytes "
+        "FROM segments GROUP BY bot_index"
+    ).fetchall()
+    return {
+        r["bot_index"]: {"segment_count": r["segment_count"], "total_bytes": r["total_bytes"]}
+        for r in rows
+    }
 
 
 def list_jobs(limit=50, offset=0, search=None, category=None, group_by=None, series_name=None, season_number=None):
