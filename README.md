@@ -225,6 +225,8 @@ TELEGRAM_CHANNEL_ID_8=
 - `TELEGRAM_MAX_FILE_SIZE` is the hard upload ceiling. Segment planning clamps under it, and uploads still fail fast if a file exceeds it.
 - `SEGMENT_CACHE_SIZE_MB` is a shared cache budget for the full app process, not per viewer.
 - `SEGMENT_PREFETCH_COUNT` controls how many upcoming segments are warmed per active playback flow.
+  - For regular `video*/*.ts` playback, this warms Telegram-backed source segments.
+  - For virtual tiers (`virtual_<height>p/*.ts`), this warms fully transcoded virtual segments after the first virtual segment request.
 - `SEGMENT_PREFETCH_MIN_FREE_BYTES` stops prefetch when the cache is close to full, reducing churn on smaller home servers.
 - `UPLOAD_CHUNK_SIZE` must match frontend expectation if using bundled UI (currently 10MB).
 - Upload finalize now enqueues first and only then drops pending-upload tracking, so failed enqueue attempts keep state/files consistent for retry instead of orphaning disk data.
@@ -478,6 +480,15 @@ The processor supports four encoding scenarios controlled by `ABR_ENABLED` and `
 When copy mode is active, only ABR tiers **strictly below** the source resolution are produced (same-resolution tiers are excluded since tier 0 already covers it via passthrough). When copy mode is off, ABR tiers at or below the source resolution are produced, including same-resolution lower-bitrate variants.
 
 If the source codec is not h264/hevc, copy mode falls back to re-encoding tier 0 regardless of the `ENABLE_COPY_MODE` setting.
+### Virtual ABR tiers
+
+When `VIRTUAL_ABR_TIERS=true` and only one real video tier exists, lower tiers are exposed as virtual playlists and segments are transcoded on demand from `video_0`.
+
+Virtual playback now keeps ahead-of-playback buffers warm per requested virtual tier:
+- warmup starts only after the first request for that virtual tier segment
+- warmup depth is bounded by `SEGMENT_PREFETCH_COUNT`
+- in-flight virtual transcodes are single-flight deduplicated so concurrent requests and prefetch workers share one encode
+- total virtual transcode concurrency is still bounded by `MAX_PARALLEL_ENCODES`
 
 ### Audio and subtitles
 
@@ -520,7 +531,11 @@ If running behind Nginx/Caddy/Traefik:
 
 ### Playback cache behavior
 
-The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. Sequential prefetch can warm upcoming segments into RAM for faster playback on the next requests. The cache eviction path now plans eviction candidates before the mutation pass to reduce lock hold time when evictions are frequent. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
+The `/segment/...` proxy uses an in-memory LRU cache inside the app process. Misses are de-duplicated per segment key, streamed to the first client, and spilled to a temp file so the whole Telegram response is not buffered in RAM before serving. Sequential prefetch warms upcoming segments for faster playback on the next requests:
+- regular `video*/*.ts`: prefetch downloads Telegram-backed source segments
+- virtual `virtual_<height>p/*.ts`: prefetch transcodes and caches upcoming virtual segments for the same requested virtual tier
+
+The cache eviction path now plans eviction candidates before the mutation pass to reduce lock hold time when evictions are frequent. For the intended home deployment, run a single app process and treat that process-local cache as the normal operating mode.
 
 If you run multiple workers or multiple app instances, they will not share cached segments. Playback will still work, but hot segments may be re-downloaded from Telegram by each worker or node.
 

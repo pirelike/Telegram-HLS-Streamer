@@ -77,6 +77,7 @@ Policy: application-level authentication is intentionally out of scope and shoul
 ## P5 — Operational
 
 - [x] `app.py` + `telegram_uploader.py`: metrics surface added — `/api/metrics` exposes queue depth, cache hit/miss/eviction counts, prefetch pending, and Telegram upload/download counters.
+- [x] `app.py`: virtual-tier playback warmup added — copy-mode virtual segments now pre-transcode ahead per requested `virtual_<height>p` tier using `SEGMENT_PREFETCH_COUNT`, with single-flight transcode dedupe shared between request path and background warmup.
 - [x] `config.py:load_bots`: bot discovery is no longer hardcoded to `TELEGRAM_BOT_TOKEN_1` through `_8`; the loader now iterates env vars without an upper limit, so larger pools are pure configuration.
 - [~] `database.py:23` — `streamer.db` is the sole mapping of `segment_key → file_id`; losing it makes uploaded Telegram content inaccessible.
   - Done: Telegram-based DB transfer exists via `POST /api/db/export` and `POST /api/db/import`, plus configurable periodic auto-merge import (`DB_AUTO_MERGE_*`).

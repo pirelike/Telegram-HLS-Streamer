@@ -428,6 +428,8 @@ _segment_downloads = {}
 _segment_download_lock = Lock()
 _scheduled_segment_prefetches = set()
 _segment_prefetch_lock = Lock()
+_virtual_segment_futures = {}
+_virtual_segment_futures_lock = Lock()
 _last_player_segment = {}          # (job_id, prefix) -> segment_key
 _last_player_segment_lock = Lock()
 
@@ -2588,6 +2590,59 @@ def _release_segment_prefetch(cache_key):
         _scheduled_segment_prefetches.discard(cache_key)
 
 
+class _VirtualSegmentNotFoundError(RuntimeError):
+    """Raised when the backing tier-0 segment for a virtual segment is missing."""
+
+
+class _VirtualSegmentBusyError(RuntimeError):
+    """Raised when a virtual segment could not acquire an encode slot in time."""
+
+
+def _resolve_virtual_tier_bitrate(target_height):
+    """Return the configured bitrate for a virtual tier height, or None."""
+    return next(
+        (tier["bitrate"] for tier in Config.ABR_TIERS if tier["height"] == target_height),
+        None,
+    )
+
+
+def _get_virtual_segment_context(segment_key):
+    """Parse a virtual segment key into (target_height, filename)."""
+    m = _VIRTUAL_KEY_RE.match(segment_key)
+    if not m:
+        return None, None
+    return int(m.group(1)), m.group(2)
+
+
+def _has_virtual_segment_future(cache_key):
+    """Return whether a virtual segment transcode is already in flight."""
+    with _virtual_segment_futures_lock:
+        return cache_key in _virtual_segment_futures
+
+
+def _ensure_virtual_segment_future(job_id, segment_key, target_height, tier_bitrate):
+    """Return the shared future for building a virtual segment, starting it once."""
+    cache_key = f"{job_id}/{segment_key}"
+    with _virtual_segment_futures_lock:
+        future = _virtual_segment_futures.get(cache_key)
+        if future is not None:
+            return future, False
+
+        future = asyncio.run_coroutine_threadsafe(
+            _build_virtual_segment(job_id, segment_key, target_height, tier_bitrate),
+            _async_loop,
+        )
+        _virtual_segment_futures[cache_key] = future
+
+    def _cleanup(done_future):
+        with _virtual_segment_futures_lock:
+            if _virtual_segment_futures.get(cache_key) is done_future:
+                del _virtual_segment_futures[cache_key]
+
+    future.add_done_callback(_cleanup)
+    return future, True
+
+
 def _stream_segment_owner(state, first_item):
     """Yield stream items for the owner request while the async download runs."""
     item = first_item
@@ -2745,6 +2800,137 @@ def _schedule_segment_prefetch(job_id, segment_key, *, _from_chain=False):
         _async_loop.call_soon_threadsafe(_start_batch_prefetch, to_prefetch, not _from_chain)
 
 
+async def _build_virtual_segment(job_id, segment_key, target_height, tier_bitrate):
+    """Fetch tier-0 bytes, transcode once, cache the virtual segment, and return it."""
+    cache_key = f"{job_id}/{segment_key}"
+    cached = _segment_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    _, filename = _get_virtual_segment_context(segment_key)
+    if not filename:
+        raise _VirtualSegmentNotFoundError("Invalid virtual segment key")
+
+    tier0_key = f"video_0/{filename}"
+    info = get_segment_info(job_id, tier0_key)
+    if not info:
+        raise _VirtualSegmentNotFoundError(f"Tier-0 segment not found: {tier0_key}")
+
+    tier0_cache_key = f"{job_id}/{tier0_key}"
+    tier0_bytes = _segment_cache.get(tier0_cache_key)
+    if tier0_bytes is None:
+        tier0_bytes = await _fetch_segment_bytes(info["file_id"], info["bot_index"], tier0_cache_key)
+
+    acquired = await asyncio.to_thread(_transcode_semaphore.acquire, timeout=30)
+    if not acquired:
+        raise _VirtualSegmentBusyError(f"Transcode queue full for {cache_key}")
+
+    try:
+        transcoded = await asyncio.to_thread(
+            transcode_segment,
+            tier0_bytes,
+            target_height,
+            tier_bitrate,
+        )
+    finally:
+        _transcode_semaphore.release()
+
+    _segment_cache.put(cache_key, transcoded)
+    return transcoded
+
+
+async def _prefetch_virtual_segment(job_id, segment_key, target_height, tier_bitrate):
+    """Best-effort background warmup for a virtual segment."""
+    cache_key = f"{job_id}/{segment_key}"
+    try:
+        if _segment_cache.has(cache_key):
+            return
+        future, _ = _ensure_virtual_segment_future(job_id, segment_key, target_height, tier_bitrate)
+        await asyncio.wrap_future(future)
+    except Exception as exc:
+        logger.debug("Virtual segment prefetch failed %s: %s", cache_key, exc)
+
+
+def _schedule_virtual_segment_prefetch(job_id, segment_key, *, _from_chain=False):
+    """Schedule background transcodes to keep a virtual tier warm ahead of playback."""
+    prefetch_count = max(0, Config.SEGMENT_PREFETCH_COUNT)
+    if prefetch_count <= 0:
+        return
+
+    if _segment_cache.max_bytes <= 0:
+        return
+
+    if (
+        Config.SEGMENT_PREFETCH_MIN_FREE_BYTES > 0
+        and _segment_cache.free_bytes < Config.SEGMENT_PREFETCH_MIN_FREE_BYTES
+    ):
+        return
+
+    target_height, filename = _get_virtual_segment_context(segment_key)
+    if not filename or not segment_key.endswith(".ts"):
+        return
+
+    tier_bitrate = _resolve_virtual_tier_bitrate(target_height)
+    if tier_bitrate is None:
+        return
+
+    segments = db.get_segments_for_prefix(job_id, "video_0")
+    if not segments:
+        return
+
+    current_index = None
+    for index, segment in enumerate(segments):
+        if segment["segment_key"].split("/", 1)[-1] == filename:
+            current_index = index
+            break
+
+    if current_index is None:
+        return
+
+    prefix = _get_segment_prefix(segment_key) or f"virtual_{target_height}p"
+    buffered_ahead = 0
+    n_cached = 0
+    n_inflight = 0
+    started = []
+    for segment in segments[current_index + 1:]:
+        if buffered_ahead >= prefetch_count:
+            break
+
+        next_filename = segment["segment_key"].split("/", 1)[-1]
+        next_segment_key = f"virtual_{target_height}p/{next_filename}"
+        next_cache_key = f"{job_id}/{next_segment_key}"
+
+        if _segment_cache.has(next_cache_key):
+            buffered_ahead += 1
+            n_cached += 1
+            continue
+
+        if _has_virtual_segment_future(next_cache_key):
+            buffered_ahead += 1
+            n_inflight += 1
+            continue
+
+        buffered_ahead += 1
+        started.append(next_segment_key)
+        _ensure_virtual_segment_future(job_id, next_segment_key, target_height, tier_bitrate)
+        _async_loop.call_soon_threadsafe(
+            asyncio.create_task,
+            _prefetch_virtual_segment(job_id, next_segment_key, target_height, tier_bitrate),
+        )
+
+    logger.info(
+        "Virtual prefetch [%s/%s pos=%s]: ahead=%d (cached=%d inflight=%d) new=%d chain=%s",
+        job_id[:8],
+        prefix,
+        filename,
+        buffered_ahead,
+        n_cached,
+        n_inflight,
+        len(started),
+        _from_chain,
+    )
+
+
 # ─── Thumbnail Proxy ───
 
 @app.route("/thumbnail/<job_id>")
@@ -2797,59 +2983,43 @@ def _serve_virtual_segment(job_id, segment_key):
     The tier-0 segment is fetched from Telegram (or the LRU cache), transcoded via
     FFmpeg to the target resolution/bitrate, cached, and returned as video/mp2t.
     """
-    m = _VIRTUAL_KEY_RE.match(segment_key)
-    if not m:
+    target_height, filename = _get_virtual_segment_context(segment_key)
+    if not filename:
         return jsonify({"error": "Invalid virtual segment key"}), 400
-    target_height = int(m.group(1))
-    filename = m.group(2)
 
-    tier_bitrate = next(
-        (t["bitrate"] for t in Config.ABR_TIERS if t["height"] == target_height), None
-    )
+    tier_bitrate = _resolve_virtual_tier_bitrate(target_height)
     if tier_bitrate is None:
         return jsonify({"error": "Virtual tier not configured"}), 404
 
+    prefix = _get_segment_prefix(segment_key)
+    if prefix and segment_key.endswith(".ts"):
+        with _last_player_segment_lock:
+            _last_player_segment[(job_id, prefix)] = segment_key
     # 1. Return from virtual cache if already transcoded
     virtual_cache_key = f"{job_id}/{segment_key}"
     cached = _segment_cache.get(virtual_cache_key)
     if cached is not None:
         logger.debug("Virtual segment cache HIT: %s", virtual_cache_key)
+        _schedule_virtual_segment_prefetch(job_id, segment_key)
         return Response(cached, content_type="video/mp2t",
                         headers={"Cache-Control": "public, max-age=86400"})
 
-    # 2. Resolve tier-0 segment info from DB
-    tier0_key = f"video_0/{filename}"
-    info = get_segment_info(job_id, tier0_key)
-    if not info:
+    try:
+        future, _ = _ensure_virtual_segment_future(job_id, segment_key, target_height, tier_bitrate)
+        transcoded = future.result(timeout=150)
+    except concurrent.futures.TimeoutError:
+        logger.warning("Virtual transcode timed out for %s", virtual_cache_key)
+        return jsonify({"error": "Transcode timed out"}), 504
+    except _VirtualSegmentNotFoundError:
         return jsonify({"error": "Tier-0 segment not found"}), 404
-
-    # 3. Fetch tier-0 bytes (LRU cache or Telegram download)
-    tier0_cache_key = f"{job_id}/{tier0_key}"
-    tier0_bytes = _segment_cache.get(tier0_cache_key)
-    if tier0_bytes is None:
-        try:
-            tier0_bytes = _run_async(
-                _fetch_segment_bytes(info["file_id"], info["bot_index"], tier0_cache_key),
-                timeout=60,
-            )
-        except Exception as exc:
-            logger.warning("Failed to fetch tier-0 segment %s: %s", tier0_key, exc)
-            return jsonify({"error": "Could not fetch source segment from Telegram"}), 500
-
-    # 4. Transcode with concurrency limit
-    if not _transcode_semaphore.acquire(timeout=30):
+    except _VirtualSegmentBusyError:
         logger.warning("Transcode semaphore timeout for %s", virtual_cache_key)
         return jsonify({"error": "Transcode queue full, retry later"}), 503
-    try:
-        transcoded = transcode_segment(tier0_bytes, target_height, tier_bitrate)
     except RuntimeError as exc:
         logger.error("transcode_segment failed for %s: %s", virtual_cache_key, exc)
         return jsonify({"error": "Transcode failed"}), 500
-    finally:
-        _transcode_semaphore.release()
 
-    # 5. Cache and return
-    _segment_cache.put(virtual_cache_key, transcoded)
+    _schedule_virtual_segment_prefetch(job_id, segment_key)
     return Response(transcoded, content_type="video/mp2t",
                     headers={"Cache-Control": "public, max-age=86400"})
 
