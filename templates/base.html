@@ -42,11 +42,13 @@
 
 {% block sidebar %}
 <aside class="sidebar" id="sidebar">
-    <a class="sidebar-item" href="/"><i class="sidebar-icon material-icons-round">home</i> Home</a>
-    <a class="sidebar-item" href="/?category=Film"><i class="sidebar-icon material-icons-round">movie</i> Films</a>
-    <a class="sidebar-item" href="/?category=Series"><i class="sidebar-icon material-icons-round">tv</i> Series</a>
-    <a class="sidebar-item" href="/?category=Anime Film"><i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films</a>
-    <a class="sidebar-item" href="/?category=Anime TV"><i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV</a>
+    <div class="sidebar-inner">
+        <a class="sidebar-item {% if active_sidebar == 'home' %}active{% endif %}" href="/"><i class="sidebar-icon material-icons-round">home</i> Home</a>
+        <a class="sidebar-item {% if active_sidebar == 'films' %}active{% endif %}" href="/films"><i class="sidebar-icon material-icons-round">movie</i> Films</a>
+        <a class="sidebar-item {% if active_sidebar == 'series' %}active{% endif %}" href="/series"><i class="sidebar-icon material-icons-round">tv</i> Series</a>
+        <a class="sidebar-item {% if active_sidebar == 'anime-films' %}active{% endif %}" href="/anime-films"><i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films</a>
+        <a class="sidebar-item {% if active_sidebar == 'anime-tv' %}active{% endif %}" href="/anime-tv"><i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV</a>
+    </div>
 </aside>
 {% endblock %}
 

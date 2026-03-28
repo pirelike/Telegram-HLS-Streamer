@@ -3,96 +3,65 @@ const JOBS_PER_PAGE = 20;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let allJobs = [];
-let activeCategory = 'all';
 let searchQuery = '';
 let jobsPage = 1;
 let hasMoreJobs = false;
-let navStack = [];
-
-// ─── Navigation ──────────────────────────────────────────────────────────────
-function resetNav(label) {
-    navStack = [{type: 'root', label: label || 'Browse'}];
-}
-
-function pushNav(item) {
-    navStack.push(item);
-    loadJobs();
-    window.scrollTo(0, 0);
-}
-
-function popNav(index) {
-    if (index === undefined) navStack.pop();
-    else navStack = navStack.slice(0, index + 1);
-    loadJobs();
-    window.scrollTo(0, 0);
-}
-
-function renderBreadcrumbs() {
-    if (navStack.length <= 1) return '';
-    return `<div class="breadcrumb">
-        ${navStack.map((item, i) => {
-            const isLast = i === navStack.length - 1;
-            return `<span class="breadcrumb-item ${isLast ? 'active' : ''}" onclick="${isLast ? '' : `popNav(${i})`}">
-                ${escapeHtml(item.label)}
-            </span>${isLast ? '' : '<i class="material-icons-round">chevron_right</i>'}`;
-        }).join('')}
-    </div>`;
-}
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
 const searchInput = document.getElementById('searchInput');
 const videosContainer = document.getElementById('videosContainer');
 const loadMoreBtn = document.getElementById('loadMoreBtn');
 
-// ─── Category ────────────────────────────────────────────────────────────────
-function setCategory(cat) {
-    activeCategory = cat;
-    const labels = { all: 'Home', Film: 'Films', Series: 'Series', 'Anime Film': 'Anime Films', 'Anime TV': 'Anime TV' };
-    resetNav(labels[cat] || cat);
-    document.querySelectorAll('.sidebar-item[data-category]').forEach(el => {
-        el.classList.toggle('active', el.dataset.category === cat);
-    });
-    loadJobs();
-    if (window.innerWidth <= 1024) { sidebarOpen = false; updateSidebar(); }
-}
-
 // ─── Search ──────────────────────────────────────────────────────────────────
 let searchTimeout = null;
 searchInput.addEventListener('input', () => {
     searchQuery = searchInput.value.trim();
     clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => {
-        resetNav(activeCategory === 'all' ? 'Search Results' : undefined);
-        loadJobs();
-    }, 400);
+    searchTimeout = setTimeout(loadJobs, 400);
 });
+
+// ─── Breadcrumbs ─────────────────────────────────────────────────────────────
+function renderBreadcrumbs() {
+    const crumbs = window.BROWSE_CTX.breadcrumbs || [];
+    if (crumbs.length <= 1) return '';
+    return `<div class="breadcrumb">
+        ${crumbs.map((c, i) => {
+            const isLast = i === crumbs.length - 1;
+            return isLast
+                ? `<span class="breadcrumb-item active">${escapeHtml(c.label)}</span>`
+                : `<a class="breadcrumb-item" href="${escapeAttr(c.href || '/')}">${escapeHtml(c.label)}</a>
+                   <i class="material-icons-round">chevron_right</i>`;
+        }).join('')}
+    </div>`;
+}
+
+// ─── Build API URL from BROWSE_CTX ───────────────────────────────────────────
+function _buildApiUrl(page) {
+    const ctx = window.BROWSE_CTX;
+    const url = new URL('/api/jobs', window.location.origin);
+    url.searchParams.set('page', page);
+    url.searchParams.set('limit', JOBS_PER_PAGE);
+    if (searchQuery) url.searchParams.set('search', searchQuery);
+    if (ctx.category !== 'all') url.searchParams.set('category', ctx.category);
+
+    if (ctx.view === 'series_list') {
+        url.searchParams.set('group_by', 'series');
+    } else if (ctx.view === 'seasons') {
+        url.searchParams.set('group_by', 'season');
+        url.searchParams.set('series_name', ctx.seriesName);
+    } else if (ctx.view === 'episodes') {
+        url.searchParams.set('series_name', ctx.seriesName);
+        if (ctx.seasonNumber !== null) url.searchParams.set('season_number', ctx.seasonNumber);
+    }
+    return url;
+}
 
 // ─── Job list ─────────────────────────────────────────────────────────────────
 function loadJobs() {
-    if (navStack.length === 0) resetNav();
     allJobs = [];
     videosContainer.innerHTML = `${renderBreadcrumbs()}<p class="no-results">Loading...</p>`;
 
-    const url = new URL('/api/jobs', window.location.origin);
-    url.searchParams.set('page', '1');
-    url.searchParams.set('limit', JOBS_PER_PAGE);
-    if (searchQuery) url.searchParams.set('search', searchQuery);
-    if (activeCategory !== 'all') url.searchParams.set('category', activeCategory);
-
-    const currentNav = navStack[navStack.length - 1];
-    if (currentNav.type === 'root') {
-        if (activeCategory === 'Series' || activeCategory === 'Anime TV') {
-            url.searchParams.set('group_by', 'series');
-        }
-    } else if (currentNav.type === 'series') {
-        url.searchParams.set('group_by', 'season');
-        url.searchParams.set('series_name', currentNav.name);
-    } else if (currentNav.type === 'season') {
-        url.searchParams.set('series_name', currentNav.series);
-        if (currentNav.season !== null) url.searchParams.set('season_number', currentNav.season);
-    }
-
-    fetch(url)
+    fetch(_buildApiUrl(1))
         .then(r => r.json())
         .then(data => {
             jobsPage = 1;
@@ -106,26 +75,7 @@ function loadJobs() {
 
 function loadMoreJobs() {
     jobsPage += 1;
-    const url = new URL('/api/jobs', window.location.origin);
-    url.searchParams.set('page', jobsPage);
-    url.searchParams.set('limit', JOBS_PER_PAGE);
-    if (searchQuery) url.searchParams.set('search', searchQuery);
-    if (activeCategory !== 'all') url.searchParams.set('category', activeCategory);
-
-    const currentNav = navStack[navStack.length - 1];
-    if (currentNav.type === 'root') {
-        if (activeCategory === 'Series' || activeCategory === 'Anime TV') {
-            url.searchParams.set('group_by', 'series');
-        }
-    } else if (currentNav.type === 'series') {
-        url.searchParams.set('group_by', 'season');
-        url.searchParams.set('series_name', currentNav.name);
-    } else if (currentNav.type === 'season') {
-        url.searchParams.set('series_name', currentNav.series);
-        if (currentNav.season !== null) url.searchParams.set('season_number', currentNav.season);
-    }
-
-    fetch(url)
+    fetch(_buildApiUrl(jobsPage))
         .then(r => r.json())
         .then(data => {
             const newJobs = data.jobs || [];
@@ -136,13 +86,9 @@ function loadMoreJobs() {
         }).catch(() => {});
 }
 
-function filteredJobs() {
-    return allJobs;
-}
-
 function renderJobs() {
-    const items = filteredJobs();
-    const currentNav = navStack[navStack.length - 1];
+    const ctx = window.BROWSE_CTX;
+    const items = allJobs;
 
     if (items.length === 0) {
         videosContainer.innerHTML = `${renderBreadcrumbs()}<div class="no-results">
@@ -153,43 +99,26 @@ function renderJobs() {
     }
 
     const headerLabels = { all: 'All Videos', Film: 'Films', Series: 'Series', 'Anime Film': 'Anime Films', 'Anime TV': 'Anime TV' };
-    const headerLabel = headerLabels[activeCategory] || activeCategory;
-
+    let sectionTitle = headerLabels[ctx.category] || ctx.category;
     let contentHtml = '';
-    let sectionTitle = headerLabel;
 
-    if (currentNav.type === 'root') {
-        if (activeCategory === 'Series' || activeCategory === 'Anime TV') {
-            contentHtml = `<div class="video-grid posters">${items.map(j => renderCard(j, 'series', {label: j.series_name, count: j.episode_count})).join('')}</div>`;
-        } else {
-            contentHtml = `<div class="video-grid">${items.map(j => renderCard(j, 'video')).join('')}</div>`;
-        }
-    } else if (currentNav.type === 'series') {
-        sectionTitle = currentNav.label;
-        contentHtml = `<div class="video-grid posters">${items.map(j => renderCard(j, 'season', {series: currentNav.name, season: j.season_number, count: j.episode_count})).join('')}</div>`;
-    } else if (currentNav.type === 'season') {
-        sectionTitle = `Season ${currentNav.season}`;
-        contentHtml = `<div class="video-grid episodes">${items.map(j => renderCard(j, 'video')).join('')}</div>`;
+    if (ctx.view === 'series_list') {
+        contentHtml = `<div class="video-grid posters">${items.map(j => renderCard(j, 'series')).join('')}</div>`;
+    } else if (ctx.view === 'seasons') {
+        sectionTitle = ctx.seriesName || sectionTitle;
+        contentHtml = `<div class="video-grid posters">${items.map(j => renderCard(j, 'season')).join('')}</div>`;
+    } else {
+        // 'grid' or 'episodes'
+        const gridClass = ctx.view === 'episodes' ? 'video-grid episodes' : 'video-grid';
+        contentHtml = `<div class="${gridClass}">${items.map(j => renderCard(j, 'video')).join('')}</div>`;
     }
 
-    const sectionHeader = `<h2 class="section-header">${sectionTitle}</h2>`;
+    const sectionHeader = `<h2 class="section-header">${escapeHtml(sectionTitle)}</h2>`;
     videosContainer.innerHTML = renderBreadcrumbs() + sectionHeader + contentHtml;
-
-    videosContainer.querySelectorAll('.video-card').forEach(card => {
-        card.addEventListener('click', () => {
-            const type = card.dataset.type;
-            if (type === 'series') {
-                pushNav({type: 'series', name: card.dataset.series, label: card.dataset.series});
-            } else if (type === 'season') {
-                pushNav({type: 'season', series: card.dataset.series, season: card.dataset.season === 'null' ? null : parseInt(card.dataset.season), label: `Season ${card.dataset.season}`});
-            } else {
-                window.location.href = `/watch/${card.dataset.jobId}`;
-            }
-        });
-    });
 }
 
-function renderCard(j, type, extra = {}) {
+function renderCard(j, type) {
+    const ctx = window.BROWSE_CTX;
     const safeId = escapeAttr(j.job_id);
     const thumbSrc = j.has_thumbnail ? `/thumbnail/${safeId}` : null;
     const gradient = jobIdToGradient(j.job_id);
@@ -199,9 +128,11 @@ function renderCard(j, type, extra = {}) {
     const placeholderStyle = thumbSrc ? 'display:none' : '';
 
     if (type === 'series') {
-        const name = extra.label || 'Unknown Series';
-        const count = extra.count || 0;
-        return `<div class="video-card poster" data-type="series" data-series="${escapeAttr(name)}">
+        const name = j.series_name || 'Unknown Series';
+        const count = j.episode_count || 0;
+        const catPath = CATEGORY_PATHS[ctx.category] || '/';
+        const href = escapeAttr(catPath + '/' + slugify(name));
+        return `<a class="video-card poster" href="${href}">
             <div class="thumb-wrap" style="background:${gradient}">
                 ${thumbHtml}
                 <div class="thumb-placeholder" style="${placeholderStyle}"><i class="material-icons-round">library_books</i></div>
@@ -211,15 +142,17 @@ function renderCard(j, type, extra = {}) {
                 <div class="card-title">${escapeHtml(name)}</div>
                 <div class="card-subtitle"><span class="dot"></span>Series</div>
             </div>
-        </div>`;
+        </a>`;
     }
 
     if (type === 'season') {
-        const series = extra.series;
-        const season = extra.season;
-        const count = extra.count || 0;
+        const season = j.season_number;
+        const count = j.episode_count || 0;
         const seasonLabel = season === null ? 'Specials' : `Season ${season}`;
-        return `<div class="video-card poster" data-type="season" data-series="${escapeAttr(series)}" data-season="${season}">
+        const catPath = CATEGORY_PATHS[ctx.category] || '/';
+        const seasonPath = season === null ? '/specials' : `/s${season}`;
+        const href = escapeAttr(catPath + '/' + (ctx.seriesSlug || slugify(ctx.seriesName || '')) + seasonPath);
+        return `<a class="video-card poster" href="${href}">
             <div class="thumb-wrap" style="background:${gradient}">
                 ${thumbHtml}
                 <div class="thumb-placeholder" style="${placeholderStyle}"><i class="material-icons-round">folder</i></div>
@@ -233,7 +166,7 @@ function renderCard(j, type, extra = {}) {
                 <div class="card-title">${seasonLabel}</div>
                 <div class="card-subtitle"><span class="dot"></span>${count} Episode${count !== 1 ? 's' : ''}</div>
             </div>
-        </div>`;
+        </a>`;
     }
 
     // Default video card
@@ -253,7 +186,7 @@ function renderCard(j, type, extra = {}) {
         i === 0 ? p : `<span class="sep">&bull;</span> ${p}`
     ).join(' ');
 
-    return `<div class="video-card" data-type="video" data-job-id="${safeId}">
+    return `<a class="video-card" href="/watch/${safeId}">
         <div class="thumb-wrap" style="background:${gradient}">
             ${thumbHtml}
             <div class="thumb-placeholder" style="${placeholderStyle}"><i class="material-icons-round">play_circle_filled</i></div>
@@ -263,7 +196,7 @@ function renderCard(j, type, extra = {}) {
             <div class="card-title">${title}</div>
             <div class="card-subtitle"><span class="dot"></span>${subtitleHtml}</div>
         </div>
-    </div>`;
+    </a>`;
 }
 
 // ─── Edit Metadata & Delete ───────────────────────────────────────────────────
@@ -392,10 +325,4 @@ async function saveEditModal() {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-const _urlCategory = new URLSearchParams(location.search).get('category');
-if (_urlCategory) {
-    setCategory(_urlCategory);
-} else {
-    resetNav('Home');
-    loadJobs();
-}
+loadJobs();

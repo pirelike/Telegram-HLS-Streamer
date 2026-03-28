@@ -10,12 +10,11 @@
 <main class="main" id="mainContent">
 
     <div class="player-view active">
-        <a href="/" class="back-btn" onclick="event.preventDefault(); history.length > 1 ? history.back() : location.href='/';">
-            <i class="material-icons-round">arrow_back</i> Back to browse
-        </a>
+        <div class="breadcrumb" id="watchBreadcrumb"></div>
         <div class="player-container" id="playerContainer">
             <video id="videoEl" autoplay playsinline crossorigin="anonymous"></video>
         </div>
+        <div id="episodeNav"></div>
         <div class="player-info" id="playerInfo"></div>
     </div>
 

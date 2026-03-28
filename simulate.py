@@ -215,7 +215,7 @@ def phase_processing(analysis: MediaAnalysis, job_id: str) -> tuple[ProcessingRe
                     f"[Simulated subtitle at {t:.0f}s]\n\n"
                 )
                 t = end
-        result.subtitle_files.append((vtt_path, sub_dir, sub.language, sub.title))
+        result.subtitle_files.append((vtt_path, sub_dir, sub.language, sub.title, i, sub.index))
         print(f"  subtitle  {i}  [{sub.language}] \"{sub.title}\"  → subtitles.vtt")
 
     total_segs = sum(

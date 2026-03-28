@@ -8,7 +8,20 @@ const CATEGORY_DB = {
     'Anime TV Series':{ media_type: 'Anime TV', is_series: 1 },
 };
 
+// ─── Category path map (used by browse.js for URL construction) ───────────────
+const CATEGORY_PATHS = {
+    'all': '/', 'Film': '/films', 'Series': '/series',
+    'Anime Film': '/anime-films', 'Anime TV': '/anime-tv',
+};
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
+function slugify(text) {
+    return String(text || '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+}
+
 function cleanTitle(filename) {
     if (!filename) return 'Untitled';
     let name = filename.replace(/^[0-9a-f]{16}_/i, '');
@@ -88,6 +101,8 @@ initTheme();
 
 // ─── Sidebar toggle (all pages) ──────────────────────────────────────────────
 let sidebarOpen = window.innerWidth > 1024;
+let _sidebarTransitionTimer = null;
+let _sidebarTransitionEndHandler = null;
 
 function updateSidebar() {
     const sidebar = document.getElementById('sidebar');
@@ -100,9 +115,7 @@ function updateSidebar() {
     } else {
         sidebar.classList.remove('open');
         sidebar.classList.toggle('collapsed', !sidebarOpen);
-        if (mainEl) mainEl.classList.toggle('sidebar-collapsed', !sidebarOpen);
-        sidebar.style.transform = '';
-        if (mainEl) mainEl.style.marginLeft = '';
+        if (mainEl) mainEl.classList.remove('sidebar-collapsed');
     }
 }
 
@@ -111,7 +124,42 @@ function updateSidebar() {
     if (!btn) return;
     btn.addEventListener('click', () => {
         sidebarOpen = !sidebarOpen;
-        updateSidebar();
+
+        // On desktop, freeze grid widths during sidebar transition to prevent
+        // continuous column reflow and card pop-in effect.
+        if (window.innerWidth > 1024) {
+            const sidebar = document.getElementById('sidebar');
+            const grids = document.querySelectorAll('.video-grid');
+
+            // Cancel any pending unfreeze from a previous click.
+            if (_sidebarTransitionTimer) clearTimeout(_sidebarTransitionTimer);
+            if (sidebar && _sidebarTransitionEndHandler) {
+                sidebar.removeEventListener('transitionend', _sidebarTransitionEndHandler);
+            }
+
+            // Snapshot current width of each grid to freeze it during animation.
+            grids.forEach(g => { g.style.width = g.offsetWidth + 'px'; });
+
+            updateSidebar();
+
+            let unfrozen = false;
+            function unfreezeGrids() {
+                if (unfrozen) return;
+                unfrozen = true;
+                _sidebarTransitionTimer = null;
+                _sidebarTransitionEndHandler = null;
+                grids.forEach(g => { g.style.width = ''; });
+                if (sidebar) sidebar.removeEventListener('transitionend', _sidebarTransitionEndHandler);
+            }
+            _sidebarTransitionEndHandler = function (e) {
+                if (e.propertyName === 'width') unfreezeGrids();
+            };
+            if (sidebar) sidebar.addEventListener('transitionend', _sidebarTransitionEndHandler);
+            // Safety fallback slightly longer than --transition (250ms).
+            _sidebarTransitionTimer = setTimeout(unfreezeGrids, 300);
+        } else {
+            updateSidebar();
+        }
     });
     window.addEventListener('resize', updateSidebar);
     updateSidebar();

@@ -1,12 +1,5 @@
 {% extends "base.html" %}
 
-{% block navbar_left %}
-<button class="hamburger" id="hamburgerBtn" title="Toggle sidebar">
-    <i class="material-icons-round">menu</i>
-</button>
-<a class="logo" href="/" onclick="setCategory('all'); return false;">TG<span>HLS</span></a>
-{% endblock %}
-
 {% block navbar_center %}
 <div class="search-bar">
     <input class="search-input" id="searchInput" type="text" placeholder="Search videos...">
@@ -14,26 +7,6 @@
         <i class="material-icons-round">search</i>
     </button>
 </div>
-{% endblock %}
-
-{% block sidebar %}
-<aside class="sidebar" id="sidebar">
-    <div class="sidebar-item active" data-category="all" onclick="setCategory('all')">
-        <i class="sidebar-icon material-icons-round">home</i> Home
-    </div>
-    <div class="sidebar-item" data-category="Film" onclick="setCategory('Film')">
-        <i class="sidebar-icon material-icons-round">movie</i> Films
-    </div>
-    <div class="sidebar-item" data-category="Series" onclick="setCategory('Series')">
-        <i class="sidebar-icon material-icons-round">tv</i> Series
-    </div>
-    <div class="sidebar-item" data-category="Anime Film" onclick="setCategory('Anime Film')">
-        <i class="sidebar-icon material-icons-round">auto_awesome</i> Anime Films
-    </div>
-    <div class="sidebar-item" data-category="Anime TV" onclick="setCategory('Anime TV')">
-        <i class="sidebar-icon material-icons-round">theater_comedy</i> Anime TV
-    </div>
-</aside>
 {% endblock %}
 
 {% block body %}
@@ -99,5 +72,15 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+window.BROWSE_CTX = {
+    category: {{ browse_category | tojson }},
+    view: {{ browse_view | tojson }},
+    seriesName: {{ series_name | tojson if series_name else 'null' }},
+    seriesSlug: {{ series_slug | tojson if series_slug else 'null' }},
+    seasonNumber: {{ season_number | tojson if season_number is not none else 'null' }},
+    breadcrumbs: {{ breadcrumbs | tojson }}
+};
+</script>
 <script src="/static/browse.js"></script>
 {% endblock %}

@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from urllib.parse import urlsplit
 from threading import Lock, RLock, Thread
@@ -39,7 +40,7 @@ except ImportError:  # pragma: no cover - fallback for minimal test environments
         return cleaned[:255]
 
 from flask import (
-    Flask, jsonify, render_template, request, Response, stream_with_context,
+    Flask, abort, jsonify, render_template, request, Response, stream_with_context,
 )
 
 from config import Config, _BITRATE_RE
@@ -846,11 +847,145 @@ _start_folder_watcher()
 _start_retention_cleanup()
 
 
+# ─── Browse helpers ───
+
+def _slugify(text):
+    """Convert a series name to a URL-safe slug."""
+    original = text or ''
+    text = unicodedata.normalize('NFKD', original).encode('ascii', 'ignore').decode()
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '-', text)
+    text = re.sub(r'-+', '-', text).strip('-')
+    if not text:
+        # Fallback for names that produce no ASCII chars (e.g. pure CJK)
+        text = format(abs(hash(original)) % 0xFFFFFF, 'x')
+    return text
+
+
+def _resolve_series_slug(media_type, slug):
+    """Return the series_name that maps to the given slug, or None."""
+    series_rows = db.list_jobs(category=media_type, group_by='series', limit=10000, offset=0)
+    for row in series_rows:
+        if _slugify(row.get('series_name', '')) == slug:
+            return row['series_name']
+    return None
+
+
+_CATEGORY_LABELS = {
+    'all': 'Home', 'Film': 'Films', 'Series': 'Series',
+    'Anime Film': 'Anime Films', 'Anime TV': 'Anime TV',
+}
+_CATEGORY_PATHS = {
+    'all': '/', 'Film': '/films', 'Series': '/series',
+    'Anime Film': '/anime-films', 'Anime TV': '/anime-tv',
+}
+_CATEGORY_TO_SIDEBAR = {
+    'all': 'home', 'Film': 'films', 'Series': 'series',
+    'Anime Film': 'anime-films', 'Anime TV': 'anime-tv',
+}
+
+
+def _build_breadcrumbs(category, view='grid', series_name=None, series_slug=None, season=None):
+    crumbs = [{'label': _CATEGORY_LABELS[category], 'href': _CATEGORY_PATHS[category]}]
+    if series_name:
+        crumbs.append({'label': series_name, 'href': _CATEGORY_PATHS[category] + '/' + series_slug})
+    if season is not None:
+        crumbs.append({'label': f'Season {season}', 'href': None})
+    elif view == 'episodes' and season is None:
+        # specials page
+        crumbs.append({'label': 'Specials', 'href': None})
+    # The last crumb is always the current page (no link)
+    crumbs[-1]['href'] = None
+    return crumbs
+
+
+def _browse_page(category='all', view='grid', series_name=None, series_slug=None, season=None):
+    breadcrumbs = _build_breadcrumbs(category, view=view, series_name=series_name, series_slug=series_slug, season=season)
+    return render_template(
+        "index.html",
+        browse_category=category,
+        browse_view=view,
+        series_name=series_name,
+        series_slug=series_slug,
+        season_number=season,
+        breadcrumbs=breadcrumbs,
+        active_sidebar=_CATEGORY_TO_SIDEBAR.get(category, 'home'),
+    )
+
+
 # ─── Web UI ───
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return _browse_page(category='all', view='grid')
+
+
+@app.route("/films")
+def browse_films():
+    return _browse_page(category='Film', view='grid')
+
+
+@app.route("/series")
+def browse_series_list():
+    return _browse_page(category='Series', view='series_list')
+
+
+@app.route("/series/<slug>")
+def browse_series(slug):
+    name = _resolve_series_slug('Series', slug)
+    if not name:
+        abort(404)
+    return _browse_page(category='Series', view='seasons', series_name=name, series_slug=slug)
+
+
+@app.route("/series/<slug>/s<int:season>")
+def browse_series_season(slug, season):
+    name = _resolve_series_slug('Series', slug)
+    if not name:
+        abort(404)
+    return _browse_page(category='Series', view='episodes', series_name=name, series_slug=slug, season=season)
+
+
+@app.route("/series/<slug>/specials")
+def browse_series_specials(slug):
+    name = _resolve_series_slug('Series', slug)
+    if not name:
+        abort(404)
+    return _browse_page(category='Series', view='episodes', series_name=name, series_slug=slug, season=None)
+
+
+@app.route("/anime-films")
+def browse_anime_films():
+    return _browse_page(category='Anime Film', view='grid')
+
+
+@app.route("/anime-tv")
+def browse_anime_tv_list():
+    return _browse_page(category='Anime TV', view='series_list')
+
+
+@app.route("/anime-tv/<slug>")
+def browse_anime_tv(slug):
+    name = _resolve_series_slug('Anime TV', slug)
+    if not name:
+        abort(404)
+    return _browse_page(category='Anime TV', view='seasons', series_name=name, series_slug=slug)
+
+
+@app.route("/anime-tv/<slug>/s<int:season>")
+def browse_anime_tv_season(slug, season):
+    name = _resolve_series_slug('Anime TV', slug)
+    if not name:
+        abort(404)
+    return _browse_page(category='Anime TV', view='episodes', series_name=name, series_slug=slug, season=season)
+
+
+@app.route("/anime-tv/<slug>/specials")
+def browse_anime_tv_specials(slug):
+    name = _resolve_series_slug('Anime TV', slug)
+    if not name:
+        abort(404)
+    return _browse_page(category='Anime TV', view='episodes', series_name=name, series_slug=slug, season=None)
 
 
 @app.route("/upload")

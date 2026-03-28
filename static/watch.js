@@ -3,6 +3,7 @@ let shakaPlayer = null;
 let shakaUi = null;
 let currentJob = null;
 let attemptedQuotaRecovery = false;
+let currentSiblings = [];
 
 // ─── Player init ──────────────────────────────────────────────────────────────
 async function initPlayer(job) {
@@ -135,6 +136,102 @@ function renderInfoPanel(job) {
         </div>`;
 }
 
+// ─── Watch breadcrumb ─────────────────────────────────────────────────────────
+function renderWatchBreadcrumb(job) {
+    const el = document.getElementById('watchBreadcrumb');
+    if (!el) return;
+    const catLabels = { Film: 'Films', Series: 'Series', 'Anime Film': 'Anime Films', 'Anime TV': 'Anime TV' };
+    const catLabel = catLabels[job.media_type] || job.media_type || 'Home';
+    const catPath = CATEGORY_PATHS[job.media_type] || '/';
+    const crumbs = [{ label: catLabel, href: catPath }];
+    if (job.is_series && job.series_name) {
+        if (job.media_type === 'Series' || job.media_type === 'Anime TV') {
+            const s = slugify(job.series_name);
+            crumbs.push({ label: job.series_name, href: catPath + '/' + s });
+            if (job.season_number != null) {
+                crumbs.push({ label: `Season ${job.season_number}`, href: catPath + '/' + s + '/s' + job.season_number });
+            } else {
+                crumbs.push({ label: 'Specials', href: catPath + '/' + s + '/specials' });
+            }
+        } else {
+            crumbs.push({ label: job.series_name, href: null });
+        }
+    }
+    el.innerHTML = crumbs.map((c, i) => {
+        const item = c.href
+            ? `<a class="breadcrumb-item" href="${escapeAttr(c.href)}">${escapeHtml(c.label)}</a>`
+            : `<span class="breadcrumb-item">${escapeHtml(c.label)}</span>`;
+        return item + (i < crumbs.length - 1 ? '<i class="material-icons-round">chevron_right</i>' : '');
+    }).join('');
+}
+
+// ─── Episode navigation ───────────────────────────────────────────────────────
+async function fetchSiblings(job) {
+    if (!job.is_series || !job.series_name) return [];
+    const url = new URL('/api/jobs', window.location.origin);
+    url.searchParams.set('series_name', job.series_name);
+    url.searchParams.set('category', job.media_type);
+    if (job.media_type !== 'Film' && job.season_number != null) {
+        url.searchParams.set('season_number', job.season_number);
+    }
+    url.searchParams.set('limit', '1000');
+    try {
+        const resp = await fetch(url);
+        const data = await resp.json();
+        const jobs = data.jobs || [];
+        if (job.media_type === 'Film') {
+            jobs.sort((a, b) => (a.part_number || 0) - (b.part_number || 0));
+        } else {
+            jobs.sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
+        }
+        return jobs;
+    } catch { return []; }
+}
+
+function renderEpisodeNav(job, siblings) {
+    const el = document.getElementById('episodeNav');
+    if (!el) return;
+    if (siblings.length < 2) { el.innerHTML = ''; return; }
+    const idx = siblings.findIndex(s => s.job_id === job.job_id);
+    if (idx === -1) { el.innerHTML = ''; return; }
+    const prev = idx > 0 ? siblings[idx - 1] : null;
+    const next = idx < siblings.length - 1 ? siblings[idx + 1] : null;
+    if (!prev && !next) { el.innerHTML = ''; return; }
+
+    function epLabel(s) {
+        if (job.media_type === 'Film') {
+            return s.part_number != null ? `Part ${s.part_number}` : cleanTitle(s.filename || s.job_id);
+        }
+        if (s.season_number != null && s.episode_number != null) {
+            return `S${String(s.season_number).padStart(2,'0')}E${String(s.episode_number).padStart(2,'0')}`;
+        }
+        if (s.episode_number != null) return `Ep ${s.episode_number}`;
+        return cleanTitle(s.filename || s.job_id);
+    }
+
+    const prevHtml = prev
+        ? `<a class="ep-nav-btn" href="/watch/${escapeAttr(prev.job_id)}">
+            <i class="material-icons-round">chevron_left</i>
+            <div class="ep-nav-info">
+                <span class="ep-nav-dir">Previous</span>
+                <span class="ep-nav-ep">${escapeHtml(epLabel(prev))}</span>
+            </div>
+           </a>`
+        : `<div class="ep-nav-btn ep-nav-spacer"></div>`;
+
+    const nextHtml = next
+        ? `<a class="ep-nav-btn" href="/watch/${escapeAttr(next.job_id)}">
+            <div class="ep-nav-info" style="text-align:right">
+                <span class="ep-nav-dir">Next</span>
+                <span class="ep-nav-ep">${escapeHtml(epLabel(next))}</span>
+            </div>
+            <i class="material-icons-round">chevron_right</i>
+           </a>`
+        : `<div class="ep-nav-btn ep-nav-spacer"></div>`;
+
+    el.innerHTML = `<div class="episode-nav">${prevHtml}${nextHtml}</div>`;
+}
+
 function copyPlayerUrl() {
     const el = document.getElementById('playerM3u8Url');
     if (el) navigator.clipboard.writeText(el.textContent).then(() => {
@@ -257,6 +354,8 @@ async function saveEditModal() {
 
         closeEditModal();
         renderInfoPanel(currentJob);
+        renderWatchBreadcrumb(currentJob);
+        fetchSiblings(currentJob).then(s => { currentSiblings = s; renderEpisodeNav(currentJob, s); });
     } catch (e) {
         alert(e.message);
     } finally {
@@ -275,13 +374,20 @@ async function saveEditModal() {
         return;
     }
 
+    let job;
     try {
         const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
         if (!resp.ok) throw new Error('Job not found');
-        const job = await resp.json();
-        await initPlayer(job);
+        job = await resp.json();
     } catch (e) {
         document.getElementById('playerInfo').innerHTML =
             `<p style="color:var(--danger)">Could not load video: ${escapeHtml(e.message)}</p>`;
+        return;
     }
+
+    renderWatchBreadcrumb(job);
+    initPlayer(job); // non-blocking — handles its own errors
+
+    currentSiblings = await fetchSiblings(job);
+    renderEpisodeNav(job, currentSiblings);
 })();
