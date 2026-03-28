@@ -407,14 +407,26 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     def test_get_abr_tiers_includes_same_resolution(self):
         # Source is 1080p — should include the 1080p tier (same-res lower bitrate)
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(1080)
         heights = [t["height"] for t in tiers]
         self.assertIn(1080, heights)
         self.assertNotIn(2160, heights)
 
     def test_get_abr_tiers_720p_includes_720_and_lower(self):
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(720)
         heights = [t["height"] for t in tiers]
         self.assertIn(720, heights)
@@ -423,26 +435,50 @@ class TestVideoProcessorHelpers(unittest.TestCase):
         self.assertNotIn(1080, heights)
 
     def test_get_abr_tiers_4k_includes_all(self):
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(2160)
         heights = [t["height"] for t in tiers]
         for expected_h in [1080, 720, 480, 360]:
             self.assertIn(expected_h, heights)
 
     def test_get_abr_tiers_360p_includes_360(self):
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(360)
         heights = [t["height"] for t in tiers]
         self.assertIn(360, heights)
 
     def test_get_abr_tiers_below_all_returns_empty(self):
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(240)
         self.assertEqual(tiers, [])
 
     def test_get_abr_tiers_exclude_same_resolution_1080p(self):
         """Copy mode: 1080p source excludes 1080p ABR tier, keeps lower."""
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(1080, exclude_same_resolution=True)
         heights = [t["height"] for t in tiers]
         self.assertNotIn(1080, heights)
@@ -452,7 +488,13 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     def test_get_abr_tiers_exclude_same_resolution_720p(self):
         """Copy mode: 720p source excludes 720p tier, keeps lower."""
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(720, exclude_same_resolution=True)
         heights = [t["height"] for t in tiers]
         self.assertNotIn(720, heights)
@@ -461,7 +503,13 @@ class TestVideoProcessorHelpers(unittest.TestCase):
 
     def test_get_abr_tiers_exclude_same_resolution_360p_returns_empty(self):
         """Copy mode: 360p source with strict filter returns no ABR tiers."""
-        with patch.object(vp.Config, "ABR_ENABLED", True):
+        with patch.object(vp.Config, "ABR_ENABLED", True), \
+             patch.object(vp.Config, "ABR_TIERS", [
+                 {"height": 1080, "bitrate": "10M"},
+                 {"height": 720, "bitrate": "5M"},
+                 {"height": 480, "bitrate": "2M"},
+                 {"height": 360, "bitrate": "1200k"},
+             ]):
             tiers = vp._get_abr_tiers(360, exclude_same_resolution=True)
         self.assertEqual(tiers, [])
 

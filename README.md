@@ -269,6 +269,8 @@ The included UI (`templates/index.html`) supports:
 - listing previous jobs
 - copyable master playlist URL
 
+The watch page (`/watch/<job_id>`) embeds a Shaka Player instance. Metadata (title, duration, track counts, action buttons) renders immediately from the pre-fetched job object before the HLS manifest loads. The player starts at the **highest** available ABR quality tier (`abr.defaultBandwidthEstimate` is set to 10 Mbps) and adapts downward only if bandwidth is constrained.
+
 The UI uses this upload flow:
 1. `POST /api/upload/init`
 2. `POST /api/upload/chunk` repeatedly
