@@ -210,7 +210,11 @@ class TestConfigLoadBots(unittest.TestCase):
         self.assertEqual(len(bots), 1)
         self.assertEqual(bots[0]["channel_id"], -1001)
         self.assertTrue(
-            any("Skipping duplicate Telegram bot token" in message for message in captured.output)
+            any(
+                "Skipping duplicate Telegram bot token in TELEGRAM_BOT_TOKEN_4; token already loaded from TELEGRAM_BOT_TOKEN_1"
+                in message
+                for message in captured.output
+            )
         )
 
 
